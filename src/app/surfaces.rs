@@ -5,7 +5,7 @@ const DETAIL_DESCRIPTION_ROW_LIMIT: usize = 2000;
 /// Find the first and last row indices in `rows` belonging to the
 /// comment at `selection`. Returns (0, 0) when no rows match (empty list
 /// or out-of-range selection).
-fn comment_row_span(rows: &[CommentSurfaceRow], selection: usize) -> (usize, usize) {
+pub(super) fn comment_row_span(rows: &[CommentSurfaceRow], selection: usize) -> (usize, usize) {
     let first = rows.iter().position(|r| r.comment_index() == selection);
     let last = rows.iter().rposition(|r| r.comment_index() == selection);
     match (first, last) {
@@ -276,7 +276,7 @@ impl App {
         let rule = Style::new().fg(palette.rule).bg(palette.bg);
         let key = palette.text(TextRole::Key);
 
-        let viewer = self.github.viewer.as_deref().unwrap_or("Palanikannan1437");
+        let viewer = self.github.viewer.as_deref().unwrap_or("local");
         let scope = self.scope_label();
         AppHeader {
             brand: "QUIVER",
@@ -450,7 +450,7 @@ impl App {
             y += 1;
         }
 
-        if let Some(notice) = self.github.notice() {
+        if let Some(notice) = self.github_notice() {
             if y + 1 < content.bottom() {
                 y += 1;
                 frame.render_widget(
@@ -560,7 +560,7 @@ impl App {
             y += 1;
         }
 
-        if let Some(notice) = self.github.notice() {
+        if let Some(notice) = self.github_notice() {
             if y + 1 < queue.bottom() {
                 y += 1;
                 frame.render_widget(
@@ -1051,6 +1051,9 @@ impl App {
     }
 
     pub(super) fn github_summary(&self) -> String {
+        if !self.github_auth.can_load_github() {
+            return self.github_auth.summary().to_string();
+        }
         let queue = self.query_client.get(&QueryKey::GitHubQueue);
         if queue.is_initial_loading() {
             return "loading GitHub PRs…".to_string();
@@ -1070,6 +1073,13 @@ impl App {
                 .unwrap_or_else(|| self.github.summary().to_string()),
             QueryStatus::Pending => self.github.summary().to_string(),
         }
+    }
+
+    pub(super) fn github_notice(&self) -> Option<String> {
+        if !self.github_auth.can_load_github() {
+            return Some(self.github_auth.notice().to_string());
+        }
+        self.github.notice()
     }
 
     pub(super) fn query_status_label(&self, query: QueryResult, _key: &QueryKey) -> String {

@@ -438,6 +438,13 @@ impl App {
     }
 
     pub(super) fn revalidate_queue(&mut self) {
+        let auth = self.refresh_github_auth_gate();
+        if !auth.can_load_github() {
+            if let Some(error) = auth.error() {
+                self.query_client.finish_error(QueryKey::GitHubQueue, error);
+            }
+            return;
+        }
         if !self.query_client.start_fetch(QueryKey::GitHubQueue) {
             return;
         }
@@ -457,6 +464,9 @@ impl App {
     }
 
     pub(super) fn revalidate_pull_request_comments(&mut self, repository: String, number: u32) {
+        if !self.ensure_github_auth() {
+            return;
+        }
         let query_key = QueryKey::pull_request_comments(&repository, number);
         if !self.query_client.start_fetch(query_key) {
             return;
@@ -473,6 +483,9 @@ impl App {
     }
 
     pub(super) fn revalidate_pull_request_diff(&mut self, repository: String, number: u32) {
+        if !self.ensure_github_auth() {
+            return;
+        }
         let query_key = QueryKey::pull_request_diff(&repository, number);
         if !self.query_client.start_fetch(query_key) {
             return;

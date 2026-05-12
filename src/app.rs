@@ -11,8 +11,13 @@ use std::{
 };
 
 use color_eyre::Result;
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -49,13 +54,14 @@ use crate::components::{app_chrome::AppHeader, command_palette::CommandPalette};
 use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
 use crate::github::{
     fetch_commit_patch, fetch_pull_request_comments, fetch_pull_request_commits,
-    fetch_pull_request_patch, link_worktree_pr, list_branch_commits, list_worktrees, GitCommit,
-    GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
+    fetch_pull_request_patch, github_auth_status, link_worktree_pr, list_branch_commits,
+    list_worktrees, login_with_device_flow, GitCommit, GitHubAuthStatus, GitHubComment,
+    GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
 };
 use crate::persistence::{
     CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient, PersistedPullRequestComments,
     PersistedPullRequestDiff, PersistedSemanticDiff, ReviewItemKind, ReviewNote, ReviewSession,
-    ReviewStore,
+    ReviewStore, ReviewUiState,
 };
 use crate::server_query::{
     LocalDiffResult, PullRequestDiffResult, QueryClient, QueryEvent, QueryKey, QueryResult,
@@ -131,6 +137,8 @@ pub(crate) struct App {
     session: ReviewSession,
     store: ReviewStore,
     github: GitHubQueue,
+    github_auth: GitHubAuthStatus,
+    pending_terminal_flow: Option<TerminalFlow>,
     worktrees: Vec<Worktree>,
     branch_operation_status: Option<String>,
     commits: Vec<GitCommit>,
@@ -158,6 +166,8 @@ pub(crate) struct App {
     last_query_gc_at: Instant,
     comment_modal: Option<CommentModal>,
     thread_modal: Option<DiffLineTarget>,
+    thread_selection: usize,
+    thread_scroll_y: usize,
     transient_focus: Option<TransientFocus>,
     debug_log: Option<File>,
 }
@@ -185,6 +195,54 @@ const TRANSIENT_FOCUS_TICK: Duration = Duration::from_millis(60);
 
 impl App {
     pub(crate) fn new(path: String, bytes: usize, document: DiffDocument) -> Self {
+        Self::new_with_initial_route(path, bytes, document, None, true)
+    }
+
+    pub(crate) fn new_local_diff(
+        path: String,
+        bytes: usize,
+        document: DiffDocument,
+        repo_path: String,
+        branch: String,
+        base_ref: String,
+    ) -> Self {
+        let route = LocalWorktreeRoute {
+            repo_path,
+            branch,
+            base_ref,
+        };
+        Self::new_with_initial_route(
+            path,
+            bytes,
+            document,
+            Some(AppRoute::Diff(DiffSource::LocalWorktree(route))),
+            false,
+        )
+    }
+
+    pub(crate) fn new_commit_diff(
+        path: String,
+        bytes: usize,
+        document: DiffDocument,
+        repo_path: String,
+        sha: String,
+    ) -> Self {
+        Self::new_with_initial_route(
+            path,
+            bytes,
+            document,
+            Some(AppRoute::Diff(DiffSource::Commit { repo_path, sha })),
+            false,
+        )
+    }
+
+    fn new_with_initial_route(
+        path: String,
+        bytes: usize,
+        document: DiffDocument,
+        initial_route: Option<AppRoute>,
+        refresh_local_diff: bool,
+    ) -> Self {
         eprintln!(
             "[lazydiff] initial-diff={path} bytes={bytes} files={}",
             document.files.len()
@@ -193,18 +251,27 @@ impl App {
             eprintln!("[lazydiff] sqlite disabled: {error}");
             ReviewStore::memory_only()
         });
-        let local_route = Self::initial_local_route();
-        let session = Self::load_session_for_route(
-            &store,
-            &DiffSource::LocalWorktree(local_route.clone()),
-            &document,
-        );
+        let local_route = match &initial_route {
+            Some(AppRoute::Diff(DiffSource::LocalWorktree(route))) => route.clone(),
+            _ => Self::initial_local_route(),
+        };
+        let initial_route = initial_route.unwrap_or(AppRoute::Queue);
+        let initial_source = match &initial_route {
+            AppRoute::Detail(source) | AppRoute::Comments(source) | AppRoute::Diff(source) => {
+                source.clone()
+            }
+            AppRoute::Queue | AppRoute::CommitList => {
+                DiffSource::LocalWorktree(local_route.clone())
+            }
+        };
+        let session = Self::load_session_for_route(&store, &initial_source, &document);
         let (query_tx, query_rx) = mpsc::channel();
         let persisted_queries = store.restore_github_query_client();
         let github = persisted_queries
             .as_ref()
             .and_then(|client| client.client_state.queue.clone())
             .unwrap_or_else(GitHubQueue::empty_loading);
+        let github_auth = github_auth_status();
         let mut query_client = QueryClient::default();
         if let Some(cached_at) = github.cached_at {
             query_client.hydrate_success(QueryKey::GitHubQueue, cached_at);
@@ -223,8 +290,8 @@ impl App {
             document,
             state: DiffViewState::default(),
             surface: AppSurface::Queue,
-            history: NavHistory::new(AppRoute::Queue),
-            diff_source: DiffSource::LocalWorktree(local_route.clone()),
+            history: NavHistory::new(initial_route.clone()),
+            diff_source: initial_source,
             local_route,
             should_quit: false,
             draw_count: 0,
@@ -251,6 +318,8 @@ impl App {
             session,
             store,
             github,
+            github_auth,
+            pending_terminal_flow: None,
             worktrees: Vec::new(),
             branch_operation_status: None,
             commits: Vec::new(),
@@ -278,6 +347,8 @@ impl App {
             last_query_gc_at: Instant::now(),
             comment_modal: None,
             thread_modal: None,
+            thread_selection: 0,
+            thread_scroll_y: 0,
             transient_focus: None,
             debug_log: OpenOptions::new()
                 .create(true)
@@ -289,8 +360,12 @@ impl App {
         if let Some(persisted_queries) = persisted_queries {
             app.hydrate_persisted_query_client(persisted_queries);
         }
+        app.apply_route(initial_route);
+        app.restore_view_state_for_current_route();
         app.revalidate_project_label();
-        app.revalidate_local_diff();
+        if refresh_local_diff {
+            app.revalidate_local_diff();
+        }
         app.revalidate_worktrees();
         app.revalidate_semantic_diff(app.local_route());
         app.revalidate_queue();
@@ -343,6 +418,9 @@ impl App {
                     match event::read()? {
                         Event::Key(key) => {
                             self.handle_key(key);
+                            if let Some(flow) = self.pending_terminal_flow.take() {
+                                self.run_terminal_flow(terminal, flow)?;
+                            }
                             needs_redraw = true;
                         }
                         Event::Mouse(mouse) => {
@@ -371,7 +449,70 @@ impl App {
                 }
             }
         }
+        self.persist_view_state_for_current_route();
         Ok(())
+    }
+
+    fn run_terminal_flow(&mut self, terminal: &mut Tui, flow: TerminalFlow) -> Result<()> {
+        disable_raw_mode()?;
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+
+        let result = match flow {
+            TerminalFlow::GitHubLogin => login_with_device_flow().map(|user| user.login),
+        };
+
+        execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
+        enable_raw_mode()?;
+        terminal.clear()?;
+
+        self.github_auth = github_auth_status();
+        match result {
+            Ok(login) if self.github_auth.can_load_github() => {
+                self.github.viewer = Some(login);
+                self.github.status = GitHubQueueStatus::Loading;
+                self.revalidate_queue();
+            }
+            Ok(_) => {
+                self.github.status = GitHubQueueStatus::MissingToken;
+            }
+            Err(error) => {
+                self.github.status = GitHubQueueStatus::Error(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_view_state_for_current_route(&mut self) {
+        let Some(saved) = self.store.restore_ui_state(&self.diff_source.session_id()) else {
+            return;
+        };
+        let rows = row_count_for_mode(&self.document, saved.diff_mode);
+        self.state.mode = saved.diff_mode;
+        self.state.selected_row = saved.selected_row.min(rows.saturating_sub(1));
+        self.state.scroll_y = saved
+            .scroll_y
+            .min(rows.saturating_sub(self.viewport_height));
+        self.state.selected_side = saved.selected_side;
+    }
+
+    fn persist_view_state_for_current_route(&self) {
+        self.store.persist_ui_state(
+            &self.diff_source.session_id(),
+            ReviewUiState {
+                selected_row: self.state.selected_row,
+                scroll_y: self.state.scroll_y,
+                selected_side: self.state.selected_side,
+                diff_mode: self.state.mode,
+            },
+        );
     }
 
     fn render(&mut self, frame: &mut Frame) {
@@ -446,9 +587,9 @@ impl App {
         self.render_global_overlays(frame);
     }
 
-    fn render_global_overlays(&self, frame: &mut Frame) {
-        if let Some(target) = &self.thread_modal {
-            self.render_thread_modal(frame, target);
+    fn render_global_overlays(&mut self, frame: &mut Frame) {
+        if let Some(target) = self.thread_modal.clone() {
+            self.render_thread_modal(frame, &target);
         }
         if let Some(modal) = &self.comment_modal {
             self.render_comment_modal(frame, modal);
@@ -699,6 +840,7 @@ impl App {
                 self.revalidate_selected_semantic_diff();
                 self.revalidate_queue();
             }
+            Command::LoginGitHub => self.pending_terminal_flow = Some(TerminalFlow::GitHubLogin),
             Command::PullBranch => self.run_selected_branch_operation(BranchOperation::Pull),
             Command::PushBranch => self.run_selected_branch_operation(BranchOperation::Push),
             Command::FetchBranch => self.run_selected_branch_operation(BranchOperation::Fetch),
@@ -779,14 +921,26 @@ impl App {
             AppRoute::Queue => self.surface = AppSurface::Queue,
             AppRoute::CommitList => self.surface = AppSurface::CommitList,
             AppRoute::Detail(source) => {
+                if source.requires_github_auth() && !self.ensure_github_auth() {
+                    self.surface = AppSurface::Queue;
+                    return;
+                }
                 self.activate_route(source);
                 self.surface = AppSurface::DetailFull;
             }
             AppRoute::Comments(source) => {
+                if source.requires_github_auth() && !self.ensure_github_auth() {
+                    self.surface = AppSurface::Queue;
+                    return;
+                }
                 self.activate_route(source);
                 self.surface = AppSurface::Comments;
             }
             AppRoute::Diff(source) => {
+                if source.requires_github_auth() && !self.ensure_github_auth() {
+                    self.surface = AppSurface::Queue;
+                    return;
+                }
                 self.activate_route(source);
                 self.surface = AppSurface::Diff;
             }
@@ -1139,13 +1293,20 @@ impl App {
             None => "your work".to_string(),
         };
         let worktrees = self.worktrees_for_queue();
+        let github_items = if self.github_auth.can_load_github() {
+            self.github.items.as_slice()
+        } else {
+            &[]
+        };
         let linked_pr_ids = project
             .as_ref()
-            .map(|project| link_worktree_pr(&worktrees, &self.github.items, project))
+            .map(|project| link_worktree_pr(&worktrees, github_items, project))
             .unwrap_or_default();
         let pr_index_by_id: HashMap<PrId, usize> = self
-            .github
-            .items
+            .github_auth
+            .can_load_github()
+            .then_some(github_items)
+            .unwrap_or_default()
             .iter()
             .enumerate()
             .map(|(index, pr)| {
@@ -1206,7 +1367,7 @@ impl App {
         // Bucket every remaining PR by concrete repository. This keeps
         // current-project PRs first while avoiding a vague "other repos"
         // catch-all that hides ownership context.
-        for (index, pr) in self.github.items.iter().enumerate() {
+        for (index, pr) in github_items.iter().enumerate() {
             if linked_pr_indices.contains(&index) {
                 continue;
             }
@@ -1230,7 +1391,7 @@ impl App {
 
         let mut repo_order: Vec<String> = Vec::new();
         let mut repo_indices: HashMap<String, Vec<usize>> = HashMap::new();
-        for (index, pr) in self.github.items.iter().enumerate() {
+        for (index, pr) in github_items.iter().enumerate() {
             if linked_pr_indices.contains(&index) {
                 continue;
             }
@@ -1311,6 +1472,7 @@ impl App {
         }
         self.session =
             Self::load_session_for_route(&self.store, &route, &self.document_for_route(&route));
+        self.restore_view_state_for_current_route();
     }
 
     fn document_for_route(&self, route: &DiffSource) -> DiffDocument {
@@ -1389,6 +1551,30 @@ impl App {
         }
     }
 
+    fn refresh_github_auth_gate(&mut self) -> GitHubAuthStatus {
+        self.github_auth = github_auth_status();
+        if !self.github_auth.can_load_github() {
+            self.github.status = GitHubQueueStatus::MissingToken;
+            self.github.viewer = None;
+            self.github.items.clear();
+            self.body_preview_cache.clear();
+        }
+        self.github_auth.clone()
+    }
+
+    fn ensure_github_auth(&mut self) -> bool {
+        let auth = self.refresh_github_auth_gate();
+        if auth.can_load_github() {
+            return true;
+        }
+        if let Some(error) = auth.error() {
+            self.query_client
+                .finish_error(QueryKey::GitHubQueue, error.clone());
+            self.commit_status = Some(error);
+        }
+        false
+    }
+
     fn open_local_diff(&mut self, route: Option<LocalWorktreeRoute>) {
         let source = DiffSource::LocalWorktree(route.unwrap_or_else(|| self.local_route.clone()));
         self.document = self.local_document.clone();
@@ -1400,6 +1586,9 @@ impl App {
     }
 
     fn open_pull_request_diff(&mut self, pull_request: &GitHubPullRequest) {
+        if !self.ensure_github_auth() {
+            return;
+        }
         let key = (pull_request.repository.clone(), pull_request.number);
         let route = DiffSource::PullRequest {
             repository: pull_request.repository.clone(),
@@ -1480,6 +1669,9 @@ impl App {
             .pr_index
             .and_then(|index| self.github.items.get(index).cloned())
         {
+            if !self.ensure_github_auth() {
+                return;
+            }
             self.commit_route = None;
             self.commit_pr_route = Some((pull_request.repository.clone(), pull_request.number));
             self.commit_status = Some("loading PR commits…".to_string());
@@ -1512,6 +1704,9 @@ impl App {
         let repo_path = if let Some(route) = self.commit_route.clone() {
             route.repo_path
         } else if let Some((repository, _number)) = self.commit_pr_route.clone() {
+            if !self.ensure_github_auth() {
+                return;
+            }
             format!("github:{repository}")
         } else {
             return;
@@ -1561,10 +1756,13 @@ impl App {
         else {
             return;
         };
+        if !self.ensure_github_auth() {
+            return;
+        }
         self.revalidate_pull_request_comments(pull_request.repository, pull_request.number);
     }
 
-    fn selected_comments<'a>(&'a self, selected: &'a WorkItem) -> Vec<CommentView<'a>> {
+    fn selected_comments(&self, selected: &WorkItem) -> Vec<CommentView> {
         if let Some(pull_request) = selected.pull_request(self) {
             let key = (pull_request.repository.clone(), pull_request.number);
             return self
@@ -1963,6 +2161,11 @@ enum AppSurface {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalFlow {
+    GitHubLogin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailTab {
     Semantic,
     Description,
@@ -2044,6 +2247,11 @@ pub(crate) enum DiffSource {
 }
 
 impl DiffSource {
+    fn requires_github_auth(&self) -> bool {
+        matches!(self, Self::PullRequest { .. })
+            || matches!(self, Self::Commit { repo_path, .. } if repo_path.starts_with("github:"))
+    }
+
     fn session_id(&self) -> String {
         match self {
             Self::LocalWorktree(route) => stable_id(&(
@@ -2091,6 +2299,15 @@ pub(crate) enum WorkItemKind {
 }
 
 impl WorkItemKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::LocalAgentBranch => "local_agent_branch",
+            Self::RequestedPrReview => "requested_pr_review",
+            Self::OwnedPrFeedback => "owned_pr_feedback",
+            Self::Update => "update",
+        }
+    }
+
     fn glyph(self) -> &'static str {
         match self {
             Self::LocalAgentBranch => "◐",
@@ -2319,26 +2536,35 @@ impl WorkItem {
     }
 }
 
-struct CommentView<'a> {
-    author: &'a str,
-    body: &'a str,
-    created_at: &'a str,
+struct CommentView {
+    author: String,
+    body: String,
+    created_at: String,
 }
 
-impl<'a> CommentView<'a> {
-    fn from_github(comment: &'a GitHubComment) -> Self {
+impl CommentView {
+    fn from_github(comment: &GitHubComment) -> Self {
         Self {
-            author: &comment.author,
-            body: &comment.body,
-            created_at: &comment.created_at,
+            author: comment.author.clone(),
+            body: comment.body.clone(),
+            created_at: comment.created_at.clone(),
         }
     }
 
-    fn from_note(note: &'a ReviewNote) -> Self {
+    fn from_note(note: &ReviewNote) -> Self {
         Self {
-            author: &note.author,
-            body: &note.body,
-            created_at: "local",
+            author: note.author.clone(),
+            body: note.body.clone(),
+            created_at: "local".to_string(),
+        }
+    }
+
+    fn from_thread_note(note: &ReviewNote) -> Self {
+        let reply = note.parent_id.map(|_| " follow-up").unwrap_or_default();
+        Self {
+            author: format!("{} {}{}", note.author, note.kind.label(), reply),
+            body: note.body.clone(),
+            created_at: "local".to_string(),
         }
     }
 }
@@ -2369,7 +2595,7 @@ impl CommentSurfaceRow {
 }
 
 fn comment_surface_rows(
-    comments: &[CommentView<'_>],
+    comments: &[CommentView],
     width: usize,
     palette: &crate::design_system::HomePalette,
 ) -> Vec<CommentSurfaceRow> {
@@ -2393,12 +2619,12 @@ fn comment_surface_rows(
     for (idx, comment) in comments.iter().enumerate() {
         rows.push(CommentSurfaceRow::Header {
             author: comment.author.to_string(),
-            age: relative_age(comment.created_at),
+            age: relative_age(&comment.created_at),
             comment_index: idx,
         });
         // Width minus the 3-col indent we'll prepend.
         let content_width = width.saturating_sub(2).max(16) as u16;
-        let mut lines = body_preview_lines(comment.body, content_width, 200, palette);
+        let mut lines = body_preview_lines(&comment.body, content_width, 200, palette);
         if lines.is_empty() {
             lines = vec![Line::from(vec![
                 Span::raw(" "),

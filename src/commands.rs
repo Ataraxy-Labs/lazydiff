@@ -20,6 +20,7 @@ pub(crate) enum Command {
     PageDown,
     PageUp,
     Refresh,
+    LoginGitHub,
     PullBranch,
     PushBranch,
     FetchBranch,
@@ -67,6 +68,9 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
     // lowercase `t` is unbound and capital is non-conflicting.
     if key.code == KeyCode::Char('T') {
         return Some(Command::ToggleTheme);
+    }
+    if key.code == KeyCode::Char('l') && key.modifiers.is_empty() {
+        return Some(Command::LoginGitHub);
     }
     // Global quit: `q` quits from any non-modal surface. Modal layers
     // (composer, file picker, attempt modal) intercept keys earlier in

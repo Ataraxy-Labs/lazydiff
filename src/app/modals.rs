@@ -1,3 +1,4 @@
+use super::surfaces::comment_row_span;
 use super::*;
 
 impl App {
@@ -26,12 +27,25 @@ impl App {
         self.file_picker_open = false;
         self.comment_modal = None;
         self.thread_modal = Some(target);
+        self.thread_selection = 0;
+        self.thread_scroll_y = 0;
     }
 
     pub(super) fn handle_modal_key(&mut self, code: KeyCode) -> bool {
-        if self.thread_modal.is_some() {
+        if let Some(target) = self.thread_modal.clone() {
             match code {
                 KeyCode::Esc | KeyCode::Enter => self.thread_modal = None,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let max = self
+                        .session
+                        .notes_for_target(&target)
+                        .len()
+                        .saturating_sub(1);
+                    self.thread_selection = self.thread_selection.saturating_add(1).min(max);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.thread_selection = self.thread_selection.saturating_sub(1);
+                }
                 KeyCode::Char('q')
                 | KeyCode::Char('i')
                 | KeyCode::Char('n')
@@ -89,15 +103,10 @@ impl App {
     }
 
     pub(super) fn render_comment_modal(&self, frame: &mut Frame, modal: &CommentModal) {
-        let area = centered_rect(frame.area(), 82, 13);
+        let area = centered_rect(frame.area(), 78, 9);
         let palette = self.finder_palette();
         frame.render_widget(Clear, area);
         fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(palette.bg));
-        draw_box(
-            frame.buffer_mut(),
-            area,
-            Style::new().fg(palette.border).bg(palette.bg),
-        );
         if area.width < 4 || area.height < 4 {
             return;
         }
@@ -106,15 +115,23 @@ impl App {
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD);
         let muted = Style::new().fg(palette.muted).bg(palette.bg);
+        let accent = Style::new()
+            .fg(palette.accent)
+            .bg(palette.bg)
+            .add_modifier(Modifier::BOLD);
         let key = Style::new()
             .fg(palette.key)
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD);
         let composer_title = modal.kind.composer_title();
+        let (symbol, _) = modal.kind.gutter_marker();
         frame.render_widget(
             Line::from(vec![
-                Span::styled(format!(" {composer_title} "), title),
-                Span::styled("· ", muted),
+                Span::raw(" "),
+                Span::styled(symbol, accent),
+                Span::raw(" "),
+                Span::styled(composer_title, title),
+                Span::styled("  ", muted),
                 Span::styled(short_path(modal.target.path()).to_string(), muted),
                 Span::styled(" ", muted),
                 Span::styled(target_range_label(&modal.target), title),
@@ -122,48 +139,48 @@ impl App {
             Rect::new(area.x + 2, area.y + 1, area.width.saturating_sub(4), 1),
         );
         frame.render_widget(
-            Line::from(Span::styled(modal.kind.composer_help(), muted)),
-            Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1),
+            Line::from(Span::styled(
+                truncate(
+                    modal.kind.composer_help(),
+                    area.width.saturating_sub(6) as usize,
+                ),
+                muted,
+            )),
+            Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1),
         );
-        let input_area = Rect::new(area.x + 2, area.y + 5, area.width.saturating_sub(4), 4);
-        let input_bg = palette.selected_bg;
-        fill_rect(
+        draw_horizontal_rule(
             frame.buffer_mut(),
-            input_area,
-            " ",
-            Style::new().fg(palette.fg).bg(input_bg),
+            area.y + 3,
+            area.x + 3,
+            area.right().saturating_sub(3),
+            palette.border,
+            palette.bg,
         );
-        draw_box(
-            frame.buffer_mut(),
-            input_area,
-            Style::new().fg(palette.border).bg(input_bg),
-        );
+        let input_area = Rect::new(area.x + 3, area.y + 4, area.width.saturating_sub(6), 1);
         let body = if modal.body.is_empty() {
             modal.kind.placeholder().to_string()
         } else {
             modal.body.clone()
         };
         let body_style = if modal.body.is_empty() {
-            muted.bg(input_bg)
+            muted
         } else {
-            Style::new().fg(palette.fg).bg(input_bg)
+            Style::new().fg(palette.fg).bg(palette.bg)
         };
         frame.render_widget(
-            Line::from(Span::styled(
-                truncate(&body, input_area.width.saturating_sub(4) as usize),
-                body_style,
-            )),
-            Rect::new(
-                input_area.x + 2,
-                input_area.y + 1,
-                input_area.width.saturating_sub(4),
-                1,
-            ),
+            Line::from(vec![
+                Span::styled("› ", Style::new().fg(palette.accent).bg(palette.bg)),
+                Span::styled(
+                    truncate(&body, input_area.width.saturating_sub(2) as usize),
+                    body_style,
+                ),
+            ]),
+            input_area,
         );
         frame.render_widget(
             Line::from(vec![
                 Span::styled("enter", key),
-                Span::styled(format!(" {}  ", modal.kind.submit_label()), muted),
+                Span::styled(format!(" {}   ", modal.kind.submit_label()), muted),
                 Span::styled("esc", key),
                 Span::styled(" cancel", muted),
             ]),
@@ -176,16 +193,16 @@ impl App {
         );
     }
 
-    pub(super) fn render_thread_modal(&self, frame: &mut Frame, target: &DiffLineTarget) {
+    pub(super) fn render_thread_modal(&mut self, frame: &mut Frame, target: &DiffLineTarget) {
         let notes = self.session.notes_for_target(target);
         let area = centered_rect(frame.area(), 86, 16);
-        let palette = self.finder_palette();
+        let palette = self.home_palette();
         frame.render_widget(Clear, area);
         fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(palette.bg));
         draw_box(
             frame.buffer_mut(),
             area,
-            Style::new().fg(palette.border).bg(palette.bg),
+            Style::new().fg(palette.rule).bg(palette.bg),
         );
         if area.width < 4 || area.height < 5 {
             return;
@@ -196,7 +213,7 @@ impl App {
             .add_modifier(Modifier::BOLD);
         let muted = Style::new().fg(palette.muted).bg(palette.bg);
         let key = Style::new()
-            .fg(palette.key)
+            .fg(palette.action)
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD);
         frame.render_widget(
@@ -215,33 +232,101 @@ impl App {
             area.width.saturating_sub(4),
             area.height.saturating_sub(6),
         );
-        for (index, note) in notes.iter().take(list_area.height as usize).enumerate() {
-            let y = list_area.y + index as u16;
-            let source = note.kind.label();
-            let reply = note
-                .parent_id
-                .map(|_| " follow-up".to_string())
-                .unwrap_or_default();
-            let (symbol, color) = note.kind.gutter_marker();
-            frame.render_widget(
-                Line::from(vec![
-                    Span::styled(
-                        format!("{symbol} {} {}{}  ", note.author, source, reply),
-                        Style::new()
-                            .fg(color)
-                            .bg(palette.bg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        truncate(&note.body, list_area.width.saturating_sub(24) as usize),
-                        Style::new().fg(palette.fg).bg(palette.bg),
-                    ),
-                ]),
-                Rect::new(list_area.x, y, list_area.width, 1),
-            );
+        let comments = notes
+            .iter()
+            .map(|note| CommentView::from_thread_note(note))
+            .collect::<Vec<_>>();
+        let rows = comment_surface_rows(
+            &comments,
+            list_area.width.saturating_sub(3) as usize,
+            &palette,
+        );
+        let selection = self.thread_selection.min(notes.len().saturating_sub(1));
+        self.thread_selection = selection;
+        let (first_idx, last_idx) = comment_row_span(&rows, selection);
+        let height = list_area.height as usize;
+        if first_idx < self.thread_scroll_y {
+            self.thread_scroll_y = first_idx;
+        } else if last_idx >= self.thread_scroll_y.saturating_add(height) {
+            self.thread_scroll_y = last_idx.saturating_sub(height.saturating_sub(1));
+        }
+        self.thread_scroll_y = self
+            .thread_scroll_y
+            .min(rows.len().saturating_sub(height.max(1)));
+
+        let selected_bg = palette.layer_bg(SurfaceLayer::ElevatedSurface);
+        let rail_style = Style::new().fg(palette.action).bg(selected_bg);
+        for (visual_index, row) in rows
+            .iter()
+            .skip(self.thread_scroll_y)
+            .take(height)
+            .enumerate()
+        {
+            let y = list_area.y + visual_index as u16;
+            let is_selected = row.comment_index() == selection;
+            let row_rect = Rect::new(list_area.x, y, list_area.width, 1);
+            if is_selected {
+                fill_rect(
+                    frame.buffer_mut(),
+                    row_rect,
+                    " ",
+                    Style::new().bg(selected_bg),
+                );
+            }
+            match row {
+                CommentSurfaceRow::Header { author, age, .. } => {
+                    let bg = if is_selected { selected_bg } else { palette.bg };
+                    let prefix = if is_selected { "┃● " } else { " ● " };
+                    frame.render_widget(
+                        Line::from(vec![
+                            Span::styled(prefix, Style::new().fg(palette.accent).bg(bg)),
+                            Span::styled(author.clone(), title.bg(bg)),
+                            Span::styled(format!(" · {age}"), muted.bg(bg)),
+                        ]),
+                        row_rect,
+                    );
+                }
+                CommentSurfaceRow::Body { line, .. } => {
+                    if is_selected {
+                        let mut line = line.clone();
+                        if let Some(first) = line.spans.first_mut() {
+                            let trimmed_len = first
+                                .content
+                                .chars()
+                                .skip_while(|c| c.is_whitespace())
+                                .count();
+                            if trimmed_len == 0 {
+                                // Replace one gutter column with the rail so
+                                // selecting a row doesn't shift markdown text.
+                                let leading = first.content.chars().count();
+                                let after_rail = leading.saturating_sub(1);
+                                first.content = " ".repeat(after_rail).into();
+                            }
+                            first.style = first.style.bg(selected_bg);
+                        }
+                        line.spans.insert(0, Span::styled("┃", rail_style));
+                        for span in line.spans.iter_mut().skip(1) {
+                            span.style = span.style.bg(selected_bg);
+                        }
+                        frame.render_widget(line, row_rect);
+                    } else {
+                        frame.render_widget(line.clone(), row_rect);
+                    }
+                }
+                CommentSurfaceRow::Blank { .. } => {
+                    if is_selected {
+                        frame.render_widget(
+                            Line::from(vec![Span::styled("┃", rail_style)]),
+                            row_rect,
+                        );
+                    }
+                }
+            }
         }
         frame.render_widget(
             Line::from(vec![
+                Span::styled("j/k", key),
+                Span::styled(" reply  ", muted),
                 Span::styled("q", key),
                 Span::styled(" ask follow-up  ", muted),
                 Span::styled("i", key),

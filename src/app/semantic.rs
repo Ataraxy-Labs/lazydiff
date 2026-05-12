@@ -157,6 +157,9 @@ pub(crate) fn semantic_tree_body_area(area: Rect) -> Rect {
 
 impl App {
     pub(super) fn revalidate_semantic_diff(&mut self, route: DiffSource) {
+        if route.requires_github_auth() && !self.ensure_github_auth() {
+            return;
+        }
         let query_key = QueryKey::semantic_diff(route.session_id());
         if !self.query_client.start_fetch(query_key) {
             return;

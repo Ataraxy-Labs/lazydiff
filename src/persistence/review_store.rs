@@ -212,6 +212,29 @@ pub(crate) struct ReviewNote {
     pub(crate) created_at: u64,
 }
 
+#[derive(Clone)]
+pub(crate) struct ReviewThread {
+    pub(crate) session: ReviewSessionSummary,
+    pub(crate) note: ReviewNote,
+}
+
+#[derive(Clone)]
+pub(crate) struct ReviewSessionSummary {
+    pub(crate) id: String,
+    pub(crate) kind: WorkItemKind,
+    pub(crate) repo_path: String,
+    pub(crate) branch: String,
+    pub(crate) base_ref: String,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ReviewUiState {
+    pub(crate) selected_row: usize,
+    pub(crate) scroll_y: usize,
+    pub(crate) selected_side: DiffSide,
+    pub(crate) diff_mode: ratatui_diffs::DiffMode,
+}
+
 impl ReviewNote {
     pub(crate) fn summary(&self) -> String {
         self.body
@@ -338,6 +361,14 @@ pub(crate) enum ReviewItemState {
 }
 
 impl ReviewItemState {
+    pub(crate) fn label(self) -> &'static str {
+        review_item_state_name(self)
+    }
+
+    pub(crate) fn from_label(value: &str) -> Self {
+        parse_review_item_state(value)
+    }
+
     pub(crate) fn is_open(self) -> bool {
         matches!(
             self,
@@ -374,10 +405,10 @@ pub(crate) struct ReviewStore {
 
 impl ReviewStore {
     pub(crate) fn open_default() -> Result<Self> {
-        let mut dir = env::current_dir()?;
-        dir.push(".quiver");
+        let mut dir = xdg_data_home();
+        dir.push("lazydiff");
         fs::create_dir_all(&dir)?;
-        let path = dir.join("review-sessions.sqlite3");
+        let path = dir.join("lazydiff.db");
         let store = Self { path: Some(path) };
         store.init()?;
         Ok(store)
@@ -438,9 +469,19 @@ impl ReviewStore {
             CREATE INDEX IF NOT EXISTS review_items_session_attempt ON review_items(session_id, attempt_id);",
         )?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS github_cache (
+            "CREATE TABLE IF NOT EXISTS app_kv (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS review_ui_state (
+                session_id TEXT PRIMARY KEY,
+                selected_row INTEGER NOT NULL,
+                scroll_y INTEGER NOT NULL,
+                selected_side TEXT NOT NULL,
+                diff_mode TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
             );",
         )?;
@@ -454,7 +495,7 @@ impl ReviewStore {
         let conn = self.connection()?;
         let value: String = conn
             .query_row(
-                "SELECT value FROM github_cache WHERE key = ?1",
+                "SELECT value FROM app_kv WHERE key = ?1",
                 params![key],
                 |row| row.get(0),
             )
@@ -474,7 +515,7 @@ impl ReviewStore {
             return;
         };
         let _ = conn.execute(
-            "INSERT INTO github_cache (key, value, updated_at) VALUES (?1, ?2, ?3)
+            "INSERT INTO app_kv (key, value, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
             params![key, value, now_stamp() as i64],
         );
@@ -514,7 +555,7 @@ impl ReviewStore {
         let Some(conn) = self.connection() else {
             return;
         };
-        let _ = conn.execute("DELETE FROM github_cache WHERE key = ?1", params![key]);
+        let _ = conn.execute("DELETE FROM app_kv WHERE key = ?1", params![key]);
     }
 
     pub(crate) fn load_session(&self, id: &str) -> Option<ReviewSession> {
@@ -549,6 +590,97 @@ impl ReviewStore {
         session.notes = self.load_notes(&conn, id);
         session.next_note_id = session.notes.iter().map(|note| note.id).max().unwrap_or(0) + 1;
         Some(session)
+    }
+
+    pub(crate) fn list_review_threads(&self) -> Vec<ReviewThread> {
+        let Some(conn) = self.connection() else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id, kind, repo_path, branch, base_ref FROM review_sessions ORDER BY updated_at DESC",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok(ReviewSessionSummary {
+                id: row.get(0)?,
+                kind: parse_work_item_kind(row.get::<_, String>(1)?.as_str()),
+                repo_path: row.get(2)?,
+                branch: row.get(3)?,
+                base_ref: row.get(4)?,
+            })
+        }) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok)
+            .flat_map(|session| {
+                self.load_notes(&conn, &session.id)
+                    .into_iter()
+                    .map(move |note| ReviewThread {
+                        session: session.clone(),
+                        note,
+                    })
+            })
+            .collect()
+    }
+
+    pub(crate) fn update_note_state(
+        &self,
+        session_id: &str,
+        note_id: u64,
+        state: ReviewItemState,
+    ) -> bool {
+        let Some(conn) = self.connection() else {
+            return false;
+        };
+        conn.execute(
+            "UPDATE review_items SET state = ?1 WHERE session_id = ?2 AND id = ?3",
+            params![review_item_state_name(state), session_id, note_id],
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false)
+    }
+
+    pub(crate) fn restore_ui_state(&self, session_id: &str) -> Option<ReviewUiState> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT selected_row, scroll_y, selected_side, diff_mode FROM review_ui_state WHERE session_id = ?1",
+            params![session_id],
+            |row| {
+                Ok(ReviewUiState {
+                    selected_row: row.get::<_, usize>(0)?,
+                    scroll_y: row.get::<_, usize>(1)?,
+                    selected_side: parse_diff_side(row.get::<_, String>(2)?.as_str()),
+                    diff_mode: parse_diff_mode(row.get::<_, String>(3)?.as_str()),
+                })
+            },
+        )
+        .optional()
+        .ok()?
+    }
+
+    pub(crate) fn persist_ui_state(&self, session_id: &str, state: ReviewUiState) {
+        let Some(conn) = self.connection() else {
+            return;
+        };
+        let _ = conn.execute(
+            "INSERT INTO review_ui_state (session_id, selected_row, scroll_y, selected_side, diff_mode, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(session_id) DO UPDATE SET
+                selected_row=excluded.selected_row,
+                scroll_y=excluded.scroll_y,
+                selected_side=excluded.selected_side,
+                diff_mode=excluded.diff_mode,
+                updated_at=excluded.updated_at",
+            params![
+                session_id,
+                state.selected_row,
+                state.scroll_y,
+                diff_side_name(state.selected_side),
+                diff_mode_name(state.diff_mode),
+                now_stamp() as i64,
+            ],
+        );
     }
 
     fn load_notes(&self, conn: &Connection, session_id: &str) -> Vec<ReviewNote> {
@@ -777,11 +909,39 @@ fn diff_side_name(side: DiffSide) -> &'static str {
     }
 }
 
+fn diff_mode_name(mode: ratatui_diffs::DiffMode) -> &'static str {
+    match mode {
+        ratatui_diffs::DiffMode::Split => "split",
+        ratatui_diffs::DiffMode::Unified => "unified",
+    }
+}
+
+fn parse_diff_mode(value: &str) -> ratatui_diffs::DiffMode {
+    match value {
+        "unified" => ratatui_diffs::DiffMode::Unified,
+        _ => ratatui_diffs::DiffMode::Split,
+    }
+}
+
 fn parse_diff_side(value: &str) -> DiffSide {
     match value {
         "left" => DiffSide::Left,
         _ => DiffSide::Right,
     }
+}
+
+fn xdg_data_home() -> PathBuf {
+    if let Ok(value) = env::var("XDG_DATA_HOME") {
+        if !value.trim().is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    if let Ok(value) = env::var("HOME") {
+        if !value.trim().is_empty() {
+            return PathBuf::from(value).join(".local").join("share");
+        }
+    }
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn diff_line_kind_name(kind: DiffLineKind) -> &'static str {

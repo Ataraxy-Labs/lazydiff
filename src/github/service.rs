@@ -1,6 +1,10 @@
-use std::{env, process::Command as ProcessCommand};
+use std::{
+    collections::BTreeMap, env, fs, path::PathBuf, process::Command as ProcessCommand, thread,
+    time::Duration,
+};
 
-use serde::Deserialize;
+use convex::{ConvexClient, FunctionResult, Value};
+use serde::{Deserialize, Serialize};
 
 use crate::app::WorkItemKind;
 
@@ -11,24 +15,288 @@ use super::models::{
 use super::patch::{parse_pull_request_files_value, pull_request_files_to_patch};
 use super::worktree::GitCommit;
 
-pub(crate) fn github_token() -> Option<String> {
-    env::var("GITHUB_TOKEN")
-        .ok()
-        .or_else(|| env::var("GH_TOKEN").ok())
-        .filter(|token| !token.trim().is_empty())
-        .or_else(gh_auth_token)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GitHubAuthStatus {
+    Authenticated,
+    MissingLogin,
 }
 
-fn gh_auth_token() -> Option<String> {
-    let output = ProcessCommand::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+impl GitHubAuthStatus {
+    pub(crate) fn can_load_github(&self) -> bool {
+        matches!(self, Self::Authenticated)
     }
-    let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!token.is_empty()).then_some(token)
+
+    pub(crate) fn summary(&self) -> &'static str {
+        match self {
+            Self::Authenticated => "GitHub signed in",
+            Self::MissingLogin => "sign in to load GitHub PRs",
+        }
+    }
+
+    pub(crate) fn notice(&self) -> &'static str {
+        match self {
+            Self::Authenticated => "GitHub signed in",
+            Self::MissingLogin => {
+                "GitHub PRs are locked. Press l to sign in with GitHub, then press r to refresh."
+            }
+        }
+    }
+
+    pub(crate) fn error(&self) -> Option<String> {
+        (!self.can_load_github()).then(|| self.notice().to_string())
+    }
+}
+
+pub(crate) fn github_auth_status() -> GitHubAuthStatus {
+    if github_token().is_some() {
+        GitHubAuthStatus::Authenticated
+    } else {
+        GitHubAuthStatus::MissingLogin
+    }
+}
+
+pub(crate) fn github_token() -> Option<String> {
+    load_persisted_auth().map(|auth| auth.token)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct GitHubUser {
+    pub(crate) login: String,
+    pub(crate) avatar_url: String,
+    pub(crate) name: Option<String>,
+    pub(crate) email: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PersistedAuth {
+    token: String,
+    user: GitHubUser,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct DeviceFlowStart {
+    pub(crate) user_code: String,
+    pub(crate) device_code: String,
+    pub(crate) verification_uri: String,
+    pub(crate) interval: u64,
+    pub(crate) expires_in: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct DeviceFlowTokenResponse {
+    access_token: Option<String>,
+    error: Option<String>,
+    interval: Option<u64>,
+}
+
+const GITHUB_CLIENT_ID: &str = "Ov23lioE75FJYz4Mn7ZH";
+const QUIVER_CONVEX_URL: &str = "https://marvelous-dinosaur-141.convex.cloud";
+
+pub(crate) fn login_with_device_flow() -> std::result::Result<GitHubUser, String> {
+    let flow = start_device_flow()?;
+    open_external(&flow.verification_uri);
+    println!();
+    println!("Sign in to lazydiff");
+    println!("Open: {}", flow.verification_uri);
+    println!("Code: {}", flow.user_code);
+    println!();
+    println!("Waiting for GitHub to confirm sign-in…");
+
+    let token = poll_device_flow(&flow)?;
+    let user = fetch_user(&token)?;
+    persist_auth(&token, &user)?;
+    sync_user_to_convex(&user)?;
+    Ok(user)
+}
+
+fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post("https://github.com/login/device/code")
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({
+            "client_id": GITHUB_CLIENT_ID,
+            "scope": "repo read:user user:email",
+        }))
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub device code request failed: {}",
+            response.status()
+        ));
+    }
+    response.json().map_err(|error| error.to_string())
+}
+
+fn poll_device_flow(flow: &DeviceFlowStart) -> std::result::Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut interval = flow.interval.max(1);
+    let max_polls = flow.expires_in.saturating_div(interval).max(1);
+    for _ in 0..max_polls {
+        thread::sleep(Duration::from_secs(interval));
+        let response = client
+            .post("https://github.com/login/oauth/access_token")
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({
+                "client_id": GITHUB_CLIENT_ID,
+                "device_code": flow.device_code,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            }))
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("GitHub token poll failed: {}", response.status()));
+        }
+        let decoded: DeviceFlowTokenResponse =
+            response.json().map_err(|error| error.to_string())?;
+        if let Some(token) = decoded.access_token.filter(|token| !token.is_empty()) {
+            return Ok(token);
+        }
+        match decoded.error.as_deref() {
+            Some("authorization_pending") => {}
+            Some("slow_down") => interval = decoded.interval.unwrap_or(interval + 5),
+            Some("expired_token") => return Err("GitHub sign-in code expired".to_string()),
+            Some("access_denied") => return Err("GitHub sign-in was denied".to_string()),
+            Some(error) => return Err(format!("GitHub sign-in failed: {error}")),
+            None => return Err("GitHub sign-in returned no token".to_string()),
+        }
+    }
+    Err("GitHub sign-in timed out".to_string())
+}
+
+fn fetch_user(token: &str) -> std::result::Result<GitHubUser, String> {
+    github_get_json("user", token, "GitHub user")
+}
+
+fn sync_user_to_convex(user: &GitHubUser) -> std::result::Result<String, String> {
+    let runtime = tokio::runtime::Runtime::new().map_err(|error| error.to_string())?;
+    let convex_user_id = runtime.block_on(async {
+        let mut client = ConvexClient::new(QUIVER_CONVEX_URL)
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut args = BTreeMap::from([
+            (
+                "githubAvatarUrl".to_string(),
+                Value::String(user.avatar_url.clone()),
+            ),
+            ("githubLogin".to_string(), Value::String(user.login.clone())),
+        ]);
+        if let Some(name) = &user.name {
+            args.insert("githubName".to_string(), Value::String(name.clone()));
+        }
+        match client
+            .mutation("users:upsert", args)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            FunctionResult::Value(Value::String(id)) => Ok(id),
+            FunctionResult::Value(other) => Err(format!(
+                "Convex user sync returned unexpected value: {other:?}"
+            )),
+            FunctionResult::ErrorMessage(error) => Err(format!("Convex user sync failed: {error}")),
+            FunctionResult::ConvexError(error) => {
+                Err(format!("Convex user sync failed: {}", error.message))
+            }
+        }
+    })?;
+    persist_convex_user(&convex_user_id, &user.login)?;
+    Ok(convex_user_id)
+}
+
+fn github_get_json<T: for<'de> Deserialize<'de>>(
+    endpoint: &str,
+    token: &str,
+    label: &str,
+) -> std::result::Result<T, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(format!("https://api.github.com/{endpoint}"))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{label} request failed: {}", response.status()));
+    }
+    response.json().map_err(|error| error.to_string())
+}
+
+fn persist_auth(token: &str, user: &GitHubUser) -> std::result::Result<(), String> {
+    let auth = PersistedAuth {
+        token: token.to_string(),
+        user: user.clone(),
+    };
+    write_json(auth_file(), &auth)
+}
+
+fn load_persisted_auth() -> Option<PersistedAuth> {
+    let raw = fs::read_to_string(auth_file()).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedConvexUser<'a> {
+    convex_user_id: &'a str,
+    github_login: &'a str,
+    deployment_url: &'a str,
+}
+
+fn persist_convex_user(
+    convex_user_id: &str,
+    github_login: &str,
+) -> std::result::Result<(), String> {
+    write_json(
+        convex_user_file(),
+        &PersistedConvexUser {
+            convex_user_id,
+            github_login,
+            deployment_url: QUIVER_CONVEX_URL,
+        },
+    )
+}
+
+fn write_json<T: Serialize>(path: PathBuf, value: &T) -> std::result::Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| error.to_string())
+}
+
+fn auth_file() -> PathBuf {
+    data_dir().join("github-auth.json")
+}
+
+fn convex_user_file() -> PathBuf {
+    data_dir().join("convex-user.json")
+}
+
+fn data_dir() -> PathBuf {
+    env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lazydiff")
+}
+
+fn open_external(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = ProcessCommand::new(opener).arg(url).spawn();
 }
 
 #[derive(Deserialize)]
@@ -60,25 +328,14 @@ fn fetch_pull_request_comment_endpoint(
     number: u32,
     kind: &str,
 ) -> std::result::Result<Vec<GitHubComment>, String> {
+    let token =
+        github_token().ok_or_else(|| "sign in to Quiver to load GitHub comments".to_string())?;
     let endpoint = match kind {
         "issues" => format!("repos/{repository}/issues/{number}/comments"),
         "pulls" => format!("repos/{repository}/pulls/{number}/comments"),
         _ => return Ok(Vec::new()),
     };
-    let output = ProcessCommand::new("gh")
-        .args(["api", "--paginate", "--slurp", &endpoint])
-        .output()
-        .map_err(|error| format!("failed to run gh: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("gh exited with {}", output.status)
-        } else {
-            stderr
-        });
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to parse gh comments JSON: {error}"))?;
+    let value: serde_json::Value = github_get_json(&endpoint, &token, "GitHub comments")?;
     let comments = parse_rest_comments_value(value)?;
     Ok(comments
         .into_iter()
@@ -124,25 +381,13 @@ pub(crate) fn fetch_pull_request_patch(
     repository: &str,
     number: u32,
 ) -> std::result::Result<String, String> {
-    let output = ProcessCommand::new("gh")
-        .args([
-            "api",
-            "--paginate",
-            "--slurp",
-            &format!("repos/{repository}/pulls/{number}/files"),
-        ])
-        .output()
-        .map_err(|error| format!("failed to run gh: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("gh exited with {}", output.status)
-        } else {
-            stderr
-        });
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to parse gh files JSON: {error}"))?;
+    let token =
+        github_token().ok_or_else(|| "sign in to Quiver to load GitHub diffs".to_string())?;
+    let value: serde_json::Value = github_get_json(
+        &format!("repos/{repository}/pulls/{number}/files?per_page=100"),
+        &token,
+        "GitHub PR files",
+    )?;
     let files = parse_pull_request_files_value(value)?;
     Ok(pull_request_files_to_patch(&files))
 }
@@ -151,20 +396,13 @@ pub(crate) fn fetch_commit_patch(
     repository: &str,
     sha: &str,
 ) -> std::result::Result<String, String> {
-    let output = ProcessCommand::new("gh")
-        .args(["api", &format!("repos/{repository}/commits/{sha}")])
-        .output()
-        .map_err(|error| format!("failed to run gh: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("gh exited with {}", output.status)
-        } else {
-            stderr
-        });
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to parse gh commit JSON: {error}"))?;
+    let token =
+        github_token().ok_or_else(|| "sign in to Quiver to load GitHub commits".to_string())?;
+    let value: serde_json::Value = github_get_json(
+        &format!("repos/{repository}/commits/{sha}"),
+        &token,
+        "GitHub commit",
+    )?;
     let files = parse_pull_request_files_value(value.get("files").cloned().unwrap_or_default())?;
     Ok(pull_request_files_to_patch(&files))
 }
@@ -173,25 +411,13 @@ pub(crate) fn fetch_pull_request_commits(
     repository: &str,
     number: u32,
 ) -> std::result::Result<Vec<GitCommit>, String> {
-    let output = ProcessCommand::new("gh")
-        .args([
-            "api",
-            "--paginate",
-            "--slurp",
-            &format!("repos/{repository}/pulls/{number}/commits"),
-        ])
-        .output()
-        .map_err(|error| format!("failed to run gh: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            format!("gh exited with {}", output.status)
-        } else {
-            stderr
-        });
-    }
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to parse gh PR commits JSON: {error}"))?;
+    let token =
+        github_token().ok_or_else(|| "sign in to Quiver to load GitHub commits".to_string())?;
+    let value: serde_json::Value = github_get_json(
+        &format!("repos/{repository}/pulls/{number}/commits?per_page=100"),
+        &token,
+        "GitHub PR commits",
+    )?;
     parse_pull_request_commits_value(value)
 }
 
