@@ -770,6 +770,9 @@ impl App {
         }
         self.render_detail_tabs(frame, Rect::new(content.x, y, content.width, 1), palette);
         y += 1;
+        if y + 1 < area.bottom() {
+            y += 1;
+        }
         let tab_area = Rect::new(content.x, y, content.width, area.bottom().saturating_sub(y));
         match self.detail_tab {
             DetailTab::Semantic => {
@@ -1405,11 +1408,11 @@ impl App {
         let y = area.y;
         frame.render_widget(
             Line::from(vec![
-                Span::styled("Semantic changes", heading),
+                Span::styled("Changes", heading),
                 Span::styled(
                     right_aligned_text(
                         area.width,
-                        "Semantic changes".chars().count() + 1,
+                        "Changes".chars().count() + 1,
                         "enter/click opens file",
                     ),
                     muted,

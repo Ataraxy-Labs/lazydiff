@@ -92,6 +92,16 @@ cargo test
 cargo build --profile dev-fast
 ```
 
+For TUI dogfooding in a second terminal/tmux window, install `watchexec`
+and run:
+
+```bash
+scripts/dev-watch-tui.sh
+```
+
+It rebuilds with `dev-fast` and restarts `target/dev-fast/lazydiff` on Rust or
+Cargo manifest changes.
+
 ## Release
 
 Pushing an alpha tag like `v0.1.0-alpha.1` runs the release workflow and uploads platform binaries to a GitHub Release.
