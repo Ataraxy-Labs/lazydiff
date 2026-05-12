@@ -109,6 +109,18 @@ pub(crate) fn login_with_device_flow() -> std::result::Result<GitHubUser, String
     Ok(user)
 }
 
+pub(crate) fn logout_github() -> std::result::Result<bool, String> {
+    let mut removed = false;
+    for path in [auth_file(), convex_user_file()] {
+        match fs::remove_file(&path) {
+            Ok(()) => removed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("failed to remove {}: {error}", path.display())),
+        }
+    }
+    Ok(removed)
+}
+
 fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")

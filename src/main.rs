@@ -38,6 +38,7 @@ mod ui;
 use app::App;
 pub(crate) use app::CommandResult;
 pub(crate) use design_system::{FinderPalette, HomePalette};
+use github::{login_with_device_flow, logout_github};
 pub(crate) use github::{GitHubComment, GitHubQueue};
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use text::relative_unix_age;
@@ -56,6 +57,19 @@ fn main() -> Result<()> {
     }
     if args.first().is_some_and(|arg| arg == "agent") {
         return run_agent_cli(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "login") {
+        let user = login_with_device_flow().map_err(|error| color_eyre::eyre::eyre!(error))?;
+        println!("Signed in to GitHub as {}.", user.login);
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "logout") {
+        if logout_github().map_err(|error| color_eyre::eyre::eyre!(error))? {
+            println!("Signed out of GitHub.");
+        } else {
+            println!("Already signed out of GitHub.");
+        }
+        return Ok(());
     }
     let launch = LaunchInput::parse(args)?;
     let path = if bench_scroll {
@@ -652,7 +666,7 @@ fn run_git_dynamic(cwd: &Path, args: &[String]) -> Result<String> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lazydiff [command] [options]\n\nCommands:\n  lazydiff                         open the default review queue/home\n  lazydiff diff [target] [-- paths] review working tree or branch diff\n  lazydiff diff --staged           review staged changes\n  lazydiff show [ref]              review a commit (default HEAD)\n  lazydiff patch [file|-]          review a patch file or stdin\n  lazydiff pager                   read a patch from stdin\n  lazydiff difftool <left> <right> review two files\n\nShortcuts:\n  lazydiff --branch                review current branch vs upstream/base\n  lazydiff --worktree              review worktree vs HEAD\n"
+    "Usage: lazydiff [command] [options]\n\nCommands:\n  lazydiff                         open the default review queue/home\n  lazydiff login                   sign in to GitHub with device flow\n  lazydiff logout                  remove the stored GitHub login\n  lazydiff diff [target] [-- paths] review working tree or branch diff\n  lazydiff diff --staged           review staged changes\n  lazydiff show [ref]              review a commit (default HEAD)\n  lazydiff patch [file|-]          review a patch file or stdin\n  lazydiff pager                   read a patch from stdin\n  lazydiff difftool <left> <right> review two files\n\nShortcuts:\n  lazydiff --branch                review current branch vs upstream/base\n  lazydiff --worktree              review worktree vs HEAD\n"
 }
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
