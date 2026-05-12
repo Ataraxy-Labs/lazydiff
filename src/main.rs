@@ -346,16 +346,11 @@ fn parse_thread_id(id: &str) -> Result<(String, u64)> {
 }
 
 fn read_body_arg(args: &[String]) -> Result<String> {
-    let index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--body" | "-m" => return Ok(required_arg(args, index + 1, "body")?.to_string()),
+    if let Some(first) = args.first() {
+        match first.as_str() {
+            "--body" | "-m" => return Ok(required_arg(args, 1, "body")?.to_string()),
             "--body-file" | "-F" => {
-                return Ok(fs::read_to_string(required_arg(
-                    args,
-                    index + 1,
-                    "body file",
-                )?)?)
+                return Ok(fs::read_to_string(required_arg(args, 1, "body file")?)?)
             }
             value => return Ok(value.to_string()),
         }
