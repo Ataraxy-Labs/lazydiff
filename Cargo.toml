@@ -1,0 +1,48 @@
+[package]
+name = "lazydiff"
+version = "0.1.0"
+edition = "2021"
+description = "A fast terminal UI for reviewing Git diffs"
+license = "MIT"
+repository = "https://github.com/ataraxy-labs/lazydiff"
+readme = "README.md"
+keywords = ["git", "diff", "tui", "review"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+color-eyre = "0.6"
+crossterm = { version = "0.28", features = ["event-stream"] }
+nucleo-matcher = "0.3"
+ratatui = "0.29"
+regex = "1"
+ratatui-diffs = { path = "crates/ratatui-diffs" }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sem-core = "0.5.4"
+
+# Interactive development profile: much faster runtime than `dev`
+# without the slow fat-LTO/link-time work from `release`. Use with:
+# `cargo build --profile dev-fast` then `target/dev-fast/lazydiff`.
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+debug = 1
+incremental = true
+lto = false
+codegen-units = 256
+
+# Tight release profile for a small, fast binary. LTO and a single
+# codegen unit let rustc strip dead tree-sitter parse tables that the
+# default profile keeps; `strip = true` removes debug symbols; `panic
+# = "abort"` drops the unwinding tables.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+overflow-checks = false
+debug = false
+incremental = false
