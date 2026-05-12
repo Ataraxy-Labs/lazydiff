@@ -677,11 +677,11 @@ impl App {
                     return;
                 }
                 KeyCode::Char('[') if self.detail_tab == DetailTab::Semantic => {
-                    self.collapse_all_semantic_for_current_route();
+                    self.collapse_focused_semantic_branch();
                     return;
                 }
                 KeyCode::Char(']') if self.detail_tab == DetailTab::Semantic => {
-                    self.expand_all_semantic_for_current_route();
+                    self.expand_focused_semantic_branch();
                     return;
                 }
                 _ => {}

@@ -1,6 +1,6 @@
 # LazyDiff
 
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.2-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha.3-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 LazyDiff is a fast terminal UI for reviewing Git diffs. It focuses on the code-review loop: move through files, inspect hunks, search, keep lightweight notes, and stay in the terminal.

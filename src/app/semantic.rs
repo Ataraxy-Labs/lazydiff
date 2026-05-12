@@ -364,32 +364,87 @@ impl App {
         self.semantic_expanded.extend(keys);
     }
 
-    pub(super) fn collapse_all_semantic_for_current_route(&mut self) {
-        let Some(route) = self.current_semantic_route() else {
-            return;
-        };
-        let route_id = route.session_id();
-        self.semantic_expansion_seeded.insert(route_id.clone());
-        self.semantic_expanded
-            .retain(|key| key.route_id != route_id);
-        self.semantic_selection = 0;
-        self.semantic_scroll_y = 0;
-    }
-
-    pub(super) fn expand_all_semantic_for_current_route(&mut self) {
+    pub(super) fn collapse_focused_semantic_branch(&mut self) {
         let Some(route) = self.current_semantic_route() else {
             return;
         };
         let route_id = route.session_id();
         self.semantic_expansion_seeded.insert(route_id);
-        let Some(diff) = self.semantic_diff_for_route(&route).cloned() else {
+        let Some(keys) = self.focused_semantic_branch_keys(&route) else {
             return;
         };
-        let keys = self.semantic_all_expandable_keys(&route, &diff);
+        for key in keys {
+            self.semantic_expanded.remove(&key);
+        }
+        self.semantic_selection = self
+            .semantic_selection
+            .min(self.semantic_tree_rows(&route).len().saturating_sub(1));
+    }
+
+    pub(super) fn expand_focused_semantic_branch(&mut self) {
+        let Some(route) = self.current_semantic_route() else {
+            return;
+        };
+        let route_id = route.session_id();
+        self.semantic_expansion_seeded.insert(route_id);
+        let Some(keys) = self.focused_semantic_branch_keys(&route) else {
+            return;
+        };
         self.semantic_expanded.extend(keys);
         self.semantic_selection = self
             .semantic_selection
             .min(self.semantic_tree_rows(&route).len().saturating_sub(1));
+    }
+
+    fn focused_semantic_branch_keys(&self, route: &DiffSource) -> Option<Vec<SemanticNodeKey>> {
+        let rows = self.semantic_tree_rows(route);
+        let row = rows
+            .get(self.semantic_selection.min(rows.len().saturating_sub(1)))?
+            .clone();
+        match row {
+            SemanticTreeRow::Directory { key, .. } => {
+                let prefix = key.path.strip_prefix("dir:")?;
+                let diff = self.semantic_diff_for_route(route)?;
+                Some(self.semantic_expandable_keys_under_directory(route, diff, prefix))
+            }
+            SemanticTreeRow::File { key, .. } => Some(vec![key]),
+            SemanticTreeRow::Entity { path, .. } => Some(vec![SemanticNodeKey::file(route, &path)]),
+            SemanticTreeRow::Status(_) => None,
+        }
+    }
+
+    fn semantic_expandable_keys_under_directory(
+        &self,
+        route: &DiffSource,
+        diff: &SemanticDiff,
+        prefix: &str,
+    ) -> Vec<SemanticNodeKey> {
+        let mut keys = vec![SemanticNodeKey::directory(route, prefix)];
+        let mut seen_dirs = HashSet::from([prefix.to_string()]);
+        for file in &diff.files {
+            if file.path != prefix && !file.path.starts_with(&format!("{prefix}/")) {
+                continue;
+            }
+            let parts: Vec<&str> = file
+                .path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect();
+            if parts.len() > 1 {
+                let mut directory = String::new();
+                for part in &parts[..parts.len() - 1] {
+                    if !directory.is_empty() {
+                        directory.push('/');
+                    }
+                    directory.push_str(part);
+                    if directory.starts_with(prefix) && seen_dirs.insert(directory.clone()) {
+                        keys.push(SemanticNodeKey::directory(route, &directory));
+                    }
+                }
+            }
+            keys.push(SemanticNodeKey::file(route, &file.path));
+        }
+        keys
     }
 
     fn semantic_diff_for_route(&self, route: &DiffSource) -> Option<&SemanticDiff> {
@@ -408,20 +463,6 @@ impl App {
             diff.files
                 .iter()
                 .take(SEMANTIC_DEFAULT_OPEN_FILE_COUNT)
-                .map(|file| SemanticNodeKey::file(route, &file.path)),
-        );
-        keys
-    }
-
-    fn semantic_all_expandable_keys(
-        &self,
-        route: &DiffSource,
-        diff: &SemanticDiff,
-    ) -> Vec<SemanticNodeKey> {
-        let mut keys = self.semantic_directory_keys(route, diff);
-        keys.extend(
-            diff.files
-                .iter()
                 .map(|file| SemanticNodeKey::file(route, &file.path)),
         );
         keys

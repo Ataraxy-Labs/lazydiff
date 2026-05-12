@@ -1268,7 +1268,6 @@ impl App {
             .bg(bg)
             .add_modifier(Modifier::BOLD);
         let inactive = palette.text(TextRole::Muted).bg(bg);
-        let key = palette.text(TextRole::Key).bg(bg);
         let semantic = if self.detail_tab == DetailTab::Semantic {
             active
         } else {
@@ -1281,15 +1280,9 @@ impl App {
         };
         frame.render_widget(
             Line::from(vec![
-                Span::styled("1 ", key),
                 Span::styled("Semantic", semantic),
-                Span::styled("  ", inactive),
-                Span::styled("2 ", key),
+                Span::styled("   ", inactive),
                 Span::styled("Description", description),
-                Span::styled(
-                    right_aligned_text(area.width, 25, "←/→ switch · [ fold · ] unfold"),
-                    inactive,
-                ),
             ]),
             area,
         );
