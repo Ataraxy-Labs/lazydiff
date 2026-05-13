@@ -1,11 +1,59 @@
 # LazyDiff
 
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.3-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha.4-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-LazyDiff is a fast terminal UI for reviewing Git diffs. It focuses on the code-review loop: move through files, inspect hunks, search, keep lightweight notes, and stay in the terminal.
+LazyDiff is a fast terminal UI for reviewing Git diffs and GitHub pull requests.
+It focuses on the code-review loop: move through files, inspect hunks, browse
+semantic changes, search, keep lightweight notes, and stay in the terminal.
 
-> **Alpha:** LazyDiff is ready for early adopters and internal dogfooding, not a production-stable public launch yet. APIs, storage, release packaging, and branding are still being cleaned up.
+> **Alpha:** LazyDiff is ready for early adopters and internal dogfooding, not a
+> production-stable public launch yet. UI details, persistence, integrations, and
+> release packaging may still change between alpha releases.
+
+## Install
+
+The recommended alpha install path is the installer script. It downloads the
+matching GitHub Release archive and installs `lazydiff` into
+`~/.lazydiff/bin/lazydiff`.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ataraxy-Labs/lazydiff/main/install | sh
+```
+
+Install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ataraxy-Labs/lazydiff/main/install | sh -s -- --version v0.1.0-alpha.4
+```
+
+Install from an already-built local binary:
+
+```bash
+./install --binary target/release/lazydiff
+```
+
+The installer also supports:
+
+```bash
+./install --no-modify-path
+./install --version v0.1.0-alpha.4
+```
+
+If `~/.local/bin` is on your `PATH`, you can symlink the installed release
+binary there:
+
+```bash
+ln -sfn ~/.lazydiff/bin/lazydiff ~/.local/bin/lazydiff
+```
+
+## Update
+
+LazyDiff can update itself from GitHub Releases:
+
+```bash
+lazydiff update
+```
 
 ## Install from source
 
@@ -44,30 +92,77 @@ You can still pass a patch file directly:
 cargo run -- path/to/change.diff
 ```
 
+## GitHub and cloud features
+
+GitHub-backed PR review uses device login:
+
+```bash
+lazydiff login
+lazydiff logout
+```
+
+After login, LazyDiff can load the PR review queue/home experience, open PRs,
+show descriptions, browse semantic changes, and keep review state in the local
+cache. Cloud-backed metadata is configured at build time by the release workflow.
+
+For custom builds, the Convex endpoints can be overridden with:
+
+```bash
+LAZYDIFF_CONVEX_URL=https://your-deployment.convex.cloud \
+LAZYDIFF_CONVEX_HTTP_URL=https://your-deployment.convex.site \
+cargo build --release
+```
+
+## Semantic review
+
+LazyDiff uses `sem-core` to turn noisy file diffs into a semantic tree of changed
+entities. The PR detail pane has two tabs:
+
+- `Semantic` / `Changes`: files, folders, functions, methods, classes, and other
+  extracted entities that changed.
+- `Description`: the rendered pull request body.
+
+Folding is contextual:
+
+- `[` collapses the focused semantic branch.
+- `]` expands the focused semantic branch.
+- `enter` opens/toggles the focused file or entity and keeps the source diff in
+  sync.
+
+Release builds currently use a minimal sem grammar set — TypeScript/TSX,
+JavaScript/JSX, Python, Go, Rust, and Java — to keep binaries small. Unsupported
+languages still fall back to normal textual diff review.
+
 ## Useful keys
 
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move line |
 | `ctrl-d` / `ctrl-u` | Half-page scroll |
-| `[` / `]` | Previous / next file |
+| `[` / `]` | Collapse / expand focused semantic branch in the semantic tab |
 | `/` | Search diff text |
 | `f` | Open file picker |
 | `m` | Toggle split/unified diff mode |
+| `tab` | Switch PR detail tabs when the detail pane is focused |
+| `enter` | Open/toggle focused item |
 | `q` / `esc` | Back / quit |
 
 ## Support Status
 
-- Local Git diff review and source installs are the supported alpha path.
-- GitHub PR/queue integrations are available for dogfooding, but still settling.
-- The `lazydiff-diffs` crate is vendored in this repo today; crates.io packaging is not supported yet.
-- Release binaries are published from alpha tags, but checksums, signing, and package-manager installs are still future work.
+- Local Git diff review, GitHub PR dogfooding, release archives, and the install
+  script are supported alpha paths.
+- Release artifacts are published as platform archives with `.sha256` files.
+- The `lazydiff-diffs` crate is vendored in this repo today; crates.io packaging
+  is not supported yet.
+- Package-manager distribution, binary signing, and broader language grammar
+  selection are still future work.
 
 ## Current Caveats
 
 - Expect UI and persistence details to change across alpha releases.
 - Some code paths are intentionally still extraction-era cleanup work.
 - The repo currently builds and tests cleanly, but clippy still reports warnings.
+- GitHub and cloud-backed flows are still dogfood-grade.
 
 ## Stored State
 
@@ -84,6 +179,22 @@ If `XDG_DATA_HOME` is unset, this defaults to:
 ```
 
 ## Development
+
+Fast local build:
+
+```bash
+cargo build --profile dev-fast
+target/dev-fast/lazydiff
+```
+
+Recommended local symlink split:
+
+```bash
+ln -sfn "$PWD/target/dev-fast/lazydiff" ~/.local/bin/lazydiff-dev
+ln -sfn ~/.lazydiff/bin/lazydiff ~/.local/bin/lazydiff
+```
+
+Quality checks:
 
 ```bash
 cargo fmt --check
@@ -104,12 +215,21 @@ Cargo manifest changes.
 
 ## Release
 
-Pushing an alpha tag like `v0.1.0-alpha.1` runs the release workflow and uploads platform binaries to a GitHub Release.
+Pushing an alpha tag like `v0.1.0-alpha.4` runs the release workflow and uploads
+platform archives to a GitHub Release:
+
+- `lazydiff-linux-x86_64.tar.gz`
+- `lazydiff-macos-arm64.tar.gz`
+- `lazydiff-windows-x86_64.zip`
+- one `.sha256` checksum per archive
 
 ```bash
-git tag v0.1.0-alpha.1
-git push origin v0.1.0-alpha.1
+git tag v0.1.0-alpha.4
+git push origin v0.1.0-alpha.4
 ```
+
+The release workflow builds with production Convex URLs and smoke-tests
+`--version` and `--help` before packaging.
 
 ## License
 
