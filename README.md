@@ -3,19 +3,28 @@
 [![Version](https://img.shields.io/badge/version-0.1.0--alpha.4-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-LazyDiff is a fast terminal UI for reviewing Git diffs and GitHub pull requests.
-It focuses on the code-review loop: move through files, inspect hunks, browse
-semantic changes, search, keep lightweight notes, and stay in the terminal.
+A fast terminal UI for reviewing Git diffs and GitHub pull requests.
 
-> **Alpha:** LazyDiff is ready for early adopters and internal dogfooding, not a
-> production-stable public launch yet. UI details, persistence, integrations, and
-> release packaging may still change between alpha releases.
+LazyDiff is for the code-review loop: jump through changed files, inspect hunks,
+search the diff, browse semantic changes, and keep your focus in the terminal.
 
-## Install
+> **Alpha:** LazyDiff is currently intended for early adopters and dogfooding.
+> Expect UI and workflow changes between alpha releases.
 
-The recommended alpha install path is the installer script. It downloads the
-matching GitHub Release archive and installs `lazydiff` into
-`~/.lazydiff/bin/lazydiff`.
+## Features
+
+- Review worktree changes, staged changes, commits, refs, patch files, and stdin diffs.
+- Browse pull requests from a terminal-first review queue.
+- Open PR descriptions and changed files side by side.
+- See semantic code changes powered by [`sem-core`](https://github.com/Ataraxy-Labs/sem).
+- Search within diffs and jump directly to matching files or hunks.
+- Switch between unified and split diff views.
+- Persist lightweight review state locally.
+- Login, logout, and update from the CLI.
+
+## Installation
+
+Install the latest release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ataraxy-Labs/lazydiff/main/install | sh
@@ -27,159 +36,75 @@ Install a specific version:
 curl -fsSL https://raw.githubusercontent.com/Ataraxy-Labs/lazydiff/main/install | sh -s -- --version v0.1.0-alpha.4
 ```
 
-Install from an already-built local binary:
+Verify the install:
 
 ```bash
-./install --binary target/release/lazydiff
+lazydiff --version
 ```
 
-The installer also supports:
+### From source
 
 ```bash
-./install --no-modify-path
-./install --version v0.1.0-alpha.4
+cargo install --git https://github.com/Ataraxy-Labs/lazydiff
 ```
 
-If `~/.local/bin` is on your `PATH`, you can symlink the installed release
-binary there:
+## Usage
+
+Open LazyDiff in a Git repository:
 
 ```bash
-ln -sfn ~/.lazydiff/bin/lazydiff ~/.local/bin/lazydiff
+lazydiff
 ```
 
-## Update
-
-LazyDiff can update itself from GitHub Releases:
+Review local changes directly:
 
 ```bash
-lazydiff update
+lazydiff diff                    # worktree changes vs HEAD
+lazydiff diff --staged           # staged changes
+lazydiff diff origin/main        # current branch vs a base ref
+lazydiff show HEAD~1             # a commit
+lazydiff patch path/to/file.diff # a patch file
+git diff --no-color | lazydiff pager
 ```
 
-## Install from source
-
-```bash
-cargo install --git https://github.com/ataraxy-labs/lazydiff
-```
-
-## Run locally
-
-```bash
-git clone https://github.com/ataraxy-labs/lazydiff.git
-cd lazydiff
-cargo run
-```
-
-By default LazyDiff opens the main review queue/home experience. You can also jump directly into Hunk-style review commands:
-
-```bash
-cargo run -- diff                    # review worktree changes vs HEAD
-cargo run -- diff --staged           # review staged changes
-cargo run -- diff origin/main        # review current branch vs a base ref
-cargo run -- show HEAD~1             # review a commit
-cargo run -- patch path/to/change.diff
-git diff --no-color | cargo run -- pager
-```
-
-For the fast local-review shortcut, use:
-
-```bash
-cargo run -- --branch
-```
-
-You can still pass a patch file directly:
-
-```bash
-cargo run -- path/to/change.diff
-```
-
-## GitHub and cloud features
-
-GitHub-backed PR review uses device login:
+GitHub PR review uses device login:
 
 ```bash
 lazydiff login
 lazydiff logout
 ```
 
-After login, LazyDiff can load the PR review queue/home experience, open PRs,
-show descriptions, browse semantic changes, and keep review state in the local
-cache. Cloud-backed metadata is configured at build time by the release workflow.
-
-For custom builds, the Convex endpoints can be overridden with:
+Update LazyDiff from GitHub Releases:
 
 ```bash
-LAZYDIFF_CONVEX_URL=https://your-deployment.convex.cloud \
-LAZYDIFF_CONVEX_HTTP_URL=https://your-deployment.convex.site \
-cargo build --release
+lazydiff update
 ```
 
-## Semantic review
-
-LazyDiff uses `sem-core` to turn noisy file diffs into a semantic tree of changed
-entities. In PR review, the detail pane can show both the extracted changes and
-the pull request description without leaving the terminal.
-
-Release builds currently use a minimal sem grammar set — TypeScript/TSX,
-JavaScript/JSX, Python, Go, Rust, and Java — to keep binaries small. Unsupported
-languages still fall back to normal textual diff review.
-
-## Useful keys
+## Keybindings
 
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move line |
 | `ctrl-d` / `ctrl-u` | Half-page scroll |
-| `/` | Search diff text |
+| `/` | Search |
 | `f` | Open file picker |
 | `m` | Toggle split/unified diff mode |
-| `enter` | Open/toggle focused item |
+| `enter` | Open focused item |
 | `q` / `esc` | Back / quit |
-
-## Support Status
-
-- Local Git diff review, GitHub PR dogfooding, release archives, and the install
-  script are supported alpha paths.
-- Release artifacts are published as platform archives with `.sha256` files.
-- The `lazydiff-diffs` crate is vendored in this repo today; crates.io packaging
-  is not supported yet.
-- Package-manager distribution, binary signing, and broader language grammar
-  selection are still future work.
-
-## Current Caveats
-
-- Expect UI and persistence details to change across alpha releases.
-- Some code paths are intentionally still extraction-era cleanup work.
-- The repo currently builds and tests cleanly, but clippy still reports warnings.
-- GitHub and cloud-backed flows are still dogfood-grade.
-
-## Stored State
-
-LazyDiff stores review sessions, review items, user preferences, cache entries, and last-viewed diff viewport state in one global SQLite database:
-
-```text
-$XDG_DATA_HOME/lazydiff/lazydiff.db
-```
-
-If `XDG_DATA_HOME` is unset, this defaults to:
-
-```text
-~/.local/share/lazydiff/lazydiff.db
-```
 
 ## Development
 
-Fast local build:
+```bash
+git clone https://github.com/Ataraxy-Labs/lazydiff.git
+cd lazydiff
+cargo run
+```
+
+Fast local TUI loop:
 
 ```bash
 cargo build --profile dev-fast
-target/dev-fast/lazydiff
-```
-
-Recommended local symlink split:
-
-```bash
-ln -sfn "$PWD/target/dev-fast/lazydiff" ~/.local/bin/lazydiff-dev
-ln -sfn ~/.lazydiff/bin/lazydiff ~/.local/bin/lazydiff
+scripts/dev-watch-tui.sh
 ```
 
 Quality checks:
@@ -188,36 +113,21 @@ Quality checks:
 cargo fmt --check
 cargo clippy --all-targets
 cargo test
-cargo build --profile dev-fast
 ```
 
-For TUI dogfooding in a second terminal/tmux window, install `watchexec`
-and run:
+## Release builds
 
-```bash
-scripts/dev-watch-tui.sh
-```
+Release artifacts are published as GitHub Release archives for Linux, macOS, and
+Windows, with `.sha256` checksums.
 
-It rebuilds with `dev-fast` and restarts `target/dev-fast/lazydiff` on Rust or
-Cargo manifest changes.
+Release builds currently include a focused semantic grammar set — TypeScript/TSX,
+JavaScript/JSX, Python, Go, Rust, and Java — to keep binaries small. Other
+languages still fall back to normal textual diff review.
 
-## Release
+## Contributing
 
-Pushing an alpha tag like `v0.1.0-alpha.4` runs the release workflow and uploads
-platform archives to a GitHub Release:
-
-- `lazydiff-linux-x86_64.tar.gz`
-- `lazydiff-macos-arm64.tar.gz`
-- `lazydiff-windows-x86_64.zip`
-- one `.sha256` checksum per archive
-
-```bash
-git tag v0.1.0-alpha.4
-git push origin v0.1.0-alpha.4
-```
-
-The release workflow builds with production Convex URLs and smoke-tests
-`--version` and `--help` before packaging.
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+local development notes.
 
 ## License
 
