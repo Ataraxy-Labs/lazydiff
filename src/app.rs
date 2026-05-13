@@ -18,6 +18,12 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use lazydiff_diffs::{
+    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffLine,
+    DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
+    DiffViewState, DiffWidget, FileDiff, InlineDiffSpan, SliderState, SyntaxHighlightKind,
+    SyntaxSpan, TextSelection, TextViewport,
+};
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
@@ -29,12 +35,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, List, ListItem, ListState, StatefulWidget},
     Frame, Terminal,
-};
-use lazydiff_diffs::{
-    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffLine,
-    DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
-    DiffViewState, DiffWidget, FileDiff, InlineDiffSpan, SliderState, SyntaxHighlightKind,
-    SyntaxSpan, TextSelection, TextViewport,
 };
 use serde::{Deserialize, Serialize};
 

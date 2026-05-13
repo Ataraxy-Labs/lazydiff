@@ -11,6 +11,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use lazydiff_diffs::{
+    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffMode,
+    DiffViewState, DiffWidget,
+};
 use ratatui::{
     backend::{CrosstermBackend, TestBackend},
     layout::{Constraint, Layout},
@@ -18,10 +22,6 @@ use ratatui::{
     text::Line,
     widgets::StatefulWidget,
     Terminal,
-};
-use lazydiff_diffs::{
-    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffMode,
-    DiffViewState, DiffWidget,
 };
 use serde::Deserialize;
 

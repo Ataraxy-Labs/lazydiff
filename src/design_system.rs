@@ -1,5 +1,5 @@
-use ratatui::style::{Color, Modifier, Style};
 use lazydiff_diffs::{DiffTheme, DiffThemeName, SyntaxTheme};
+use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Serialize};
 
 /// Quiver's design-system tokens for the ratatui demo.

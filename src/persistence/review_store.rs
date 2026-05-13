@@ -1,8 +1,8 @@
 use std::{env, fs, path::PathBuf, process::Command as ProcessCommand};
 
 use color_eyre::Result;
-use ratatui::style::Color;
 use lazydiff_diffs::{DiffDocument, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffSide};
+use ratatui::style::Color;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 

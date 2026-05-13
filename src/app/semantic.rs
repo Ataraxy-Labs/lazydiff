@@ -9,7 +9,7 @@ use sem_core::{
 };
 
 const SEMANTIC_CHANGE_LIMIT: usize = 240;
-const SEMANTIC_DEFAULT_OPEN_FILE_COUNT: usize = 3;
+const SEMANTIC_DEFAULT_OPEN_FILE_COUNT: usize = 1;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SemanticDiff {
@@ -458,7 +458,10 @@ impl App {
         route: &DiffSource,
         diff: &SemanticDiff,
     ) -> Vec<SemanticNodeKey> {
-        let mut keys = self.semantic_directory_keys(route, diff);
+        // Keep path scaffolding open so every changed file remains visible,
+        // but only open the first file's entities by default. Enter/`]` can
+        // still explode the focused branch on demand.
+        let mut keys = Self::semantic_directory_keys(route, diff);
         keys.extend(
             diff.files
                 .iter()
@@ -468,11 +471,7 @@ impl App {
         keys
     }
 
-    fn semantic_directory_keys(
-        &self,
-        route: &DiffSource,
-        diff: &SemanticDiff,
-    ) -> Vec<SemanticNodeKey> {
+    fn semantic_directory_keys(route: &DiffSource, diff: &SemanticDiff) -> Vec<SemanticNodeKey> {
         let mut seen = HashSet::new();
         let mut keys = Vec::new();
         for file in &diff.files {
@@ -749,7 +748,18 @@ impl App {
         };
         match row {
             SemanticTreeRow::Directory { key, .. } | SemanticTreeRow::File { key, .. } => {
-                self.toggle_semantic_file(key);
+                self.semantic_expansion_seeded.insert(route.session_id());
+                match self.focused_semantic_branch_keys(&route) {
+                    Some(keys) if keys.iter().all(|key| self.semantic_expanded.contains(key)) => {
+                        for key in keys {
+                            self.semantic_expanded.remove(&key);
+                        }
+                    }
+                    Some(keys) => self.semantic_expanded.extend(keys),
+                    None => {
+                        self.semantic_expanded.insert(key);
+                    }
+                }
                 true
             }
             SemanticTreeRow::Entity {

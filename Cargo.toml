@@ -1,6 +1,6 @@
 [package]
 name = "lazydiff"
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2021"
 description = "A fast terminal UI for reviewing Git diffs"
 license = "MIT"
@@ -21,7 +21,7 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sem-core = "0.5.4"
+sem-core = { git = "https://github.com/Ataraxy-Labs/sem.git", branch = "lazydiff-optional-grammars", default-features = false, features = ["lang-minimal"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 # Interactive development profile: much faster runtime than `dev`
