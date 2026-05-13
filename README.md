@@ -116,18 +116,8 @@ cargo build --release
 ## Semantic review
 
 LazyDiff uses `sem-core` to turn noisy file diffs into a semantic tree of changed
-entities. The PR detail pane has two tabs:
-
-- `Semantic` / `Changes`: files, folders, functions, methods, classes, and other
-  extracted entities that changed.
-- `Description`: the rendered pull request body.
-
-Folding is contextual:
-
-- `[` collapses the focused semantic branch.
-- `]` expands the focused semantic branch.
-- `enter` opens/toggles the focused file or entity and keeps the source diff in
-  sync.
+entities. In PR review, the detail pane can show both the extracted changes and
+the pull request description without leaving the terminal.
 
 Release builds currently use a minimal sem grammar set — TypeScript/TSX,
 JavaScript/JSX, Python, Go, Rust, and Java — to keep binaries small. Unsupported
@@ -139,11 +129,9 @@ languages still fall back to normal textual diff review.
 | --- | --- |
 | `j` / `k` | Move line |
 | `ctrl-d` / `ctrl-u` | Half-page scroll |
-| `[` / `]` | Collapse / expand focused semantic branch in the semantic tab |
 | `/` | Search diff text |
 | `f` | Open file picker |
 | `m` | Toggle split/unified diff mode |
-| `tab` | Switch PR detail tabs when the detail pane is focused |
 | `enter` | Open/toggle focused item |
 | `q` / `esc` | Back / quit |
 
