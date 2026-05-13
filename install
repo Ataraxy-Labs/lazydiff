@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+
+if [ -z "${BASH_VERSION:-}" ]; then
+  if [ -r "$0" ]; then
+    exec bash "$0" "$@"
+  fi
+  tmp_script=$(mktemp "${TMPDIR:-/tmp}/lazydiff-install.XXXXXX")
+  cat > "$tmp_script"
+  exec bash "$tmp_script" "$@"
+fi
+
 set -euo pipefail
 
 APP=lazydiff
@@ -8,7 +18,21 @@ INSTALL_DIR="${LAZYDIFF_INSTALL_DIR:-$HOME/.lazydiff/bin}"
 MUTED='\033[0;2m'
 RED='\033[0;31m'
 ORANGE='\033[38;5;214m'
+GREEN='\033[0;32m'
+BOLD='\033[1m'
 NC='\033[0m'
+
+say() { printf '%b\n' "$*"; }
+info() { say "${MUTED}›${NC} $*"; }
+success() { say "${GREEN}✓${NC} $*"; }
+warn() { say "${ORANGE}!${NC} $*"; }
+error() { say "${RED}Error:${NC} $*" >&2; }
+
+banner() {
+  say "${ORANGE}╭────────────────────────────╮${NC}"
+  say "${ORANGE}│${NC} ${BOLD}LazyDiff${NC} ${MUTED}terminal review${NC} ${ORANGE}│${NC}"
+  say "${ORANGE}╰────────────────────────────╯${NC}"
+}
 
 usage() {
   cat <<EOF
@@ -41,7 +65,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -v|--version)
       if [[ -z "${2:-}" ]]; then
-        echo -e "${RED}Error: --version requires a version argument${NC}" >&2
+        error "--version requires a version argument"
         exit 1
       fi
       requested_version="$2"
@@ -49,7 +73,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     -b|--binary)
       if [[ -z "${2:-}" ]]; then
-        echo -e "${RED}Error: --binary requires a path${NC}" >&2
+        error "--binary requires a path"
         exit 1
       fi
       binary_path="$2"
@@ -60,13 +84,15 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     *)
-      echo -e "${ORANGE}Warning: unknown option '$1'${NC}" >&2
+      warn "unknown option '$1'" >&2
       shift
       ;;
   esac
 done
 
 mkdir -p "$INSTALL_DIR"
+banner
+say ""
 
 raw_os=$(uname -s)
 case "$raw_os" in
@@ -91,11 +117,11 @@ fi
 
 if [[ -n "$binary_path" ]]; then
   if [[ ! -f "$binary_path" ]]; then
-    echo -e "${RED}Error: binary not found at $binary_path${NC}" >&2
+    error "binary not found at $binary_path"
     exit 1
   fi
   version="local"
-  echo -e "${MUTED}Installing ${NC}$APP ${MUTED}from ${NC}$binary_path"
+  info "Installing ${BOLD}$APP${NC} ${MUTED}from${NC} $binary_path"
   cp "$binary_path" "$INSTALL_DIR/$APP"
   chmod 755 "$INSTALL_DIR/$APP"
 else
@@ -113,15 +139,15 @@ else
       fallback_filename="lazydiff-windows-x86_64.exe"
       ;;
     *)
-      echo -e "${RED}Unsupported OS/Arch: $os/$arch${NC}" >&2
+      error "unsupported OS/Arch: $os/$arch"
       exit 1
       ;;
   esac
 
   if [[ "$filename" == *.tar.gz ]]; then
-    command -v tar >/dev/null 2>&1 || { echo -e "${RED}Error: tar is required${NC}" >&2; exit 1; }
+    command -v tar >/dev/null 2>&1 || { error "tar is required"; exit 1; }
   else
-    command -v unzip >/dev/null 2>&1 || { echo -e "${RED}Error: unzip is required${NC}" >&2; exit 1; }
+    command -v unzip >/dev/null 2>&1 || { error "unzip is required"; exit 1; }
   fi
 
   if [[ -z "$requested_version" ]]; then
@@ -129,7 +155,7 @@ else
     fallback_url="https://github.com/$REPO/releases/latest/download/$fallback_filename"
     version=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
     if [[ -z "$version" ]]; then
-      echo -e "${RED}Failed to fetch latest version${NC}" >&2
+      error "failed to fetch latest version"
       exit 1
     fi
   else
@@ -142,19 +168,19 @@ else
   if command -v lazydiff >/dev/null 2>&1; then
     installed_version=$(lazydiff --version 2>/dev/null || true)
     if [[ "$installed_version" == "$version" ]]; then
-      echo -e "${MUTED}Version ${NC}$version${MUTED} already installed${NC}"
+      success "lazydiff $version is already installed"
       exit 0
     fi
-    [[ -n "$installed_version" ]] && echo -e "${MUTED}Installed version: ${NC}$installed_version"
+    [[ -n "$installed_version" ]] && info "Current version: $installed_version"
   fi
 
   tmp_dir="${TMPDIR:-/tmp}/lazydiff_install_$$"
   mkdir -p "$tmp_dir"
   trap 'rm -rf "$tmp_dir"' EXIT
-  echo -e "${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$version"
-  if ! curl -f# -L -o "$tmp_dir/$filename" "$url"; then
-    echo -e "${MUTED}Archive asset not found; falling back to raw binary asset.${NC}"
-    curl -f# -L -o "$tmp_dir/$fallback_filename" "$fallback_url"
+  info "Installing ${BOLD}$APP $version${NC} ${MUTED}for $os-$arch${NC}"
+  if ! curl -fsSL -o "$tmp_dir/$filename" "$url"; then
+    info "Archive asset not found; falling back to raw binary asset"
+    curl -fsSL -o "$tmp_dir/$fallback_filename" "$fallback_url"
     mv "$tmp_dir/$fallback_filename" "$tmp_dir/lazydiff"
   elif [[ "$filename" == *.tar.gz ]]; then
     tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
@@ -171,13 +197,13 @@ add_to_path() {
   local config_file=$1
   local command=$2
   if grep -Fxq "$command" "$config_file"; then
-    echo -e "${MUTED}PATH already configured in ${NC}$config_file"
+    info "PATH already configured in $config_file"
   elif [[ -w "$config_file" ]]; then
     printf '\n# lazydiff\n%s\n' "$command" >> "$config_file"
-    echo -e "${MUTED}Added ${NC}$APP ${MUTED}to PATH in ${NC}$config_file"
+    success "Added lazydiff to PATH in $config_file"
   else
-    echo "Manually add this to your shell config:"
-    echo "  $command"
+    say "Manually add this to your shell config:"
+    say "  $command"
   fi
 }
 
@@ -200,8 +226,8 @@ if [[ "$no_modify_path" != "true" ]]; then
       fi
     done
     if [[ -z "$config_file" ]]; then
-      echo "Add lazydiff to your PATH:"
-      echo "  export PATH=$INSTALL_DIR:\$PATH"
+      say "Add lazydiff to your PATH:"
+      say "  export PATH=$INSTALL_DIR:\$PATH"
     elif [[ "$current_shell" == "fish" ]]; then
       add_to_path "$config_file" "fish_add_path $INSTALL_DIR"
     else
@@ -214,6 +240,6 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   echo "$INSTALL_DIR" >> "$GITHUB_PATH"
 fi
 
-echo ""
-echo -e "${MUTED}Installed ${NC}lazydiff${MUTED} at ${NC}$INSTALL_DIR/lazydiff"
-echo -e "${MUTED}Run:${NC} lazydiff"
+say ""
+success "Installed ${BOLD}lazydiff${NC} to $INSTALL_DIR/lazydiff"
+info "Run ${BOLD}lazydiff${NC} to get started"
