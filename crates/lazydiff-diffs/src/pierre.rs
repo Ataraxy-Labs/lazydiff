@@ -101,24 +101,39 @@ fn push_span(spans: &mut Vec<RenderSpan>, ch: char, style: Style) {
         }
     }
 
-    spans.push(RenderSpan { text: ch.to_string(), style });
+    spans.push(RenderSpan {
+        text: ch.to_string(),
+        style,
+    });
 }
 
 fn inline_diff_style(base_style: Style, row_kind: RowKind, theme: DiffTheme) -> Style {
     match row_kind {
-        RowKind::Add => base_style.bg(theme.add_content_bg).add_modifier(Modifier::BOLD),
-        RowKind::Delete => base_style.bg(theme.del_content_bg).add_modifier(Modifier::BOLD),
+        RowKind::Add => base_style
+            .bg(theme.add_content_bg)
+            .add_modifier(Modifier::BOLD),
+        RowKind::Delete => base_style
+            .bg(theme.del_content_bg)
+            .add_modifier(Modifier::BOLD),
         RowKind::Context | RowKind::Empty => base_style,
     }
 }
 
 fn syntax_style(base_style: Style, kind: SyntaxHighlightKind, theme: DiffTheme) -> Style {
     match kind {
-        SyntaxHighlightKind::Comment => base_style.fg(theme.syntax.comment).add_modifier(Modifier::ITALIC),
-        SyntaxHighlightKind::Keyword => base_style.fg(theme.syntax.keyword).add_modifier(Modifier::BOLD),
+        SyntaxHighlightKind::Comment => base_style
+            .fg(theme.syntax.comment)
+            .add_modifier(Modifier::ITALIC),
+        SyntaxHighlightKind::Keyword => base_style
+            .fg(theme.syntax.keyword)
+            .add_modifier(Modifier::BOLD),
         SyntaxHighlightKind::Punctuation => base_style.fg(theme.syntax.punctuation),
-        SyntaxHighlightKind::String | SyntaxHighlightKind::Markup => base_style.fg(theme.syntax.string),
-        SyntaxHighlightKind::Number | SyntaxHighlightKind::Boolean => base_style.fg(theme.syntax.number).add_modifier(Modifier::BOLD),
+        SyntaxHighlightKind::String | SyntaxHighlightKind::Markup => {
+            base_style.fg(theme.syntax.string)
+        }
+        SyntaxHighlightKind::Number | SyntaxHighlightKind::Boolean => base_style
+            .fg(theme.syntax.number)
+            .add_modifier(Modifier::BOLD),
         SyntaxHighlightKind::Function => base_style.fg(theme.syntax.function),
         SyntaxHighlightKind::Type => base_style.fg(theme.syntax.r#type),
         SyntaxHighlightKind::Property => base_style.fg(theme.syntax.property),
@@ -158,27 +173,51 @@ pub(crate) fn apply_markdown_overlays(
     // Original Pierre IDE palette. Theme-independent on purpose — these tokens
     // were tuned to read as a polished IDE diff regardless of the surrounding
     // shell, and the app-level theme toggle should not mute them.
-    spans.insert(0, styled_span(0, text.len(), Style::new().fg(Color::Rgb(251, 251, 251))));
+    spans.insert(
+        0,
+        styled_span(0, text.len(), Style::new().fg(Color::Rgb(251, 251, 251))),
+    );
 
     let trimmed = text.trim_start();
     let leading = text.len().saturating_sub(trimmed.len());
     if state.in_html_comment || trimmed.starts_with("<!--") {
-        spans.push(styled_span(leading, text.len(), Style::new().fg(Color::Rgb(132, 132, 138))));
+        spans.push(styled_span(
+            leading,
+            text.len(),
+            Style::new().fg(Color::Rgb(132, 132, 138)),
+        ));
         state.in_html_comment = !trimmed.contains("-->");
         return;
     }
 
     if trimmed.starts_with('#') {
         let marker_len = trimmed.bytes().take_while(|byte| *byte == b'#').count();
-        let marker_end = leading + marker_len + usize::from(trimmed.as_bytes().get(marker_len) == Some(&b' '));
-        spans.push(styled_span(leading, marker_end.min(text.len()), Style::new().fg(Color::Rgb(196, 208, 218))));
+        let marker_end =
+            leading + marker_len + usize::from(trimmed.as_bytes().get(marker_len) == Some(&b' '));
+        spans.push(styled_span(
+            leading,
+            marker_end.min(text.len()),
+            Style::new().fg(Color::Rgb(196, 208, 218)),
+        ));
     } else if trimmed.starts_with('>') {
-        spans.push(styled_span(leading, leading + 1, Style::new().fg(Color::Rgb(121, 121, 127))));
+        spans.push(styled_span(
+            leading,
+            leading + 1,
+            Style::new().fg(Color::Rgb(121, 121, 127)),
+        ));
         if leading + 1 < text.len() {
-            spans.push(styled_span(leading + 1, text.len(), Style::new().fg(Color::Rgb(132, 132, 138))));
+            spans.push(styled_span(
+                leading + 1,
+                text.len(),
+                Style::new().fg(Color::Rgb(132, 132, 138)),
+            ));
         }
     } else if let Some(marker_len) = markdown_list_marker_len(trimmed) {
-        spans.push(styled_span(leading, leading + marker_len, Style::new().fg(Color::Rgb(196, 208, 218))));
+        spans.push(styled_span(
+            leading,
+            leading + marker_len,
+            Style::new().fg(Color::Rgb(196, 208, 218)),
+        ));
     }
 
     if push_markdown_reference_definition_overlay(text, spans) {
@@ -204,12 +243,19 @@ pub(crate) struct PierreHighlighter {
 impl PierreHighlighter {
     pub(crate) fn new() -> Option<Self> {
         let mut registry = Registry::builtin().ok()?;
-        let _ = registry.add_theme_from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/themes/pierre-dark.json"));
+        let _ = registry.add_theme_from_path(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/themes/pierre-dark.json"
+        ));
         registry.link_grammars();
         Some(Self { registry })
     }
 
-    pub(crate) fn highlight_lines(&mut self, language: &str, source: &str) -> Option<Vec<Vec<SyntaxSpan>>> {
+    pub(crate) fn highlight_lines(
+        &mut self,
+        language: &str,
+        source: &str,
+    ) -> Option<Vec<Vec<SyntaxSpan>>> {
         if source.is_empty() {
             return Some(Vec::new());
         }
@@ -220,29 +266,57 @@ impl PierreHighlighter {
             .merge_same_style_tokens(true);
         let highlighted = self.registry.highlight(source, &options).ok()?;
         let mut lines = Vec::with_capacity(highlighted.tokens.len());
+        let source_lines = source.split('\n');
 
-        for line in highlighted.tokens {
+        for (source_line, line) in source_lines.zip(highlighted.tokens) {
             let mut cursor = 0usize;
             let mut spans = Vec::with_capacity(line.len());
             for token in line {
-                let text_len = token.text.len();
-                if text_len == 0 {
+                let ThemeVariant::Single(style) = token.style else {
                     continue;
-                }
-                let ThemeVariant::Single(style) = token.style else { continue };
-                spans.push(SyntaxSpan {
-                    start: cursor,
-                    end: cursor + text_len,
-                    kind: SyntaxHighlightKind::Property,
-                    style: Some(giallo_style_to_ratatui(style)),
-                });
-                cursor += text_len;
+                };
+                push_aligned_token_span(
+                    &mut spans,
+                    source_line,
+                    &mut cursor,
+                    &token.text,
+                    giallo_style_to_ratatui(style),
+                );
             }
             lines.push(spans);
         }
 
         Some(lines)
     }
+}
+
+fn push_aligned_token_span(
+    spans: &mut Vec<SyntaxSpan>,
+    line: &str,
+    cursor: &mut usize,
+    token_text: &str,
+    style: Style,
+) {
+    if token_text.is_empty() || *cursor > line.len() {
+        return;
+    }
+
+    let Some(relative_start) = line[*cursor..].find(token_text) else {
+        return;
+    };
+    let start = *cursor + relative_start;
+    let end = start + token_text.len();
+    if start >= end || end > line.len() {
+        return;
+    }
+
+    spans.push(SyntaxSpan {
+        start,
+        end,
+        kind: SyntaxHighlightKind::Property,
+        style: Some(style),
+    });
+    *cursor = end;
 }
 
 pub(crate) fn language_for_path(path: &str) -> &'static str {
@@ -290,7 +364,9 @@ fn giallo_style_to_ratatui(style: giallo::Style) -> Style {
     if style.font_style.contains(FontStyle::STRIKETHROUGH) {
         modifiers |= Modifier::CROSSED_OUT;
     }
-    Style::new().fg(normalize_pierre_token_color(style.foreground)).add_modifier(modifiers)
+    Style::new()
+        .fg(normalize_pierre_token_color(style.foreground))
+        .add_modifier(modifiers)
 }
 
 fn giallo_color_to_ratatui(color: giallo::Color) -> Color {
@@ -319,7 +395,12 @@ fn normalize_pierre_token_color(color: giallo::Color) -> Color {
 }
 
 fn styled_span(start: usize, end: usize, style: Style) -> SyntaxSpan {
-    SyntaxSpan { start, end, kind: SyntaxHighlightKind::Property, style: Some(style) }
+    SyntaxSpan {
+        start,
+        end,
+        kind: SyntaxHighlightKind::Property,
+        style: Some(style),
+    }
 }
 
 fn push_markdown_code_overlays(text: &str, spans: &mut Vec<SyntaxSpan>) {
@@ -329,11 +410,23 @@ fn push_markdown_code_overlays(text: &str, spans: &mut Vec<SyntaxSpan>) {
             continue;
         }
         if let Some(open) = start.take() {
-            spans.push(styled_span(open, open + 1, Style::new().fg(Color::Rgb(121, 121, 127))));
+            spans.push(styled_span(
+                open,
+                open + 1,
+                Style::new().fg(Color::Rgb(121, 121, 127)),
+            ));
             if open + 1 < index {
-                spans.push(styled_span(open + 1, index, Style::new().fg(Color::Rgb(216, 198, 239))));
+                spans.push(styled_span(
+                    open + 1,
+                    index,
+                    Style::new().fg(Color::Rgb(216, 198, 239)),
+                ));
             }
-            spans.push(styled_span(index, index + 1, Style::new().fg(Color::Rgb(121, 121, 127))));
+            spans.push(styled_span(
+                index,
+                index + 1,
+                Style::new().fg(Color::Rgb(121, 121, 127)),
+            ));
         } else {
             start = Some(index);
         }
@@ -344,20 +437,38 @@ fn push_markdown_link_overlays(text: &str, spans: &mut Vec<SyntaxSpan>) {
     let mut cursor = 0;
     while let Some(open_rel) = text[cursor..].find('[') {
         let open = cursor + open_rel;
-        let Some(close_rel) = text[open..].find(']') else { break };
+        let Some(close_rel) = text[open..].find(']') else {
+            break;
+        };
         let close = open + close_rel;
 
         if open + 1 == close {
-            spans.push(styled_span(open, close + 1, Style::new().fg(Color::Rgb(255, 212, 82))));
+            spans.push(styled_span(
+                open,
+                close + 1,
+                Style::new().fg(Color::Rgb(255, 212, 82)),
+            ));
             cursor = close + 1;
             continue;
         }
 
-        spans.push(styled_span(open, open + 1, Style::new().fg(Color::Rgb(121, 121, 127))));
+        spans.push(styled_span(
+            open,
+            open + 1,
+            Style::new().fg(Color::Rgb(121, 121, 127)),
+        ));
         if !text[open + 1..close].contains('`') {
-            spans.push(styled_span(open + 1, close, Style::new().fg(Color::Rgb(157, 106, 251))));
+            spans.push(styled_span(
+                open + 1,
+                close,
+                Style::new().fg(Color::Rgb(157, 106, 251)),
+            ));
         }
-        spans.push(styled_span(close, close + 1, Style::new().fg(Color::Rgb(121, 121, 127))));
+        spans.push(styled_span(
+            close,
+            close + 1,
+            Style::new().fg(Color::Rgb(121, 121, 127)),
+        ));
         cursor = close + 1;
     }
 }
@@ -369,21 +480,37 @@ fn push_markdown_reference_definition_overlay(text: &str, spans: &mut Vec<Syntax
         return false;
     }
 
-    let Some(close_rel) = trimmed.find("]:") else { return false };
+    let Some(close_rel) = trimmed.find("]:") else {
+        return false;
+    };
     let label_end = leading + close_rel + 1;
     let colon = label_end;
-    spans.push(styled_span(leading, label_end, Style::new().fg(Color::Rgb(255, 212, 82))));
-    spans.push(styled_span(colon, (colon + 1).min(text.len()), Style::new().fg(Color::Rgb(121, 121, 127))));
+    spans.push(styled_span(
+        leading,
+        label_end,
+        Style::new().fg(Color::Rgb(255, 212, 82)),
+    ));
+    spans.push(styled_span(
+        colon,
+        (colon + 1).min(text.len()),
+        Style::new().fg(Color::Rgb(121, 121, 127)),
+    ));
 
     let destination_start = (colon + 1).min(text.len());
     if destination_start < text.len() {
-        spans.push(styled_span(destination_start, text.len(), Style::new().fg(Color::Rgb(255, 103, 141))));
+        spans.push(styled_span(
+            destination_start,
+            text.len(),
+            Style::new().fg(Color::Rgb(255, 103, 141)),
+        ));
     }
     true
 }
 
 fn matches_extension(path: &str, extensions: &[&str]) -> bool {
-    extensions.iter().any(|extension| path.ends_with(&format!(".{extension}")))
+    extensions
+        .iter()
+        .any(|extension| path.ends_with(&format!(".{extension}")))
 }
 
 pub(crate) fn markdown_decoration_spans(text: &str) -> Vec<SyntaxSpan> {
@@ -392,13 +519,33 @@ pub(crate) fn markdown_decoration_spans(text: &str) -> Vec<SyntaxSpan> {
     let leading = text.len().saturating_sub(trimmed.len());
 
     if trimmed.starts_with('#') {
-        spans.push(SyntaxSpan { start: leading, end: text.len(), kind: SyntaxHighlightKind::Markup, style: None });
+        spans.push(SyntaxSpan {
+            start: leading,
+            end: text.len(),
+            kind: SyntaxHighlightKind::Markup,
+            style: None,
+        });
     } else if trimmed.starts_with("<!--") {
-        spans.push(SyntaxSpan { start: leading, end: text.len(), kind: SyntaxHighlightKind::Comment, style: None });
+        spans.push(SyntaxSpan {
+            start: leading,
+            end: text.len(),
+            kind: SyntaxHighlightKind::Comment,
+            style: None,
+        });
     } else if trimmed.starts_with('>') {
-        spans.push(SyntaxSpan { start: leading, end: text.len(), kind: SyntaxHighlightKind::Comment, style: None });
+        spans.push(SyntaxSpan {
+            start: leading,
+            end: text.len(),
+            kind: SyntaxHighlightKind::Comment,
+            style: None,
+        });
     } else if let Some(marker_len) = markdown_list_marker_len(trimmed) {
-        spans.push(SyntaxSpan { start: leading, end: leading + marker_len, kind: SyntaxHighlightKind::Markup, style: None });
+        spans.push(SyntaxSpan {
+            start: leading,
+            end: leading + marker_len,
+            kind: SyntaxHighlightKind::Markup,
+            style: None,
+        });
     }
 
     push_delimited_spans(text, '`', SyntaxHighlightKind::String, &mut spans);
@@ -418,14 +565,24 @@ fn markdown_list_marker_len(text: &str) -> Option<usize> {
     }
 }
 
-fn push_delimited_spans(text: &str, delimiter: char, kind: SyntaxHighlightKind, spans: &mut Vec<SyntaxSpan>) {
+fn push_delimited_spans(
+    text: &str,
+    delimiter: char,
+    kind: SyntaxHighlightKind,
+    spans: &mut Vec<SyntaxSpan>,
+) {
     let mut start = None;
     for (index, ch) in text.char_indices() {
         if ch != delimiter {
             continue;
         }
         if let Some(open) = start.take() {
-            spans.push(SyntaxSpan { start: open, end: index + delimiter.len_utf8(), kind, style: None });
+            spans.push(SyntaxSpan {
+                start: open,
+                end: index + delimiter.len_utf8(),
+                kind,
+                style: None,
+            });
         } else {
             start = Some(index);
         }
@@ -436,12 +593,24 @@ fn push_markdown_link_spans(text: &str, spans: &mut Vec<SyntaxSpan>) {
     let mut cursor = 0;
     while let Some(open_rel) = text[cursor..].find('[') {
         let open = cursor + open_rel;
-        let Some(close_rel) = text[open..].find(']') else { break };
+        let Some(close_rel) = text[open..].find(']') else {
+            break;
+        };
         let close = open + close_rel + 1;
-        spans.push(SyntaxSpan { start: open, end: close, kind: SyntaxHighlightKind::Number, style: None });
+        spans.push(SyntaxSpan {
+            start: open,
+            end: close,
+            kind: SyntaxHighlightKind::Number,
+            style: None,
+        });
         if text[close..].starts_with('(') {
             if let Some(dest_close_rel) = text[close..].find(')') {
-                spans.push(SyntaxSpan { start: close, end: close + dest_close_rel + 1, kind: SyntaxHighlightKind::String, style: None });
+                spans.push(SyntaxSpan {
+                    start: close,
+                    end: close + dest_close_rel + 1,
+                    kind: SyntaxHighlightKind::String,
+                    style: None,
+                });
                 cursor = close + dest_close_rel + 1;
                 continue;
             }
@@ -464,9 +633,68 @@ mod tests {
     fn pierre_highlights_python_files() {
         let mut highlighter = PierreHighlighter::new().expect("built-in giallo registry loads");
         let spans = highlighter
-            .highlight_lines(language_for_path("example.py"), "def greet(name):\n    return f'hi {name}'")
+            .highlight_lines(
+                language_for_path("example.py"),
+                "def greet(name):\n    return f'hi {name}'",
+            )
             .expect("python grammar highlights");
 
         assert!(spans.iter().flatten().next().is_some());
+    }
+
+    #[test]
+    fn aligned_token_spans_leave_unhighlighted_gaps_without_shifting_later_tokens() {
+        let mut spans = Vec::new();
+        let mut cursor = 0;
+
+        push_aligned_token_span(
+            &mut spans,
+            "alpha skipped beta",
+            &mut cursor,
+            "alpha",
+            Style::new().fg(Color::Red),
+        );
+        push_aligned_token_span(
+            &mut spans,
+            "alpha skipped beta",
+            &mut cursor,
+            "beta",
+            Style::new().fg(Color::Blue),
+        );
+
+        assert_eq!(spans[0].start..spans[0].end, 0..5);
+        assert_eq!(spans[1].start..spans[1].end, 14..18);
+    }
+
+    #[test]
+    fn aligned_token_spans_skip_unmatched_tokens_without_poisoning_cursor() {
+        let mut spans = Vec::new();
+        let mut cursor = 0;
+
+        push_aligned_token_span(
+            &mut spans,
+            "alpha beta",
+            &mut cursor,
+            "alpha",
+            Style::new().fg(Color::Red),
+        );
+        push_aligned_token_span(
+            &mut spans,
+            "alpha beta",
+            &mut cursor,
+            "missing",
+            Style::new().fg(Color::Green),
+        );
+        push_aligned_token_span(
+            &mut spans,
+            "alpha beta",
+            &mut cursor,
+            "beta",
+            Style::new().fg(Color::Blue),
+        );
+
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].start..spans[0].end, 0..5);
+        assert_eq!(spans[1].start..spans[1].end, 6..10);
     }
 }

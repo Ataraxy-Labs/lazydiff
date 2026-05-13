@@ -69,6 +69,91 @@ pub(crate) fn contains_point(area: Rect, column: u16, row: u16) -> bool {
     column >= area.left() && column < area.right() && row >= area.top() && row < area.bottom()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListRowKind {
+    Header,
+    Item(usize),
+    Gap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ListRowGeometry {
+    pub(crate) kind: ListRowKind,
+    pub(crate) area: Rect,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ListGeometryBuilder {
+    area: Rect,
+    y: u16,
+    rows: Vec<ListRowGeometry>,
+}
+
+impl ListGeometryBuilder {
+    pub(crate) fn new(area: Rect, start_y: u16) -> Self {
+        Self {
+            area,
+            y: start_y.max(area.y),
+            rows: Vec::new(),
+        }
+    }
+
+    pub(crate) fn gap(&mut self) -> Option<ListRowGeometry> {
+        self.push(ListRowKind::Gap)
+    }
+
+    pub(crate) fn header(&mut self) -> Option<ListRowGeometry> {
+        self.push(ListRowKind::Header)
+    }
+
+    pub(crate) fn item(&mut self, index: usize) -> Option<ListRowGeometry> {
+        self.push(ListRowKind::Item(index))
+    }
+
+    fn push(&mut self, kind: ListRowKind) -> Option<ListRowGeometry> {
+        if self.y >= self.area.bottom() {
+            return None;
+        }
+        let row = ListRowGeometry {
+            kind,
+            area: Rect::new(self.area.x, self.y, self.area.width, 1),
+        };
+        self.rows.push(row);
+        self.y = self.y.saturating_add(1);
+        Some(row)
+    }
+}
+
+pub(crate) fn list_row_at(
+    rows: &[ListRowGeometry],
+    column: u16,
+    row: u16,
+) -> Option<ListRowGeometry> {
+    rows.iter()
+        .copied()
+        .find(|entry| contains_point(entry.area, column, row))
+}
+
+pub(crate) fn list_item_rows(
+    area: Rect,
+    start_index: usize,
+    total_len: usize,
+) -> Vec<ListRowGeometry> {
+    let mut rows = Vec::new();
+    let visible = area.height as usize;
+    for visual_index in 0..visible {
+        let index = start_index.saturating_add(visual_index);
+        if index >= total_len {
+            break;
+        }
+        rows.push(ListRowGeometry {
+            kind: ListRowKind::Item(index),
+            area: Rect::new(area.x, area.y + visual_index as u16, area.width, 1),
+        });
+    }
+    rows
+}
+
 pub(crate) fn truncate(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();

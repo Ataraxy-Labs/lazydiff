@@ -1,7 +1,8 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    fs::OpenOptions,
     hash::{Hash, Hasher},
-    io,
+    io::{self, Write},
     path::Path,
     process::Command as ProcessCommand,
     sync::mpsc::{self, Receiver, Sender},
@@ -19,10 +20,10 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use lazydiff_diffs::{
-    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffLine,
-    DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
-    DiffViewState, DiffWidget, FileDiff, InlineDiffSpan, SliderState, SyntaxHighlightKind,
-    SyntaxSpan, TextSelection, TextViewport,
+    add_pierre_highlights, parse_unified_diff, render_scrollbar, row_count_for_mode, DiffDocument,
+    DiffLine, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
+    DiffViewState, DiffWidget, FileDiff, FileDiffKind, InlineDiffSpan, SliderState,
+    SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar,
 };
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -38,7 +39,6 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-const SPLIT_TEXT_COLUMN: u16 = 8;
 const BODY_TOP: u16 = 2;
 const APP_TOP_PADDING: u16 = 1;
 const STICKY_FILE_OVERLAY_ROWS: usize = 2;
@@ -71,7 +71,8 @@ use crate::text::{
 };
 use crate::ui::{
     centered_rect, contains_point, draw_box, draw_horizontal_rule, draw_vertical_rule, fill_rect,
-    render_home_rule, right_aligned_text, set_symbol, short_path, truncate, truncate_middle,
+    list_item_rows, list_row_at, render_home_rule, right_aligned_text, set_symbol, short_path,
+    truncate, truncate_middle, ListGeometryBuilder, ListRowGeometry, ListRowKind,
 };
 
 mod finder;
@@ -85,6 +86,8 @@ pub(crate) use semantic::{
     semantic_tree_body_area, SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow,
     SemanticViewport,
 };
+mod selection;
+use selection::{ScreenPoint, ScreenTextSelection};
 mod surfaces;
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
@@ -121,8 +124,13 @@ pub(crate) struct App {
     /// with elevated bg + amber rail.
     comments_selection: usize,
     dragging_scrollbar: bool,
+    active_scrollbar_drag: Option<ScrollbarDrag>,
     selecting_text: bool,
     text_selection_dragged: bool,
+    pending_screen_selection: Option<(ScreenPoint, Option<Rect>)>,
+    screen_selection: Option<ScreenTextSelection>,
+    screen_selection_bounds: Option<Rect>,
+    screen_text: Vec<String>,
     file_picker_open: bool,
     finder_kind: FinderKind,
     file_picker_selection: usize,
@@ -132,7 +140,6 @@ pub(crate) struct App {
     home_selection_changed_at: Instant,
     theme_variant: crate::design_system::ThemeVariant,
     attempt_modal_open: bool,
-    last_selection_mouse: Option<(usize, usize)>,
     scrollbar_drag_offset_virtual: usize,
     session: ReviewSession,
     store: ReviewStore,
@@ -190,11 +197,24 @@ pub(crate) struct TransientFocus {
     pub(crate) started_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollbarTarget {
+    DetailDescription,
+    Comments,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollbarDrag {
+    pub(crate) target: ScrollbarTarget,
+    pub(crate) offset_virtual: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticFocusTarget {
     pub(crate) route: DiffSource,
     pub(crate) path: String,
     pub(crate) line: Option<usize>,
+    pub(crate) end_line: Option<usize>,
     pub(crate) change_type: Option<String>,
 }
 
@@ -219,13 +239,13 @@ enum ReviewTreeRow {
         name: String,
         depth: usize,
         collapsed: bool,
-        file_count: usize,
     },
     File {
         key: ReviewTreeKey,
         file_index: usize,
         path: String,
         name: String,
+        status: FileDiffKind,
         depth: usize,
         collapsed: bool,
         semantic_count: usize,
@@ -240,6 +260,26 @@ enum ReviewTreeRow {
         change_type: String,
         line: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone)]
+enum GroupedWorkItemRow {
+    Header {
+        label: String,
+        geometry: ListRowGeometry,
+    },
+    Item {
+        index: usize,
+        geometry: ListRowGeometry,
+    },
+}
+
+impl GroupedWorkItemRow {
+    fn area(&self) -> Rect {
+        match self {
+            Self::Header { geometry, .. } | Self::Item { geometry, .. } => geometry.area,
+        }
+    }
 }
 
 const TRANSIENT_FOCUS_DURATION: Duration = Duration::from_millis(900);
@@ -332,9 +372,12 @@ impl App {
         // Read the persisted theme synchronously so the first paint
         // already uses the user's preferred variant — no warm→cool
         // flicker once the async revalidate finishes.
-        let theme_variant = store
-            .restore_theme_variant()
-            .unwrap_or(crate::design_system::ThemeVariant::Warm);
+        let theme_variant = std::env::var("LAZYDIFF_THEME")
+            .ok()
+            .or_else(|| std::env::var("LUMEN_THEME").ok())
+            .and_then(|label| crate::design_system::ThemeVariant::from_label(&label))
+            .or_else(|| store.restore_theme_variant())
+            .unwrap_or(crate::design_system::ThemeVariant::DefaultDark);
         let mut app = Self {
             path,
             project_label,
@@ -354,8 +397,13 @@ impl App {
             detail_tab: DetailTab::Semantic,
             comments_selection: 0,
             dragging_scrollbar: false,
+            active_scrollbar_drag: None,
             selecting_text: false,
             text_selection_dragged: false,
+            pending_screen_selection: None,
+            screen_selection: None,
+            screen_selection_bounds: None,
+            screen_text: Vec::new(),
             file_picker_open: false,
             finder_kind: FinderKind::Files,
             file_picker_selection: 0,
@@ -365,7 +413,6 @@ impl App {
             home_selection_changed_at: Instant::now(),
             theme_variant,
             attempt_modal_open: false,
-            last_selection_mouse: None,
             scrollbar_drag_offset_virtual: 0,
             session,
             store,
@@ -454,6 +501,7 @@ impl App {
 
             let poll_interval = if self.query_client.is_fetching()
                 || self.dragging_scrollbar
+                || self.active_scrollbar_drag.is_some()
                 || self.selecting_text
             {
                 ACTIVE_POLL_INTERVAL
@@ -473,6 +521,7 @@ impl App {
                 loop {
                     match event::read()? {
                         Event::Key(key) => {
+                            Self::debug_key_event(key);
                             self.handle_key(key);
                             if let Some(flow) = self.pending_terminal_flow.take() {
                                 self.run_terminal_flow(terminal, flow)?;
@@ -576,26 +625,31 @@ impl App {
             AppSurface::Queue => {
                 self.render_home(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::CommitList => {
                 self.render_commit_list(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::DetailFull => {
                 self.render_detail_full(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::Comments => {
                 self.render_comments_surface(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::Diff if self.should_render_diff_placeholder() => {
                 self.render_diff_placeholder(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::Diff => {}
@@ -628,6 +682,7 @@ impl App {
             palette.rule,
             palette.bg,
         );
+        self.render_diff_pane_slider(frame, divider, diff_body, palette);
         StatefulWidget::render(
             DiffWidget::new(&self.document).theme(palette.theme.diff_theme()),
             diff_body,
@@ -655,6 +710,75 @@ impl App {
         self.render_comment_preview(frame, comment_preview);
         self.render_footer(frame, footer);
         self.render_global_overlays(frame);
+        self.finish_render(frame);
+    }
+
+    fn finish_render(&mut self, frame: &mut Frame) {
+        self.capture_screen_text(frame);
+        self.render_screen_selection(frame);
+    }
+
+    fn render_screen_selection(&self, frame: &mut Frame) {
+        let Some(selection) = self.screen_selection else {
+            return;
+        };
+        let area = frame.area();
+        let bounds = self.screen_selection_bounds.unwrap_or(area);
+        let (start, end) = selection.normalized();
+        if start.y >= bounds.bottom() || end.y < bounds.y {
+            return;
+        }
+        let style = crate::design_system::QuiverTheme::for_variant(self.theme_variant)
+            .typography
+            .style(
+                TextRole::Selected,
+                self.home_palette().theme,
+                self.home_palette().bg,
+            );
+        for y in start.y.max(bounds.y)..=end.y.min(bounds.bottom().saturating_sub(1)) {
+            let x_start = if y == start.y { start.x } else { bounds.x };
+            let x_end = if y == end.y {
+                end.x
+            } else {
+                bounds.right().saturating_sub(1)
+            };
+            if x_start > x_end {
+                continue;
+            }
+            let Some((trimmed_start, trimmed_end)) = selection::selectable_row_range(
+                self.screen_text
+                    .get(y as usize)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                x_start.max(bounds.x) as usize,
+                x_end.min(bounds.right().saturating_sub(1)) as usize,
+            ) else {
+                continue;
+            };
+            for x in trimmed_start as u16..=trimmed_end as u16 {
+                frame.buffer_mut()[(x, y)].set_style(style);
+            }
+        }
+    }
+
+    fn capture_screen_text(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let mut lines = Vec::with_capacity(area.height as usize);
+        for y in area.top()..area.bottom() {
+            let mut line = String::new();
+            for x in area.left()..area.right() {
+                line.push_str(frame.buffer_mut()[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        self.screen_text = lines;
+    }
+
+    fn screen_point_is_text(&self, point: ScreenPoint) -> bool {
+        self.screen_text
+            .get(point.y as usize)
+            .and_then(|line| line.chars().nth(point.x as usize))
+            .is_some_and(selection::is_selectable_text_char)
     }
 
     fn render_global_overlays(&mut self, frame: &mut Frame) {
@@ -707,6 +831,23 @@ impl App {
         }
         if self.surface == AppSurface::Diff {
             match key.code {
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.scroll_active_pane_horizontally(-8);
+                    return;
+                }
+                // Most terminals encode Ctrl-H as ASCII backspace, so crossterm
+                // may surface it as Backspace instead of Char('h') + CONTROL.
+                KeyCode::Backspace
+                    if key.modifiers.is_empty()
+                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.scroll_active_pane_horizontally(-8);
+                    return;
+                }
+                KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.scroll_active_pane_horizontally(8);
+                    return;
+                }
                 KeyCode::Char('s') => {
                     self.review_sidebar_visible = !self.review_sidebar_visible;
                     self.review_sidebar_focus = self.review_sidebar_visible;
@@ -726,6 +867,11 @@ impl App {
         }
         if matches!(self.surface, AppSurface::Queue | AppSurface::DetailFull) {
             match key.code {
+                KeyCode::Char(' ') if self.detail_tab == DetailTab::Semantic => {
+                    if self.toggle_selected_semantic_viewed() {
+                        return;
+                    }
+                }
                 KeyCode::Enter
                     if self.surface == AppSurface::DetailFull
                         && self.detail_tab == DetailTab::Semantic =>
@@ -783,6 +929,26 @@ impl App {
         }
         if self.surface == AppSurface::Diff {
             self.handle_plain_key(key.code, rows);
+        }
+    }
+
+    fn debug_key_event(key: KeyEvent) {
+        Self::debug_input_event(format_args!(
+            "key code={:?} modifiers={:?} kind={:?} state={:?}",
+            key.code, key.modifiers, key.kind, key.state
+        ));
+    }
+
+    fn debug_input_event(args: std::fmt::Arguments<'_>) {
+        if std::env::var_os("LAZYDIFF_KEY_DEBUG").is_none() {
+            return;
+        }
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/lazydiff-key-debug.log")
+        {
+            let _ = writeln!(file, "{args}");
         }
     }
 
@@ -963,8 +1129,26 @@ impl App {
             Command::ShowAttempts => self.attempt_modal_open = true,
             Command::SelectLeft => self.state.selected_side = DiffSide::Left,
             Command::SelectRight => self.state.selected_side = DiffSide::Right,
-            Command::ToggleTheme => self.toggle_theme_variant(),
+            Command::ScrollLeft => self.scroll_active_pane_horizontally(-8),
+            Command::ScrollRight => self.scroll_active_pane_horizontally(8),
+            Command::OpenThemePicker => self.open_theme_picker(),
+            Command::SelectTheme(theme) => self.select_theme_variant(theme),
         }
+    }
+
+    fn scroll_active_pane_horizontally(&mut self, delta: isize) {
+        let before = self.state.scroll_x;
+        match self.surface {
+            AppSurface::Diff => self.state.scroll_horizontal(delta),
+            AppSurface::Queue
+            | AppSurface::DetailFull
+            | AppSurface::CommitList
+            | AppSurface::Comments => {}
+        }
+        Self::debug_input_event(format_args!(
+            "scroll_x delta={delta} before={before} after={} surface={:?} sidebar_focus={}",
+            self.state.scroll_x, self.surface, self.review_sidebar_focus
+        ));
     }
 
     fn go_back(&mut self) {
@@ -1178,6 +1362,80 @@ impl App {
         Some(details)
     }
 
+    fn home_wide_queue_area(&self, terminal_width: u16, terminal_height: u16) -> Option<Rect> {
+        let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+        if area.width < 118 || area.height < 8 {
+            return None;
+        }
+        let [_header, body, _footer] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let [queue, _gap, _details] = Layout::horizontal([
+            Constraint::Percentage(58),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+        ])
+        .areas(body);
+        Some(queue)
+    }
+
+    fn grouped_work_item_rows(
+        &self,
+        items: &[WorkItem],
+        area: Rect,
+        start_y: u16,
+    ) -> Vec<GroupedWorkItemRow> {
+        let mut builder = ListGeometryBuilder::new(area, start_y);
+        let mut rows = Vec::new();
+        let mut previous_group: Option<&str> = None;
+        for (index, item) in items.iter().enumerate() {
+            if previous_group != Some(item.group.as_str()) {
+                if previous_group.is_some() {
+                    builder.gap();
+                }
+                if let Some(geometry) = builder.header() {
+                    rows.push(GroupedWorkItemRow::Header {
+                        label: item.group.clone(),
+                        geometry,
+                    });
+                }
+                previous_group = Some(item.group.as_str());
+            }
+            if let Some(geometry) = builder.item(index) {
+                rows.push(GroupedWorkItemRow::Item { index, geometry });
+            }
+            if rows.last().is_some_and(|row| row.area().y >= area.bottom()) {
+                break;
+            }
+        }
+        rows.into_iter()
+            .filter(|row| row.area().y < area.bottom())
+            .collect()
+    }
+
+    fn home_wide_queue_rows(
+        &self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<Vec<GroupedWorkItemRow>> {
+        let queue = self.home_wide_queue_area(terminal_width, terminal_height)?;
+        let items = self.home_work_items();
+        let start_y = queue.y.saturating_add(2);
+        Some(self.grouped_work_item_rows(
+            &items,
+            Rect::new(
+                queue.x,
+                queue.y,
+                queue.width.saturating_sub(1),
+                queue.height,
+            ),
+            start_y,
+        ))
+    }
+
     pub(crate) fn theme_variant(&self) -> crate::design_system::ThemeVariant {
         self.theme_variant
     }
@@ -1190,12 +1448,11 @@ impl App {
         FinderPalette::for_variant(self.theme_variant)
     }
 
-    /// Flip between the warm and graphite registers. The diff body's syntax
-    /// spans are theme-independent (Pierre's IDE palette), so toggling is a
-    /// single field write — no pierre re-highlight, no document mutation.
-    /// Only the diff_theme's bg/text/structural colors change.
-    pub(crate) fn toggle_theme_variant(&mut self) {
-        self.theme_variant = self.theme_variant.toggled();
+    /// Select a theme without mutating the parsed/highlighted document. The
+    /// diff body's Pierre spans are theme-independent; this only changes
+    /// structural UI/diff colors and persists the chosen Lumen preset.
+    pub(crate) fn select_theme_variant(&mut self, theme: crate::design_system::ThemeVariant) {
+        self.theme_variant = theme;
         self.store.persist_theme_variant(self.theme_variant);
         self.query_client
             .finish_success(QueryKey::ThemePreference, now_stamp() as i64);
@@ -2225,22 +2482,6 @@ impl App {
         let semantic_by_path = self.semantic_changes_by_path();
         let mut rows = Vec::new();
         let mut emitted_dirs = HashSet::new();
-        let mut file_counts: HashMap<String, usize> = HashMap::new();
-        for file in &self.document.files {
-            let parts: Vec<_> = file
-                .new_path
-                .split('/')
-                .filter(|part| !part.is_empty())
-                .collect();
-            let mut prefix = String::new();
-            for part in parts.iter().take(parts.len().saturating_sub(1)) {
-                if !prefix.is_empty() {
-                    prefix.push('/');
-                }
-                prefix.push_str(part);
-                *file_counts.entry(prefix.clone()).or_default() += 1;
-            }
-        }
 
         for (file_index, file) in self.document.files.iter().enumerate() {
             let parts: Vec<_> = file
@@ -2270,7 +2511,6 @@ impl App {
                             name: (*part).to_string(),
                             depth,
                             collapsed,
-                            file_count: file_counts.get(&prefix).copied().unwrap_or(0),
                         });
                     }
                     if collapsed {
@@ -2290,6 +2530,7 @@ impl App {
                 file_index,
                 path: file.new_path.clone(),
                 name: file_name,
+                status: file.metadata().kind,
                 depth: parts.len().saturating_sub(1),
                 collapsed,
                 semantic_count: changes.map_or(0, |changes| changes.len()),
@@ -2351,12 +2592,25 @@ impl App {
     }
 
     fn review_entity_key(path: &str, change: &SemanticChange) -> String {
+        Self::semantic_entity_key_parts(
+            path,
+            &change.entity_type,
+            &change.entity_name,
+            &change.change_type,
+            change.line,
+        )
+    }
+
+    fn semantic_entity_key_parts(
+        path: &str,
+        entity_type: &str,
+        entity_name: &str,
+        change_type: &str,
+        line: Option<usize>,
+    ) -> String {
         format!(
-            "{path}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            change.entity_type,
-            change.entity_name,
-            change.change_type,
-            change.line.unwrap_or(0)
+            "{path}\u{1f}{entity_type}\u{1f}{entity_name}\u{1f}{change_type}\u{1f}{}",
+            line.unwrap_or(0)
         )
     }
 
@@ -2392,19 +2646,29 @@ impl App {
     }
 
     fn toggle_file_viewed(&mut self, path: &str) {
+        let route = self.diff_source.clone();
+        self.toggle_file_viewed_for_route(&route, path);
+    }
+
+    fn toggle_file_viewed_for_route(&mut self, route: &DiffSource, path: &str) {
         if self.viewed_files.contains(path) {
             self.viewed_files.remove(path);
-            self.set_file_entities_viewed(path, false);
+            self.set_file_entities_viewed_for_route(route, path, false);
         } else {
             self.viewed_files.insert(path.to_string());
-            self.set_file_entities_viewed(path, true);
+            self.set_file_entities_viewed_for_route(route, path, true);
         }
         self.persist_viewed_state();
     }
 
     fn set_file_entities_viewed(&mut self, path: &str, viewed: bool) {
+        let route = self.diff_source.clone();
+        self.set_file_entities_viewed_for_route(&route, path, viewed);
+    }
+
+    fn set_file_entities_viewed_for_route(&mut self, route: &DiffSource, path: &str, viewed: bool) {
         let keys: Vec<_> = self
-            .semantic_diff_for_route(&self.diff_source)
+            .semantic_diff_for_route(route)
             .and_then(|diff| diff.files.iter().find(|file| file.path == path))
             .map(|file| {
                 file.changes
@@ -2420,6 +2684,81 @@ impl App {
                 self.viewed_entities.remove(&key);
             }
         }
+    }
+
+    fn toggle_selected_semantic_viewed(&mut self) -> bool {
+        let Some(route) = self.current_semantic_route() else {
+            return false;
+        };
+        let rows = self.semantic_tree_rows(&route);
+        let Some(row) = rows
+            .get(self.semantic_selection.min(rows.len().saturating_sub(1)))
+            .cloned()
+        else {
+            return false;
+        };
+        match row {
+            SemanticTreeRow::Directory { key, .. } => {
+                let Some(directory) = key.path.strip_prefix("dir:") else {
+                    return false;
+                };
+                self.toggle_semantic_directory_viewed(&route, directory);
+            }
+            SemanticTreeRow::File { path, .. } => self.toggle_file_viewed_for_route(&route, &path),
+            SemanticTreeRow::Entity {
+                path,
+                entity_type,
+                entity_name,
+                change_type,
+                line,
+                ..
+            } => {
+                let key = Self::semantic_entity_key_parts(
+                    &path,
+                    &entity_type,
+                    &entity_name,
+                    &change_type,
+                    line,
+                );
+                if !self.viewed_entities.insert(key) {
+                    self.viewed_entities
+                        .remove(&Self::semantic_entity_key_parts(
+                            &path,
+                            &entity_type,
+                            &entity_name,
+                            &change_type,
+                            line,
+                        ));
+                    self.viewed_files.remove(&path);
+                }
+                self.persist_viewed_state();
+            }
+            SemanticTreeRow::Status(_) => return false,
+        }
+        true
+    }
+
+    fn toggle_semantic_directory_viewed(&mut self, route: &DiffSource, directory: &str) {
+        let paths: Vec<String> = self
+            .semantic_diff_for_route(route)
+            .map(|diff| {
+                diff.files
+                    .iter()
+                    .filter(|file| file.path.starts_with(&format!("{directory}/")))
+                    .map(|file| file.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let should_mark = paths.iter().any(|path| !self.viewed_files.contains(path));
+        for path in paths {
+            if should_mark {
+                self.viewed_files.insert(path.clone());
+            } else {
+                self.viewed_files.remove(&path);
+            }
+            self.set_file_entities_viewed_for_route(route, &path, should_mark);
+        }
+        self.persist_viewed_state();
     }
 
     fn toggle_selected_review_tree_viewed(&mut self) {

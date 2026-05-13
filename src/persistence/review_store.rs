@@ -1062,8 +1062,8 @@ mod tests {
         store.init().expect("store initializes");
 
         assert_eq!(store.restore_theme_variant(), None);
-        store.persist_theme_variant(ThemeVariant::Graphite);
-        assert_eq!(store.restore_theme_variant(), Some(ThemeVariant::Graphite));
+        store.persist_theme_variant(ThemeVariant::Dracula);
+        assert_eq!(store.restore_theme_variant(), Some(ThemeVariant::Dracula));
 
         let _ = fs::remove_file(path);
     }

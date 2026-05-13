@@ -6,6 +6,7 @@ pub(crate) enum FinderKind {
     Files,
     Text,
     Inbox,
+    Themes,
 }
 
 pub(crate) struct FinderResult {
@@ -154,6 +155,17 @@ impl App {
                             self.jump_to_review_item(&note, rows);
                         }
                     }
+                    FinderKind::Themes => {
+                        if let Some(command) = self
+                            .filtered_theme_results()
+                            .get(self.file_picker_selection)
+                        {
+                            let command = command.command;
+                            self.file_picker_open = false;
+                            self.execute_command(command, rows);
+                            return;
+                        }
+                    }
                 }
                 self.file_picker_open = false;
             }
@@ -189,7 +201,7 @@ impl App {
         self.file_picker_query.clear();
         self.file_picker_selection = match kind {
             FinderKind::Files => self.current_file_index().unwrap_or(0),
-            FinderKind::Root | FinderKind::Text | FinderKind::Inbox => 0,
+            FinderKind::Root | FinderKind::Text | FinderKind::Inbox | FinderKind::Themes => 0,
         };
         self.file_picker_preview_scroll = 0;
     }
@@ -219,13 +231,64 @@ impl App {
         self.open_command_palette_mode(FinderKind::Inbox);
     }
 
+    pub(super) fn open_theme_picker(&mut self) {
+        self.open_command_palette_mode(FinderKind::Themes);
+        self.file_picker_selection = crate::design_system::ThemeVariant::all()
+            .iter()
+            .position(|theme| *theme == self.theme_variant)
+            .unwrap_or(0);
+    }
+
     pub(super) fn filtered_results_len(&self) -> usize {
         match self.finder_kind {
             FinderKind::Root => self.filtered_command_results().len(),
             FinderKind::Files => self.filtered_file_indices().len(),
             FinderKind::Text => self.filtered_text_results().len(),
             FinderKind::Inbox => self.filtered_inbox_notes().len(),
+            FinderKind::Themes => self.filtered_theme_results().len(),
         }
+    }
+
+    pub(super) fn filtered_theme_results(&self) -> Vec<CommandResult> {
+        let query = self.file_picker_query.trim();
+        let mut themes = crate::design_system::ThemeVariant::all()
+            .iter()
+            .enumerate()
+            .map(|(index, theme)| {
+                let shortcut = if *theme == self.theme_variant {
+                    "current"
+                } else {
+                    "enter"
+                };
+                command_result(
+                    "theme",
+                    theme.label(),
+                    shortcut,
+                    Command::SelectTheme(*theme),
+                    index,
+                )
+            })
+            .collect::<Vec<_>>();
+        if query.is_empty() {
+            return themes;
+        }
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
+        let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+        let mut chars = Vec::new();
+        themes
+            .drain(..)
+            .filter_map(|mut theme| {
+                let haystack = format!("{} {} {}", theme.category, theme.label, theme.shortcut);
+                let score = nucleo_score_with(&pattern, &mut matcher, &mut chars, &haystack)?;
+                theme.score = score;
+                Some(theme)
+            })
+            .collect()
     }
 
     pub(super) fn filtered_file_indices(&self) -> Vec<usize> {
@@ -374,7 +437,13 @@ impl App {
         };
         let offset = commands.len();
         commands.extend([
-            command_result("global", "toggle theme", "T", Command::ToggleTheme, offset),
+            command_result(
+                "global",
+                "theme picker",
+                "T",
+                Command::OpenThemePicker,
+                offset,
+            ),
             command_result("global", "quit", "q", Command::Quit, offset + 1),
         ]);
         commands
@@ -1089,53 +1158,7 @@ pub(crate) fn render_modal_diff_scrollbar(
     viewport_len: usize,
     position: usize,
 ) {
-    if area.width == 0 || area.height == 0 || content_len <= viewport_len || viewport_len == 0 {
-        return;
-    }
-    let x = area.right().saturating_sub(1);
-    let height = area.height as usize;
-    let track_style = Style::new()
-        .fg(Color::Rgb(56, 56, 58))
-        .bg(Color::Rgb(37, 37, 39));
-    for y in area.top()..area.bottom() {
-        buf[(x, y)].set_symbol("▕").set_style(track_style);
-    }
-
-    let slider = SliderState {
-        value: position.min(content_len.saturating_sub(viewport_len)),
-        min: 0,
-        max: content_len.saturating_sub(viewport_len),
-        viewport_size: viewport_len,
-    };
-    let geometry = slider.geometry(height);
-    let thumb_start = geometry.virtual_thumb_start;
-    let thumb_end = thumb_start + geometry.virtual_thumb_size;
-    let thumb_style = Style::new()
-        .fg(Color::Rgb(154, 158, 163))
-        .bg(Color::Rgb(37, 37, 39));
-
-    let start_cell = thumb_start / 2;
-    let end_cell = thumb_end.div_ceil(2).saturating_sub(1);
-    for real_y in start_cell..=end_cell.min(height.saturating_sub(1)) {
-        let virtual_cell_start = real_y * 2;
-        let virtual_cell_end = virtual_cell_start + 2;
-        let covered_start = thumb_start.max(virtual_cell_start);
-        let covered_end = thumb_end.min(virtual_cell_end);
-        let coverage = covered_end.saturating_sub(covered_start);
-        let symbol = if coverage >= 2 {
-            "▐"
-        } else if coverage > 0 && covered_start == virtual_cell_start {
-            "▝"
-        } else if coverage > 0 {
-            "▗"
-        } else {
-            "▕"
-        };
-        let y = area.y + real_y as u16;
-        if y < area.bottom() {
-            buf[(x, y)].set_symbol(symbol).set_style(thumb_style);
-        }
-    }
+    render_scrollbar(area, buf, content_len, viewport_len, position);
 }
 
 pub(crate) fn styled_path_spans(

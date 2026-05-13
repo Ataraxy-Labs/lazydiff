@@ -1,3 +1,6 @@
+use std::io::Write as _;
+use std::process::{Command, Stdio};
+
 use super::*;
 
 impl App {
@@ -28,9 +31,37 @@ impl App {
                 _ => {}
             }
         }
+        if self.active_scrollbar_drag.is_some() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.drag_active_scrollbar_to(mouse.row, terminal_width, terminal_height);
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.active_scrollbar_drag = None;
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let over_main_scrollbar =
+            self.is_on_main_scrollbar(mouse.column, mouse.row, terminal_width, terminal_height);
+        let scrollbar_target =
+            self.scrollbar_target_at(mouse.column, mouse.row, terminal_width, terminal_height);
         if self.file_picker_open
             && self.handle_file_picker_mouse(mouse, terminal_width, terminal_height)
         {
+            return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && scrollbar_target.is_some()
+        {
+            self.start_scrollbar_drag(
+                scrollbar_target.expect("checked is_some"),
+                mouse.row,
+                terminal_width,
+                terminal_height,
+            );
             return;
         }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -39,6 +70,11 @@ impl App {
             return;
         }
         match (self.surface, mouse.kind) {
+            (AppSurface::Queue, MouseEventKind::Down(MouseButton::Left)) => {
+                if self.handle_home_queue_click(mouse, terminal_width, terminal_height) {
+                    return;
+                }
+            }
             (AppSurface::CommitList, MouseEventKind::ScrollDown) => {
                 self.move_commit_selection(1);
                 return;
@@ -104,23 +140,24 @@ impl App {
             _ => {}
         }
         match mouse.kind {
+            MouseEventKind::ScrollLeft => {
+                self.scroll_active_pane_horizontally(-8);
+            }
+            MouseEventKind::ScrollRight => {
+                self.scroll_active_pane_horizontally(8);
+            }
             MouseEventKind::ScrollDown => {
                 self.scroll_relative(1, rows);
             }
             MouseEventKind::ScrollUp => {
                 self.scroll_relative(-1, rows);
             }
-            MouseEventKind::Down(MouseButton::Left)
-                if self.is_on_main_scrollbar(
-                    mouse.column,
-                    mouse.row,
-                    terminal_width,
-                    terminal_height,
-                ) =>
-            {
+            MouseEventKind::Down(MouseButton::Left) if over_main_scrollbar => {
                 self.selecting_text = false;
+                self.pending_screen_selection = None;
+                self.screen_selection = None;
                 self.dragging_scrollbar = true;
-                let body_row = mouse.row.saturating_sub(BODY_TOP) as usize;
+                let body_row = mouse.row.saturating_sub(main_body_top()) as usize;
                 if self.is_in_scrollbar_thumb(body_row, rows) {
                     self.scrollbar_drag_offset_virtual =
                         self.scrollbar_drag_offset_virtual(body_row, rows);
@@ -130,30 +167,75 @@ impl App {
                         self.scrollbar_drag_offset_virtual(body_row, rows);
                 }
             }
-            MouseEventKind::Down(MouseButton::Left) => {
-                self.dragging_scrollbar = false;
-                self.selecting_text = true;
-                self.text_selection_dragged = false;
-                self.start_text_selection(mouse, terminal_width, rows);
-            }
             MouseEventKind::Drag(MouseButton::Left) if self.dragging_scrollbar => {
                 if self.is_in_main_body(mouse.row, terminal_height) {
                     self.drag_scrollbar_to(mouse.row, rows);
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) if self.selecting_text => {
-                self.text_selection_dragged = true;
-                self.update_text_selection(mouse, terminal_width, rows);
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.selecting_text || self.pending_screen_selection.is_some() =>
+            {
+                if !self.selecting_text {
+                    self.start_pending_screen_text_selection();
+                }
+                self.update_screen_text_selection(mouse);
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if self.selecting_text && !self.text_selection_dragged {
-                    self.state.clear_mouse_selection();
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.dragging_scrollbar = false;
+                self.prepare_screen_text_selection(mouse, terminal_width, terminal_height);
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.selecting_text => {
+                if self.text_selection_dragged {
+                    self.copy_screen_text_selection_to_clipboard();
+                } else {
+                    self.screen_selection = None;
+                    self.screen_selection_bounds = None;
                 }
                 self.dragging_scrollbar = false;
                 self.selecting_text = false;
                 self.text_selection_dragged = false;
             }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.dragging_scrollbar = false;
+                self.selecting_text = false;
+                self.text_selection_dragged = false;
+                self.pending_screen_selection = None;
+            }
             _ => {}
+        }
+    }
+
+    fn handle_home_queue_click(
+        &mut self,
+        mouse: MouseEvent,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> bool {
+        let Some(rows) = self.home_wide_queue_rows(terminal_width, terminal_height) else {
+            return false;
+        };
+        let geometries: Vec<_> = rows
+            .iter()
+            .map(|row| match row {
+                GroupedWorkItemRow::Header { geometry, .. }
+                | GroupedWorkItemRow::Item { geometry, .. } => *geometry,
+            })
+            .collect();
+        let Some(hit) = list_row_at(&geometries, mouse.column, mouse.row) else {
+            return false;
+        };
+        match hit.kind {
+            ListRowKind::Item(index) => {
+                let items_len = self.home_work_items().len();
+                self.home_selection = index.min(items_len.saturating_sub(1));
+                self.home_selection_changed_at = Instant::now();
+                self.surface_scroll_y = 0;
+                self.semantic_scroll_y = 0;
+                self.semantic_selection = 0;
+                self.revalidate_selected_semantic_diff();
+                true
+            }
+            ListRowKind::Header | ListRowKind::Gap => true,
         }
     }
 
@@ -236,10 +318,21 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) if over_list => {
                 let filtered_len = self.filtered_file_indices().len();
                 let start = self.file_picker_list_start(list_area.height as usize, filtered_len);
-                let row = mouse.row.saturating_sub(list_area.y) as usize;
-                self.file_picker_selection = start
-                    .saturating_add(row)
-                    .min(filtered_len.saturating_sub(1));
+                let rows = list_item_rows(
+                    Rect::new(
+                        list_area.x,
+                        list_area.y,
+                        list_area.width.saturating_sub(1),
+                        list_area.height,
+                    ),
+                    start,
+                    filtered_len,
+                );
+                if let Some(hit) = list_row_at(&rows, mouse.column, mouse.row) {
+                    if let ListRowKind::Item(index) = hit.kind {
+                        self.file_picker_selection = index.min(filtered_len.saturating_sub(1));
+                    }
+                }
                 self.file_picker_preview_scroll = 0;
                 true
             }
@@ -535,93 +628,116 @@ impl App {
         Some((area, list_area, preview_area))
     }
 
-    pub(super) fn start_text_selection(
+    fn prepare_screen_text_selection(
         &mut self,
         mouse: MouseEvent,
         terminal_width: u16,
-        rows: usize,
+        terminal_height: u16,
     ) {
-        let Some((row, side, column, body_row)) =
-            self.mouse_selection_point(mouse, terminal_width, rows)
-        else {
-            return;
+        let anchor = ScreenPoint {
+            x: mouse.column,
+            y: mouse.row,
         };
-        self.last_selection_mouse = Some((body_row, column));
-        self.state
-            .start_mouse_selection(row, side, column, rows, self.viewport_height);
-    }
-
-    pub(super) fn update_text_selection(
-        &mut self,
-        mouse: MouseEvent,
-        terminal_width: u16,
-        rows: usize,
-    ) {
-        let Some((mut row, _side, column, body_row)) =
-            self.mouse_selection_point(mouse, terminal_width, rows)
-        else {
+        if !self.screen_point_is_text(anchor) {
+            self.pending_screen_selection = None;
             return;
-        };
-
-        if body_row == 0 && self.state.scroll_y > 0 {
-            self.state.scroll_y = self.state.scroll_y.saturating_sub(1);
-            row = self.state.scroll_y;
-        } else if body_row + 1 >= self.viewport_height
-            && self.state.scroll_y + self.viewport_height < rows
-        {
-            self.state.scroll_y += 1;
-            row = (self.state.scroll_y + self.viewport_height.saturating_sub(1))
-                .min(rows.saturating_sub(1));
         }
-
-        self.last_selection_mouse = Some((body_row, column));
-        self.state
-            .update_mouse_selection(row, column, rows, self.viewport_height);
+        self.pending_screen_selection = Some((
+            anchor,
+            Some(self.selection_pane_bounds(mouse, terminal_width, terminal_height)),
+        ));
     }
 
-    pub(super) fn mouse_selection_point(
+    fn start_pending_screen_text_selection(&mut self) {
+        let Some((anchor, bounds)) = self.pending_screen_selection.take() else {
+            return;
+        };
+        self.dragging_scrollbar = false;
+        self.selecting_text = true;
+        self.text_selection_dragged = false;
+        self.state.clear_mouse_selection();
+        self.screen_selection_bounds = bounds;
+        self.screen_selection = Some(ScreenTextSelection::new(anchor));
+    }
+
+    fn update_screen_text_selection(&mut self, mouse: MouseEvent) {
+        self.text_selection_dragged = true;
+        if let Some(selection) = &mut self.screen_selection {
+            selection.set_focus(ScreenPoint {
+                x: mouse.column,
+                y: mouse.row,
+            });
+        }
+    }
+
+    fn copy_screen_text_selection_to_clipboard(&mut self) {
+        let Some(selection) = self.screen_selection else {
+            return;
+        };
+        let text = selection::selected_screen_text(
+            &self.screen_text,
+            selection,
+            self.screen_selection_bounds,
+        );
+        if text.is_empty() {
+            self.screen_selection = None;
+            self.screen_selection_bounds = None;
+            return;
+        }
+        let copied = copy_to_system_clipboard(&text) || copy_to_terminal_clipboard(&text);
+        if copied {
+            self.screen_selection = None;
+            self.screen_selection_bounds = None;
+        }
+    }
+
+    fn selection_pane_bounds(
         &self,
         mouse: MouseEvent,
         terminal_width: u16,
-        rows: usize,
-    ) -> Option<(usize, DiffSide, usize, usize)> {
-        if rows == 0
-            || terminal_width <= 1
-            || mouse.row < BODY_TOP
-            || mouse.column >= terminal_width.saturating_sub(1)
-        {
-            return None;
+        terminal_height: u16,
+    ) -> Rect {
+        let full = Rect::new(0, 0, terminal_width, terminal_height);
+        if self.file_picker_open {
+            return full;
         }
-        let body_row = mouse.row.saturating_sub(BODY_TOP) as usize;
-        if body_row >= self.viewport_height {
-            return None;
+        match self.surface {
+            AppSurface::Queue => {
+                if let Some(details) = self.home_detail_area(terminal_width, terminal_height) {
+                    if contains_point(details, mouse.column, mouse.row) {
+                        return details;
+                    }
+                }
+                if let Some(queue) = self.home_wide_queue_area(terminal_width, terminal_height) {
+                    if contains_point(queue, mouse.column, mouse.row) {
+                        return queue;
+                    }
+                }
+                full
+            }
+            AppSurface::Diff => {
+                let area = app_content_area(full);
+                let [_header, _divider, body, _comment_preview, _footer] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                    Constraint::Length(2),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                let (sidebar, _sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
+                if let Some(sidebar) = sidebar {
+                    if contains_point(sidebar, mouse.column, mouse.row) {
+                        return sidebar;
+                    }
+                }
+                if contains_point(diff_body, mouse.column, mouse.row) {
+                    return diff_body;
+                }
+                full
+            }
+            AppSurface::DetailFull | AppSurface::Comments | AppSurface::CommitList => full,
         }
-        let content_width = terminal_width.saturating_sub(1).max(1);
-        let half = content_width / 2;
-        let side = if mouse.column < half {
-            DiffSide::Left
-        } else {
-            DiffSide::Right
-        };
-        let side_x = match side {
-            DiffSide::Left => mouse.column,
-            DiffSide::Right => mouse.column.saturating_sub(half),
-        };
-        let column = side_x.saturating_sub(SPLIT_TEXT_COLUMN) as usize;
-        let point = TextSelection::document_point_from_local(
-            column,
-            body_row,
-            TextViewport {
-                scroll_x: 0,
-                scroll_y: self.state.scroll_y,
-            },
-        );
-        Some((
-            point.row.min(rows.saturating_sub(1)),
-            side,
-            point.column,
-            body_row,
-        ))
     }
 
     pub(super) fn is_on_main_scrollbar(
@@ -637,11 +753,299 @@ impl App {
     }
 
     pub(super) fn is_in_main_body(&self, row: u16, _terminal_height: u16) -> bool {
-        row >= BODY_TOP && row < BODY_TOP.saturating_add(self.viewport_height as u16)
+        row >= main_body_top() && row < main_body_top().saturating_add(self.viewport_height as u16)
+    }
+
+    fn scrollbar_target_at(
+        &mut self,
+        column: u16,
+        row: u16,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<ScrollbarTarget> {
+        for target in [
+            ScrollbarTarget::DetailDescription,
+            ScrollbarTarget::Comments,
+        ] {
+            if self
+                .scrollbar_for_target(target, terminal_width, terminal_height)
+                .is_some_and(|scrollbar| scrollbar.hit(column, row))
+            {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    fn start_scrollbar_drag(
+        &mut self,
+        target: ScrollbarTarget,
+        row: u16,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) {
+        self.selecting_text = false;
+        self.pending_screen_selection = None;
+        self.screen_selection = None;
+        let Some(mut scrollbar) =
+            self.scrollbar_for_target(target, terminal_width, terminal_height)
+        else {
+            return;
+        };
+        if !scrollbar.thumb_hit(row) {
+            let value = scrollbar.value_from_drag(row, 0);
+            self.set_scrollbar_target_position(target, value, terminal_width, terminal_height);
+            let Some(updated) = self.scrollbar_for_target(target, terminal_width, terminal_height)
+            else {
+                return;
+            };
+            scrollbar = updated;
+        }
+        let offset_virtual = scrollbar.drag_offset_virtual(row);
+        self.active_scrollbar_drag = Some(ScrollbarDrag {
+            target,
+            offset_virtual,
+        });
+        self.drag_active_scrollbar_to(row, terminal_width, terminal_height);
+    }
+
+    fn drag_active_scrollbar_to(&mut self, row: u16, terminal_width: u16, terminal_height: u16) {
+        let Some(drag) = self.active_scrollbar_drag else {
+            return;
+        };
+        let Some(scrollbar) =
+            self.scrollbar_for_target(drag.target, terminal_width, terminal_height)
+        else {
+            return;
+        };
+        let value = scrollbar.value_from_drag(row, drag.offset_virtual);
+        self.set_scrollbar_target_position(drag.target, value, terminal_width, terminal_height);
+    }
+
+    fn set_scrollbar_target_position(
+        &mut self,
+        target: ScrollbarTarget,
+        value: usize,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) {
+        match target {
+            ScrollbarTarget::DetailDescription => self.surface_scroll_y = value,
+            ScrollbarTarget::Comments => {
+                self.set_comments_scrollbar_position(value, terminal_width, terminal_height)
+            }
+        }
+    }
+
+    fn scrollbar_for_target(
+        &mut self,
+        target: ScrollbarTarget,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<VerticalScrollbar> {
+        match target {
+            ScrollbarTarget::DetailDescription => {
+                self.description_scrollbar(terminal_width, terminal_height)
+            }
+            ScrollbarTarget::Comments => self.comments_scrollbar(terminal_width, terminal_height),
+        }
+    }
+
+    fn description_scrollbar(
+        &mut self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<VerticalScrollbar> {
+        let (content, total_rows, visible_rows) =
+            self.description_scroll_context(terminal_width, terminal_height)?;
+        Some(VerticalScrollbar::new(
+            content,
+            total_rows,
+            visible_rows,
+            self.surface_scroll_y,
+        ))
+    }
+
+    fn comments_scrollbar(
+        &mut self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<VerticalScrollbar> {
+        if self.surface != AppSurface::Comments {
+            return None;
+        }
+        let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+        let [_header, _top_rule, _title_area, body, _footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let items = self.home_work_items();
+        let selected = items.get(self.home_selection.min(items.len().saturating_sub(1)))?;
+        let comments = self.selected_comments(selected);
+        let rows = comment_surface_rows(
+            &comments,
+            body.width.saturating_sub(3) as usize,
+            &self.home_palette(),
+        );
+        Some(VerticalScrollbar::new(
+            body,
+            rows.len(),
+            body.height as usize,
+            self.surface_scroll_y,
+        ))
+    }
+
+    fn set_comments_scrollbar_position(
+        &mut self,
+        value: usize,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) {
+        let Some((body, rows_len)) = self.comments_scroll_context(terminal_width, terminal_height)
+        else {
+            return;
+        };
+        self.surface_scroll_y = value.min(rows_len.saturating_sub(body.height as usize));
+        if let Some(comment_index) = self.comment_index_at_scroll_position(
+            self.surface_scroll_y,
+            terminal_width,
+            terminal_height,
+        ) {
+            self.comments_selection = comment_index;
+        }
+    }
+
+    fn comment_index_at_scroll_position(
+        &mut self,
+        value: usize,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<usize> {
+        let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+        let [_header, _top_rule, _title_area, body, _footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let items = self.home_work_items();
+        let selected = items.get(self.home_selection.min(items.len().saturating_sub(1)))?;
+        let comments = self.selected_comments(selected);
+        let rows = comment_surface_rows(
+            &comments,
+            body.width.saturating_sub(3) as usize,
+            &self.home_palette(),
+        );
+        rows.get(value)
+            .map(CommentSurfaceRow::comment_index)
+            .or_else(|| {
+                rows.iter()
+                    .skip(value)
+                    .next()
+                    .map(CommentSurfaceRow::comment_index)
+            })
+            .or_else(|| {
+                rows.iter()
+                    .next_back()
+                    .map(CommentSurfaceRow::comment_index)
+            })
+    }
+
+    fn comments_scroll_context(
+        &mut self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<(Rect, usize)> {
+        if self.surface != AppSurface::Comments {
+            return None;
+        }
+        let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+        let [_header, _top_rule, _title_area, body, _footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let items = self.home_work_items();
+        let selected = items.get(self.home_selection.min(items.len().saturating_sub(1)))?;
+        let comments = self.selected_comments(selected);
+        let rows = comment_surface_rows(
+            &comments,
+            body.width.saturating_sub(3) as usize,
+            &self.home_palette(),
+        );
+        Some((body, rows.len()))
+    }
+
+    fn description_scroll_context(
+        &mut self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<(Rect, usize, usize)> {
+        if self.detail_tab != DetailTab::Description {
+            return None;
+        }
+        let details = match self.surface {
+            AppSurface::Queue => self.home_detail_area(terminal_width, terminal_height)?,
+            AppSurface::DetailFull => {
+                let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+                let [_header, _divider, body, _footer] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                body
+            }
+            AppSurface::CommitList | AppSurface::Comments | AppSurface::Diff => return None,
+        };
+        if details.width < 3 || details.height < 3 {
+            return None;
+        }
+        let content = Rect::new(
+            details.x.saturating_add(1),
+            details.y.saturating_add(1),
+            details.width.saturating_sub(2),
+            details.height.saturating_sub(2),
+        );
+        let visible_rows = content.height as usize;
+        if visible_rows == 0 || content.width == 0 {
+            return None;
+        }
+        let items = self.home_work_items();
+        let selected = items.get(self.home_selection.min(items.len().saturating_sub(1)))?;
+        let total_rows = if let Some((repository, number, body)) = selected
+            .pull_request(self)
+            .map(|pr| (pr.repository.clone(), pr.number, pr.body.clone()))
+        {
+            let preview_width = content.width.saturating_sub(1).max(16);
+            self.cached_pull_request_body_preview(
+                &repository,
+                number,
+                &body,
+                preview_width,
+                surfaces::DETAIL_DESCRIPTION_ROW_LIMIT,
+                &self.home_palette(),
+                true,
+            )?
+            .len()
+        } else {
+            selected.description(self).len()
+        };
+        Some((content, total_rows, visible_rows))
     }
 
     pub(super) fn jump_scrollbar_to(&mut self, row: u16, rows: usize) {
-        let body_row = row.saturating_sub(BODY_TOP) as usize;
+        let body_row = row.saturating_sub(main_body_top()) as usize;
         let height = self.viewport_height.max(1);
         let max_scroll = rows.saturating_sub(height);
         let scroll = if max_scroll == 0 {
@@ -664,7 +1068,7 @@ impl App {
         let max_thumb_start = geometry
             .virtual_track_size
             .saturating_sub(geometry.virtual_thumb_size);
-        let body_row = row.saturating_sub(BODY_TOP) as usize;
+        let body_row = row.saturating_sub(main_body_top()) as usize;
         let virtual_mouse = body_row.min(height) * 2;
         let desired_thumb_start = virtual_mouse
             .saturating_sub(self.scrollbar_drag_offset_virtual)
@@ -712,5 +1116,63 @@ impl App {
             max: max_scroll,
             viewport_size: height,
         }
+    }
+}
+
+fn copy_to_system_clipboard(text: &str) -> bool {
+    let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else {
+        return false;
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        return false;
+    };
+    if stdin.write_all(text.as_bytes()).is_err() {
+        return false;
+    }
+    drop(stdin);
+    child.wait().is_ok_and(|status| status.success())
+}
+
+fn main_body_top() -> u16 {
+    APP_TOP_PADDING.saturating_add(BODY_TOP)
+}
+
+fn copy_to_terminal_clipboard(text: &str) -> bool {
+    let payload = base64_encode(text.as_bytes());
+    print!("\x1b]52;c;{payload}\x07");
+    std::io::stdout().flush().is_ok()
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc52_base64_payload_matches_standard_encoding() {
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_encode("alpha\nbeta".as_bytes()), "YWxwaGEKYmV0YQ==");
     }
 }

@@ -15,7 +15,13 @@ pub(crate) fn render_full_line(area: Rect, y: u16, buf: &mut Buffer, text: &str,
     for x in area.left()..area.right() {
         buf[(x, y)].set_symbol(" ").set_style(style);
     }
-    buf.set_stringn(area.x, y, fit(text, area.width as usize), area.width as usize, style);
+    buf.set_stringn(
+        area.x,
+        y,
+        fit(text, area.width as usize),
+        area.width as usize,
+        style,
+    );
 }
 
 pub(crate) fn render_segments(
@@ -30,6 +36,7 @@ pub(crate) fn render_segments(
     theme: DiffTheme,
     base_style: Style,
     selection_range: Option<TextSelectionRange>,
+    scroll_x: usize,
 ) {
     for x in area.left()..area.right() {
         buf[(x, y)].set_symbol(" ").set_style(base_style);
@@ -47,7 +54,20 @@ pub(crate) fn render_segments(
         x = x.saturating_add(UnicodeWidthStr::width(fitted.as_str()) as u16);
     }
 
-    render_styled_text(buf, x, y, right, text, syntax_spans, inline_spans, row_kind, theme, base_style, selection_range);
+    render_styled_text(
+        buf,
+        x,
+        y,
+        right,
+        text,
+        syntax_spans,
+        inline_spans,
+        row_kind,
+        theme,
+        base_style,
+        selection_range,
+        scroll_x,
+    );
 }
 
 fn render_styled_text(
@@ -62,10 +82,19 @@ fn render_styled_text(
     theme: DiffTheme,
     base_style: Style,
     selection_range: Option<TextSelectionRange>,
+    scroll_x: usize,
 ) -> u16 {
     let selection_style = selection_style();
     let mut display_column = 0usize;
-    let cell = split_line_cell(row_kind, None, text, syntax_spans, inline_spans, theme, base_style);
+    let cell = split_line_cell(
+        row_kind,
+        None,
+        text,
+        syntax_spans,
+        inline_spans,
+        theme,
+        base_style,
+    );
 
     for span in cell.spans {
         for ch in span.text.chars() {
@@ -75,8 +104,17 @@ fn render_styled_text(
 
             let char_width = ch.width().unwrap_or(0).max(1);
             let char_end = display_column + char_width;
-            let selected = selection_range.is_some_and(|range| display_column < range.end && char_end > range.start);
-            let style = if selected { selection_style } else { span.style };
+            if char_end <= scroll_x {
+                display_column = char_end;
+                continue;
+            }
+            let selected = selection_range
+                .is_some_and(|range| display_column < range.end && char_end > range.start);
+            let style = if selected {
+                selection_style
+            } else {
+                span.style
+            };
 
             let mut buf_text = [0; 4];
             let text = ch.encode_utf8(&mut buf_text);

@@ -29,6 +29,8 @@ pub(crate) struct SemanticChange {
     pub(crate) entity_name: String,
     pub(crate) change_type: String,
     pub(crate) line: Option<usize>,
+    #[serde(default)]
+    pub(crate) end_line: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -77,6 +79,7 @@ pub(crate) enum SemanticTreeRow {
         entity_name: String,
         change_type: String,
         line: Option<usize>,
+        end_line: Option<usize>,
     },
     Status(String),
 }
@@ -148,10 +151,10 @@ impl SemanticViewport {
 
 pub(crate) fn semantic_tree_body_area(area: Rect) -> Rect {
     Rect::new(
-        area.x,
+        area.x.saturating_add(1),
         area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
     )
 }
 
@@ -336,6 +339,7 @@ impl App {
                 entity_name: change.entity_name.clone(),
                 change_type: change.change_type.clone(),
                 line: change.line,
+                end_line: change.end_line,
             }));
         }
         if diff.truncated {
@@ -550,6 +554,7 @@ impl App {
         route: DiffSource,
         path: String,
         line: Option<usize>,
+        end_line: Option<usize>,
         change_type: Option<String>,
     ) {
         match &route {
@@ -557,7 +562,7 @@ impl App {
                 self.document = self.document_for_route(&route);
                 self.push_route(AppRoute::Diff(route.clone()));
                 self.state = DiffViewState::default();
-                self.focus_path_if_present(&path, line, change_type.as_deref());
+                self.focus_path_if_present(&path, line, end_line, change_type.as_deref());
                 self.revalidate_local_diff();
             }
             DiffSource::PullRequest { repository, number } => {
@@ -565,6 +570,7 @@ impl App {
                     route: route.clone(),
                     path: path.clone(),
                     line,
+                    end_line,
                     change_type: change_type.clone(),
                 });
                 self.push_route(AppRoute::Diff(route.clone()));
@@ -625,9 +631,10 @@ impl App {
             SemanticTreeRow::Entity {
                 path,
                 line,
+                end_line,
                 change_type,
                 ..
-            } => self.open_semantic_path(route, path, line, Some(change_type)),
+            } => self.open_semantic_path(route, path, line, end_line, Some(change_type)),
             SemanticTreeRow::Status(_) => return false,
         }
         true
@@ -668,28 +675,17 @@ impl App {
         }
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
-        let slider = SliderState {
-            value: viewport.scroll_y,
-            min: 0,
-            max: viewport.total_rows.saturating_sub(viewport.visible_rows),
-            viewport_size: viewport.visible_rows,
-        };
-        if slider.max == 0 {
+        let scrollbar = VerticalScrollbar::new(
+            body,
+            viewport.total_rows,
+            viewport.visible_rows,
+            viewport.scroll_y,
+        );
+        if scrollbar.slider().max == 0 {
             self.set_semantic_viewport(viewport);
             return true;
         }
-        let geometry = slider.geometry(viewport.visible_rows);
-        let max_thumb_start = geometry
-            .virtual_track_size
-            .saturating_sub(geometry.virtual_thumb_size);
-        let body_row = row.saturating_sub(body.y) as usize;
-        let virtual_mouse = body_row.min(viewport.visible_rows) * 2;
-        let desired_thumb_start = virtual_mouse
-            .saturating_sub(self.semantic_scrollbar_drag_offset_virtual)
-            .min(max_thumb_start);
-        let scroll_y = slider
-            .value_from_virtual_thumb_start(viewport.visible_rows, desired_thumb_start)
-            .min(slider.max);
+        let scroll_y = scrollbar.value_from_drag(row, self.semantic_scrollbar_drag_offset_virtual);
         let selected = scroll_y
             .saturating_add(viewport.selected.saturating_sub(viewport.scroll_y))
             .min(viewport.total_rows.saturating_sub(1));
@@ -709,15 +705,13 @@ impl App {
         let body = semantic_tree_body_area(area);
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
-        let slider = SliderState {
-            value: viewport.scroll_y,
-            min: 0,
-            max: viewport.total_rows.saturating_sub(viewport.visible_rows),
-            viewport_size: viewport.visible_rows,
-        };
-        let thumb_start = slider.geometry(viewport.visible_rows).virtual_thumb_start;
-        let virtual_mouse = row.saturating_sub(body.y) as usize * 2;
-        virtual_mouse.saturating_sub(thumb_start)
+        VerticalScrollbar::new(
+            body,
+            viewport.total_rows,
+            viewport.visible_rows,
+            viewport.scroll_y,
+        )
+        .drag_offset_virtual(row)
     }
 
     pub(super) fn apply_pending_semantic_focus(&mut self, route: &DiffSource) {
@@ -729,7 +723,12 @@ impl App {
         }
         self.pending_semantic_focus = None;
         self.state = DiffViewState::default();
-        self.focus_path_if_present(&target.path, target.line, target.change_type.as_deref());
+        self.focus_path_if_present(
+            &target.path,
+            target.line,
+            target.end_line,
+            target.change_type.as_deref(),
+        );
     }
 
     pub(super) fn focus_semantic_path(
@@ -738,7 +737,7 @@ impl App {
         line: Option<usize>,
         change_type: Option<&str>,
     ) {
-        self.focus_path_if_present(path, line, change_type);
+        self.focus_path_if_present(path, line, None, change_type);
     }
 
     pub(super) fn open_selected_semantic_row(&mut self) -> bool {
@@ -774,10 +773,11 @@ impl App {
             SemanticTreeRow::Entity {
                 path,
                 line,
+                end_line,
                 change_type,
                 ..
             } => {
-                self.open_semantic_path(route, path, line, Some(change_type));
+                self.open_semantic_path(route, path, line, end_line, Some(change_type));
                 true
             }
             SemanticTreeRow::Status(_) => false,
@@ -805,6 +805,7 @@ impl App {
         &mut self,
         path: &str,
         line: Option<usize>,
+        end_line: Option<usize>,
         change_type: Option<&str>,
     ) {
         let Some(index) = self.document.files.iter().position(|file| {
@@ -816,16 +817,20 @@ impl App {
             return;
         };
         let rows = row_count_for_mode(&self.document, self.state.mode);
-        // sem-core reports entity_line on the after side for added/modified/
-        // renamed/moved/reordered changes and on the before side for deleted.
+        // sem-core reports primary entity spans on the after side for added/
+        // modified/renamed/moved/reordered changes and on the before side for
+        // deleted changes.
         let use_old_side = matches!(change_type, Some("deleted"));
         if let Some(line) = line.and_then(|line| u32::try_from(line).ok()) {
-            let target = best_line_match(&self.document.files[index], line, use_old_side).and_then(
-                |(hunk_index, line_index)| {
+            let end_line = end_line
+                .and_then(|line| u32::try_from(line).ok())
+                .unwrap_or(line)
+                .max(line);
+            let target = best_line_match(&self.document.files[index], line, end_line, use_old_side)
+                .and_then(|(hunk_index, line_index)| {
                     self.document
                         .line_row(self.state.mode, index, hunk_index, line_index)
-                },
-            );
+                });
             if let Some(row) = target {
                 self.focus_row(row, rows);
                 self.trigger_transient_focus(path.to_string(), row);
@@ -837,52 +842,68 @@ impl App {
     }
 }
 
-/// Pick the closest hunk-line whose target-side line number matches
-/// `entity_line`. Prefer an exact match; otherwise the smallest line
-/// `>=` entity_line on the chosen side; otherwise fall back to the last
-/// line `<=` entity_line. Returns `(hunk_index, line_index)`.
+/// Pick the hunk line that best represents a semantic entity span. Prefer a
+/// changed line whose target-side line number intersects the semantic span;
+/// otherwise use the entity start line and nearest target-side hunk line.
+/// Returns `(hunk_index, line_index)`.
 fn best_line_match(
     file: &FileDiff,
-    entity_line: u32,
+    entity_start_line: u32,
+    entity_end_line: u32,
     use_old_side: bool,
 ) -> Option<(usize, usize)> {
+    let entity_end_line = entity_end_line.max(entity_start_line);
+    let mut changed_in_span: Option<(usize, usize)> = None;
     let mut exact: Option<(usize, usize)> = None;
     let mut after: Option<(u32, (usize, usize))> = None;
     let mut before: Option<(u32, (usize, usize))> = None;
     for (hunk_index, hunk) in file.hunks.iter().enumerate() {
         for (line_index, diff_line) in hunk.lines.iter().enumerate() {
-            let line_no: Option<u32> = match diff_line {
-                DiffLine::Context {
-                    old_line, new_line, ..
-                } => Some(if use_old_side { *old_line } else { *new_line }),
-                DiffLine::Add { new_line, .. } if !use_old_side => Some(*new_line),
-                DiffLine::Delete { old_line, .. } if use_old_side => Some(*old_line),
-                _ => None,
+            let Some((line_no, is_changed)) = diff_line_side_line(diff_line, use_old_side) else {
+                continue;
             };
-            let Some(line_no) = line_no else { continue };
-            if line_no == entity_line {
+            if is_changed && (entity_start_line..=entity_end_line).contains(&line_no) {
+                changed_in_span = Some((hunk_index, line_index));
+                break;
+            }
+            if line_no == entity_start_line {
                 if exact.is_none() {
                     exact = Some((hunk_index, line_index));
                 }
-            } else if line_no > entity_line {
-                let delta = line_no - entity_line;
+            } else if line_no > entity_start_line {
+                let delta = line_no - entity_start_line;
                 if after.is_none_or(|(d, _)| delta < d) {
                     after = Some((delta, (hunk_index, line_index)));
                 }
             } else {
-                let delta = entity_line - line_no;
+                let delta = entity_start_line - line_no;
                 if before.is_none_or(|(d, _)| delta < d) {
                     before = Some((delta, (hunk_index, line_index)));
                 }
             }
         }
+        if changed_in_span.is_some() {
+            return changed_in_span;
+        }
         if exact.is_some() {
             return exact;
         }
     }
-    exact
+    changed_in_span
+        .or(exact)
         .or_else(|| after.map(|(_, pos)| pos))
         .or_else(|| before.map(|(_, pos)| pos))
+}
+
+fn diff_line_side_line(diff_line: &DiffLine, use_old_side: bool) -> Option<(u32, bool)> {
+    match diff_line {
+        DiffLine::Context {
+            old_line, new_line, ..
+        } => Some((if use_old_side { *old_line } else { *new_line }, false)),
+        DiffLine::Add { new_line, .. } if !use_old_side => Some((*new_line, true)),
+        DiffLine::Delete { old_line, .. } if use_old_side => Some((*old_line, true)),
+        _ => None,
+    }
 }
 
 impl SemanticDiff {
@@ -894,6 +915,7 @@ impl SemanticDiff {
             if change.entity_type.eq_ignore_ascii_case("chunk") {
                 continue;
             }
+            let (line, end_line) = semantic_line_span(&change);
             let path = if change.file_path.trim().is_empty() {
                 "unknown".to_string()
             } else {
@@ -906,7 +928,8 @@ impl SemanticDiff {
                 entity_type: normalize_semantic_label(&change.entity_type, "ENTITY"),
                 entity_name: normalize_semantic_label(&change.entity_name, "module"),
                 change_type: semantic_change_label(change.change_type).to_string(),
-                line: (change.entity_line > 0).then_some(change.entity_line),
+                line,
+                end_line,
             });
         }
         Self {
@@ -920,6 +943,28 @@ impl SemanticDiff {
             truncated,
         }
     }
+}
+
+fn semantic_line_span(
+    change: &sem_core::model::change::SemanticChange,
+) -> (Option<usize>, Option<usize>) {
+    let start = (change.entity_line > 0).then_some(change.entity_line);
+    let content = if matches!(change.change_type, ChangeType::Deleted) {
+        change
+            .before_content
+            .as_deref()
+            .or(change.after_content.as_deref())
+    } else {
+        change
+            .after_content
+            .as_deref()
+            .or(change.before_content.as_deref())
+    };
+    let end = start.map(|line| {
+        let line_count = content.map_or(1, |content| content.lines().count().max(1));
+        line.saturating_add(line_count.saturating_sub(1))
+    });
+    (start, end)
 }
 
 fn semantic_change_label(change_type: ChangeType) -> &'static str {
@@ -1084,7 +1129,7 @@ mod tests {
     fn best_line_match_prefers_exact_new_line_for_added_entity() {
         // Lines 1..3 context, line 4 added entity, line 5 context.
         let f = file(vec![ctx(1, 1), ctx(2, 2), ctx(3, 3), add(4), ctx(4, 5)]);
-        let pos = best_line_match(&f, 4, false).unwrap();
+        let pos = best_line_match(&f, 4, 4, false).unwrap();
         // Index 3 is the Add at new_line=4.
         assert_eq!(pos, (0, 3));
     }
@@ -1094,7 +1139,7 @@ mod tests {
         // Lines 1..2 context, line 3 deleted entity, then a context line
         // whose old side advanced to 4 because the delete shifted it.
         let f = file(vec![ctx(1, 1), ctx(2, 2), del(3), ctx(4, 3)]);
-        let pos = best_line_match(&f, 3, true).unwrap();
+        let pos = best_line_match(&f, 3, 3, true).unwrap();
         // Index 2 is the Delete at old_line=3.
         assert_eq!(pos, (0, 2));
     }
@@ -1104,7 +1149,7 @@ mod tests {
         // The old-side line numbers happen to match `line`, but the entity
         // is on the after side; we must not anchor on them.
         let f = file(vec![ctx(10, 1), ctx(11, 2), ctx(12, 3)]);
-        let pos = best_line_match(&f, 10, false);
+        let pos = best_line_match(&f, 10, 10, false);
         // None of new_line values reach 10; nearest below is new_line=3
         // at index 2.
         assert_eq!(pos, Some((0, 2)));
@@ -1113,7 +1158,20 @@ mod tests {
     #[test]
     fn best_line_match_returns_none_for_empty_file() {
         let f = file(Vec::new());
-        assert_eq!(best_line_match(&f, 1, false), None);
-        assert_eq!(best_line_match(&f, 1, true), None);
+        assert_eq!(best_line_match(&f, 1, 1, false), None);
+        assert_eq!(best_line_match(&f, 1, 1, true), None);
+    }
+
+    #[test]
+    fn best_line_match_prefers_changed_line_inside_entity_span_over_declaration() {
+        let f = file(vec![
+            ctx(10, 10),
+            ctx(11, 11),
+            ctx(12, 12),
+            add(13),
+            ctx(13, 14),
+        ]);
+
+        assert_eq!(best_line_match(&f, 10, 14, false), Some((0, 3)));
     }
 }

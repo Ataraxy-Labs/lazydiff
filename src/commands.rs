@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::design_system::ThemeVariant;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Layer {
     FilePicker,
@@ -49,7 +51,10 @@ pub(crate) enum Command {
     ShowAttempts,
     SelectLeft,
     SelectRight,
-    ToggleTheme,
+    ScrollLeft,
+    ScrollRight,
+    OpenThemePicker,
+    SelectTheme(ThemeVariant),
 }
 
 pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> {
@@ -64,10 +69,20 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
     {
         return None;
     }
-    // Global theme toggle: capital T flips warm ↔ graphite. Picked because
-    // lowercase `t` is unbound and capital is non-conflicting.
+    // Global theme picker: capital T opens the Lumen-compatible theme list.
     if key.code == KeyCode::Char('T') {
-        return Some(Command::ToggleTheme);
+        return Some(Command::OpenThemePicker);
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('h') {
+        return Some(Command::ScrollLeft);
+    }
+    if (key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL))
+        && key.code == KeyCode::Backspace
+    {
+        return Some(Command::ScrollLeft);
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+        return Some(Command::ScrollRight);
     }
     if key.code == KeyCode::Char('l') && key.modifiers.is_empty() {
         return Some(Command::LoginGitHub);
