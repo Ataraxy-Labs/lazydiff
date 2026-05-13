@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  LAZYDIFF_CONVEX_URL: https://polished-kingfisher-268.convex.cloud
+  LAZYDIFF_CONVEX_HTTP_URL: https://polished-kingfisher-268.convex.site
 
 permissions:
   contents: write
@@ -20,13 +23,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: lazydiff-linux-x86_64
+            artifact: lazydiff-linux-x86_64.tar.gz
             bin: target/release/lazydiff
           - os: macos-latest
-            artifact: lazydiff-macos-arm64
+            artifact: lazydiff-macos-arm64.tar.gz
             bin: target/release/lazydiff
           - os: windows-latest
-            artifact: lazydiff-windows-x86_64.exe
+            artifact: lazydiff-windows-x86_64.zip
             bin: target/release/lazydiff.exe
     steps:
       - uses: actions/checkout@v4
@@ -37,11 +40,21 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "${{ matrix.bin }}" "dist/${{ matrix.artifact }}"
+          mkdir -p package
+          cp "${{ matrix.bin }}" package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }}
+          ./package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }} --version
+          ./package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }} --help >/dev/null
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path package/lazydiff.exe -DestinationPath dist/${{ matrix.artifact }} -Force"
+            powershell -NoProfile -Command "(Get-FileHash dist/${{ matrix.artifact }} -Algorithm SHA256).Hash.ToLower() + '  ${{ matrix.artifact }}'" > "dist/${{ matrix.artifact }}.sha256"
+          else
+            tar -czf "dist/${{ matrix.artifact }}" -C package lazydiff
+            shasum -a 256 "dist/${{ matrix.artifact }}" | sed 's#dist/##' > "dist/${{ matrix.artifact }}.sha256"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          path: dist/*
 
   publish:
     name: publish GitHub release

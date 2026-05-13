@@ -23,6 +23,7 @@ use ratatui_diffs::{
     add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffMode,
     DiffViewState, DiffWidget,
 };
+use serde::Deserialize;
 
 mod app;
 mod bounded_map;
@@ -69,6 +70,10 @@ fn main() -> Result<()> {
         } else {
             println!("Already signed out of GitHub.");
         }
+        return Ok(());
+    }
+    if args.first().is_some_and(|arg| arg == "update") {
+        update_from_latest_release()?;
         return Ok(());
     }
     let launch = LaunchInput::parse(args)?;
@@ -665,8 +670,213 @@ fn run_git_dynamic(cwd: &Path, args: &[String]) -> Result<String> {
     ))
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseResponse {
+    tag_name: String,
+    html_url: String,
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+struct ReleaseAssetCandidate {
+    name: &'static str,
+    archive: bool,
+}
+
+fn update_from_latest_release() -> Result<()> {
+    let current = env!("CARGO_PKG_VERSION");
+    let release = latest_release()?;
+    let latest = release.tag_name.trim_start_matches('v');
+    match compare_lazydiff_versions(current, latest) {
+        Some(std::cmp::Ordering::Greater) => {
+            println!(
+                "Current version {current} is newer than latest published release {}.",
+                release.tag_name
+            );
+            return Ok(());
+        }
+        Some(std::cmp::Ordering::Equal) => {
+            println!("Already on latest release {}.", release.tag_name);
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let asset_candidates = release_asset_candidates()?;
+    let asset = release
+        .assets
+        .iter()
+        .find_map(|asset| {
+            asset_candidates
+                .iter()
+                .find(|candidate| candidate.name == asset.name)
+                .map(|candidate| (asset, candidate.archive))
+        })
+        .ok_or_else(|| {
+            let expected = asset_candidates
+                .iter()
+                .map(|candidate| candidate.name)
+                .collect::<Vec<_>>()
+                .join(" or ");
+            color_eyre::eyre::eyre!(
+                "release {} has no asset for this platform ({expected})\n{}",
+                release.tag_name,
+                release.html_url
+            )
+        })?;
+    println!(
+        "Updating lazydiff {current} -> {} from {}…",
+        release.tag_name, asset.0.name
+    );
+    let bytes = reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()?
+        .get(&asset.0.browser_download_url)
+        .send()?
+        .error_for_status()?
+        .bytes()?;
+    if asset.1 {
+        replace_current_executable_from_archive(&bytes)?;
+    } else {
+        replace_current_executable(&bytes)?;
+    }
+    println!("Updated lazydiff to {}.", release.tag_name);
+    Ok(())
+}
+
+fn latest_release() -> Result<ReleaseResponse> {
+    Ok(reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()?
+        .get("https://api.github.com/repos/Ataraxy-Labs/lazydiff/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()?
+        .error_for_status()?
+        .json()?)
+}
+
+fn release_asset_candidates() -> Result<Vec<ReleaseAssetCandidate>> {
+    match (env::consts::OS, env::consts::ARCH) {
+        ("linux", "x86_64") => Ok(vec![
+            ReleaseAssetCandidate {
+                name: "lazydiff-linux-x86_64.tar.gz",
+                archive: true,
+            },
+            ReleaseAssetCandidate {
+                name: "lazydiff-linux-x86_64",
+                archive: false,
+            },
+        ]),
+        ("macos", "aarch64") => Ok(vec![
+            ReleaseAssetCandidate {
+                name: "lazydiff-macos-arm64.tar.gz",
+                archive: true,
+            },
+            ReleaseAssetCandidate {
+                name: "lazydiff-macos-arm64",
+                archive: false,
+            },
+        ]),
+        ("windows", "x86_64") => Ok(vec![ReleaseAssetCandidate {
+            name: "lazydiff-windows-x86_64.zip",
+            archive: true,
+        }]),
+        (os, arch) => Err(color_eyre::eyre::eyre!(
+            "no release asset is published for {os}/{arch}"
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn replace_current_executable(_bytes: &[u8]) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "self-update is not supported on Windows yet; download the asset from the release page"
+    ))
+}
+
+#[cfg(windows)]
+fn replace_current_executable_from_archive(_bytes: &[u8]) -> Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "self-update is not supported on Windows yet; download the asset from the release page"
+    ))
+}
+
+#[cfg(not(windows))]
+fn replace_current_executable(bytes: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let exe = env::current_exe()?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| color_eyre::eyre::eyre!("current executable has no parent directory"))?;
+    let tmp = dir.join(format!(".lazydiff-update-{}", std::process::id()));
+    let backup = dir.join(format!(".lazydiff-backup-{}", std::process::id()));
+
+    fs::write(&tmp, bytes)?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+    let result = (|| -> Result<()> {
+        fs::rename(&exe, &backup)?;
+        fs::rename(&tmp, &exe)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+        if backup.exists() && !exe.exists() {
+            let _ = fs::rename(&backup, &exe);
+        }
+    } else {
+        let _ = fs::remove_file(&backup);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_current_executable_from_archive(bytes: &[u8]) -> Result<()> {
+    let tmp_dir = env::temp_dir().join(format!("lazydiff-update-{}", std::process::id()));
+    fs::create_dir_all(&tmp_dir)?;
+    let archive = tmp_dir.join("lazydiff.tar.gz");
+    fs::write(&archive, bytes)?;
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&tmp_dir)
+        .status()?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(color_eyre::eyre::eyre!(
+            "failed to extract lazydiff archive"
+        ));
+    }
+    let binary = tmp_dir.join("lazydiff");
+    let bytes = fs::read(&binary)?;
+    let result = replace_current_executable(&bytes);
+    let _ = fs::remove_dir_all(&tmp_dir);
+    result
+}
+
+fn compare_lazydiff_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    Some(parse_lazydiff_version(left)?.cmp(&parse_lazydiff_version(right)?))
+}
+
+fn parse_lazydiff_version(version: &str) -> Option<(u64, u64, u64, u64)> {
+    let (core, alpha) = version.split_once("-alpha.").unwrap_or((version, "999999"));
+    let mut parts = core.split('.').map(str::parse::<u64>);
+    Some((
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        parts.next()?.ok()?,
+        alpha.parse().ok()?,
+    ))
+}
+
 fn help_text() -> &'static str {
-    "Usage: lazydiff [command] [options]\n\nCommands:\n  lazydiff                         open the default review queue/home\n  lazydiff login                   sign in to GitHub with device flow\n  lazydiff logout                  remove the stored GitHub login\n  lazydiff diff [target] [-- paths] review working tree or branch diff\n  lazydiff diff --staged           review staged changes\n  lazydiff show [ref]              review a commit (default HEAD)\n  lazydiff patch [file|-]          review a patch file or stdin\n  lazydiff pager                   read a patch from stdin\n  lazydiff difftool <left> <right> review two files\n\nShortcuts:\n  lazydiff --branch                review current branch vs upstream/base\n  lazydiff --worktree              review worktree vs HEAD\n"
+    "Usage: lazydiff [command] [options]\n\nCommands:\n  lazydiff                         open the default review queue/home\n  lazydiff login                   sign in to GitHub with device flow\n  lazydiff logout                  remove the stored GitHub login\n  lazydiff update                  update to the latest GitHub Release\n  lazydiff diff [target] [-- paths] review working tree or branch diff\n  lazydiff diff --staged           review staged changes\n  lazydiff show [ref]              review a commit (default HEAD)\n  lazydiff patch [file|-]          review a patch file or stdin\n  lazydiff pager                   read a patch from stdin\n  lazydiff difftool <left> <right> review two files\n\nShortcuts:\n  lazydiff --branch                review current branch vs upstream/base\n  lazydiff --worktree              review worktree vs HEAD\n"
 }
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;

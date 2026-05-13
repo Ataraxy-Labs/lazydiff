@@ -90,7 +90,14 @@ struct DeviceFlowTokenResponse {
 }
 
 const GITHUB_CLIENT_ID: &str = "Ov23lioE75FJYz4Mn7ZH";
-const QUIVER_CONVEX_URL: &str = "https://marvelous-dinosaur-141.convex.cloud";
+const QUIVER_CONVEX_URL: &str = match option_env!("LAZYDIFF_CONVEX_URL") {
+    Some(url) => url,
+    None => "https://polished-kingfisher-268.convex.cloud",
+};
+const QUIVER_CONVEX_HTTP_URL: &str = match option_env!("LAZYDIFF_CONVEX_HTTP_URL") {
+    Some(url) => url,
+    None => "https://polished-kingfisher-268.convex.site",
+};
 
 pub(crate) fn login_with_device_flow() -> std::result::Result<GitHubUser, String> {
     let flow = start_device_flow()?;
@@ -262,6 +269,7 @@ struct PersistedConvexUser<'a> {
     convex_user_id: &'a str,
     github_login: &'a str,
     deployment_url: &'a str,
+    http_actions_url: &'a str,
 }
 
 fn persist_convex_user(
@@ -274,6 +282,7 @@ fn persist_convex_user(
             convex_user_id,
             github_login,
             deployment_url: QUIVER_CONVEX_URL,
+            http_actions_url: QUIVER_CONVEX_HTTP_URL,
         },
     )
 }
