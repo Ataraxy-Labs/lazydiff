@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::SystemTime};
 
-use ratatui_diffs::DiffDocument;
+use lazydiff_diffs::DiffDocument;
 
 use crate::{
     app::{DiffSource, SemanticDiff},

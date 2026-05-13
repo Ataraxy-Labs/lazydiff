@@ -1,8 +1,7 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
-    fs::{File, OpenOptions},
     hash::{Hash, Hasher},
-    io::{self, Write},
+    io,
     path::Path,
     process::Command as ProcessCommand,
     sync::mpsc::{self, Receiver, Sender},
@@ -31,7 +30,7 @@ use ratatui::{
     widgets::{Clear, List, ListItem, ListState, StatefulWidget},
     Frame, Terminal,
 };
-use ratatui_diffs::{
+use lazydiff_diffs::{
     add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffLine,
     DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
     DiffViewState, DiffWidget, FileDiff, InlineDiffSpan, SliderState, SyntaxHighlightKind,
@@ -169,7 +168,6 @@ pub(crate) struct App {
     thread_selection: usize,
     thread_scroll_y: usize,
     transient_focus: Option<TransientFocus>,
-    debug_log: Option<File>,
 }
 
 /// A bright row-flash that fades out shortly after a semantic
@@ -350,12 +348,6 @@ impl App {
             thread_selection: 0,
             thread_scroll_y: 0,
             transient_focus: None,
-            debug_log: OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open("ratatui-debug.log")
-                .ok(),
         };
         if let Some(persisted_queries) = persisted_queries {
             app.hydrate_persisted_query_client(persisted_queries);
@@ -615,21 +607,6 @@ impl App {
         self.draw_count += 1;
         self.draw_total += elapsed;
         self.draw_max = self.draw_max.max(elapsed);
-        if self.draw_count % 120 == 0 {
-            let avg = self.draw_total / self.draw_count as u32;
-            let Some(debug_log) = self.debug_log.as_mut() else {
-                return;
-            };
-            let _ = writeln!(
-                debug_log,
-                "[lazydiff] draws={} avg_ms={:.3} max_ms={:.3} selected={} scroll={}",
-                self.draw_count,
-                avg.as_secs_f64() * 1000.0,
-                self.draw_max.as_secs_f64() * 1000.0,
-                self.state.selected_row,
-                self.state.scroll_y,
-            );
-        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -1628,9 +1605,7 @@ impl App {
             "xdg-open"
         };
         if let Err(error) = ProcessCommand::new(opener).arg(&url).spawn() {
-            if let Some(debug_log) = self.debug_log.as_mut() {
-                let _ = writeln!(debug_log, "failed to open {url}: {error}");
-            }
+            self.branch_operation_status = Some(format!("failed to open browser: {error}"));
         }
     }
 

@@ -19,7 +19,7 @@ use ratatui::{
     widgets::StatefulWidget,
     Terminal,
 };
-use ratatui_diffs::{
+use lazydiff_diffs::{
     add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffMode,
     DiffViewState, DiffWidget,
 };

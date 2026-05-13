@@ -60,7 +60,7 @@ cargo run -- path/to/change.diff
 
 - Local Git diff review and source installs are the supported alpha path.
 - GitHub PR/queue integrations are available for dogfooding, but still settling.
-- The `ratatui-diffs` crate is vendored in this repo today; crates.io packaging is not supported yet.
+- The `lazydiff-diffs` crate is vendored in this repo today; crates.io packaging is not supported yet.
 - Release binaries are published from alpha tags, but checksums, signing, and package-manager installs are still future work.
 
 ## Current Caveats

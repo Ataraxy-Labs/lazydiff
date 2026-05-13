@@ -265,6 +265,8 @@ pub(crate) fn language_for_path(path: &str) -> &'static str {
         "json"
     } else if matches_extension(&lower, &["yml", "yaml"]) {
         "yaml"
+    } else if matches_extension(&lower, &["py", "pyw"]) {
+        "python"
     } else if matches_extension(&lower, &["rs"]) {
         "rust"
     } else if matches_extension(&lower, &["toml"]) {
@@ -445,5 +447,26 @@ fn push_markdown_link_spans(text: &str, spans: &mut Vec<SyntaxSpan>) {
             }
         }
         cursor = close;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_python_extensions_to_python_grammar() {
+        assert_eq!(language_for_path("script.py"), "python");
+        assert_eq!(language_for_path("tools/launcher.PYW"), "python");
+    }
+
+    #[test]
+    fn pierre_highlights_python_files() {
+        let mut highlighter = PierreHighlighter::new().expect("built-in giallo registry loads");
+        let spans = highlighter
+            .highlight_lines(language_for_path("example.py"), "def greet(name):\n    return f'hi {name}'")
+            .expect("python grammar highlights");
+
+        assert!(spans.iter().flatten().next().is_some());
     }
 }

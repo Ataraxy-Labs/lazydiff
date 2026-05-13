@@ -1091,9 +1091,9 @@ dependencies = [
  "color-eyre",
  "convex",
  "crossterm",
+ "lazydiff-diffs",
  "nucleo-matcher",
  "ratatui",
- "ratatui-diffs",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1101,6 +1101,21 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "lazydiff-diffs"
+version = "0.1.0"
+dependencies = [
+ "giallo",
+ "ratatui",
+ "tree-sitter",
+ "tree-sitter-cpp",
+ "tree-sitter-highlight",
+ "tree-sitter-javascript 0.25.0",
+ "tree-sitter-md",
+ "tree-sitter-typescript",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
@@ -1548,21 +1563,6 @@ dependencies = [
  "strum 0.26.3",
  "unicode-segmentation",
  "unicode-truncate",
- "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "ratatui-diffs"
-version = "0.1.0"
-dependencies = [
- "giallo",
- "ratatui",
- "tree-sitter",
- "tree-sitter-cpp",
- "tree-sitter-highlight",
- "tree-sitter-javascript 0.25.0",
- "tree-sitter-md",
- "tree-sitter-typescript",
  "unicode-width 0.2.0",
 ]
 

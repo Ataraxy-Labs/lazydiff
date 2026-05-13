@@ -2,7 +2,7 @@ use std::{env, fs, path::PathBuf, process::Command as ProcessCommand};
 
 use color_eyre::Result;
 use ratatui::style::Color;
-use ratatui_diffs::{DiffDocument, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffSide};
+use lazydiff_diffs::{DiffDocument, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffSide};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -232,7 +232,7 @@ pub(crate) struct ReviewUiState {
     pub(crate) selected_row: usize,
     pub(crate) scroll_y: usize,
     pub(crate) selected_side: DiffSide,
-    pub(crate) diff_mode: ratatui_diffs::DiffMode,
+    pub(crate) diff_mode: lazydiff_diffs::DiffMode,
 }
 
 impl ReviewNote {
@@ -909,17 +909,17 @@ fn diff_side_name(side: DiffSide) -> &'static str {
     }
 }
 
-fn diff_mode_name(mode: ratatui_diffs::DiffMode) -> &'static str {
+fn diff_mode_name(mode: lazydiff_diffs::DiffMode) -> &'static str {
     match mode {
-        ratatui_diffs::DiffMode::Split => "split",
-        ratatui_diffs::DiffMode::Unified => "unified",
+        lazydiff_diffs::DiffMode::Split => "split",
+        lazydiff_diffs::DiffMode::Unified => "unified",
     }
 }
 
-fn parse_diff_mode(value: &str) -> ratatui_diffs::DiffMode {
+fn parse_diff_mode(value: &str) -> lazydiff_diffs::DiffMode {
     match value {
-        "unified" => ratatui_diffs::DiffMode::Unified,
-        _ => ratatui_diffs::DiffMode::Split,
+        "unified" => lazydiff_diffs::DiffMode::Unified,
+        _ => lazydiff_diffs::DiffMode::Split,
     }
 }
 
@@ -975,7 +975,7 @@ mod tests {
             path: Some(path.clone()),
         };
         store.init().expect("store initializes");
-        let document = ratatui_diffs::parse_unified_diff(
+        let document = lazydiff_diffs::parse_unified_diff(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -0,0 +1 @@\n+hello\n",
         );
 

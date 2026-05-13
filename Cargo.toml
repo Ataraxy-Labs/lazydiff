@@ -16,7 +16,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 nucleo-matcher = "0.3"
 ratatui = "0.29"
 regex = "1"
-ratatui-diffs = { path = "crates/ratatui-diffs" }
+lazydiff-diffs = { path = "crates/lazydiff-diffs" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

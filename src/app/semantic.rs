@@ -996,7 +996,7 @@ fn normalize_semantic_label(value: &str, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui_diffs::{DiffLine, FileDiff, Hunk};
+    use lazydiff_diffs::{DiffLine, FileDiff, Hunk};
 
     fn ctx(old_line: u32, new_line: u32) -> DiffLine {
         DiffLine::Context {

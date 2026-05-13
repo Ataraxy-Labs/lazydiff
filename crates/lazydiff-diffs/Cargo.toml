@@ -1,5 +1,5 @@
 [package]
-name = "ratatui-diffs"
+name = "lazydiff-diffs"
 version = "0.1.0"
 edition = "2021"
 description = "Ratatui widgets and parsing helpers for LazyDiff"
