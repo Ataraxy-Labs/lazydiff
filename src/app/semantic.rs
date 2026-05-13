@@ -447,7 +447,7 @@ impl App {
         keys
     }
 
-    fn semantic_diff_for_route(&self, route: &DiffSource) -> Option<&SemanticDiff> {
+    pub(super) fn semantic_diff_for_route(&self, route: &DiffSource) -> Option<&SemanticDiff> {
         self.semantic_diff_cache
             .get(route)
             .or_else(|| self.persisted_semantic_diff_cache.get(&route.session_id()))
@@ -730,6 +730,15 @@ impl App {
         self.pending_semantic_focus = None;
         self.state = DiffViewState::default();
         self.focus_path_if_present(&target.path, target.line, target.change_type.as_deref());
+    }
+
+    pub(super) fn focus_semantic_path(
+        &mut self,
+        path: &str,
+        line: Option<usize>,
+        change_type: Option<&str>,
+    ) {
+        self.focus_path_if_present(path, line, change_type);
     }
 
     pub(super) fn open_selected_semantic_row(&mut self) -> bool {

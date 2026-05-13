@@ -30,6 +30,245 @@ fn centered_line_rect(area: Rect, y: u16, width: usize) -> Rect {
 }
 
 impl App {
+    pub(super) fn diff_sidebar_layout(&self, body: Rect) -> (Option<Rect>, Option<Rect>, Rect) {
+        if !self.review_sidebar_visible || body.width < 96 {
+            return (None, None, body);
+        }
+        let sidebar_width = (body.width / 3).clamp(28, 42);
+        let sidebar = Rect::new(body.x, body.y, sidebar_width, body.height);
+        let divider = Rect::new(body.x + sidebar_width, body.y, 1, body.height);
+        let diff_body = Rect::new(
+            divider.x.saturating_add(1),
+            body.y,
+            body.width.saturating_sub(sidebar_width).saturating_sub(1),
+            body.height,
+        );
+        (Some(sidebar), Some(divider), diff_body)
+    }
+
+    pub(super) fn render_review_sidebar(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        palette: HomePalette,
+    ) {
+        if area.width < 8 || area.height == 0 {
+            return;
+        }
+        self.seed_review_sidebar_expansion();
+        self.keep_review_sidebar_selection_visible();
+        let bg = palette.bg;
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        let heading = if self.review_sidebar_focus {
+            palette.text(TextRole::Heading)
+        } else {
+            palette.text(TextRole::Muted)
+        };
+        let muted = palette.text(TextRole::Muted);
+        let key = palette.text(TextRole::Key);
+        let viewed = self.viewed_file_count();
+        let total = self.document.files.len();
+        let title = format!("Changes {viewed}/{total}");
+        frame.render_widget(
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(title, heading),
+                Span::styled(
+                    if self.review_sidebar_focus {
+                        " · focused"
+                    } else {
+                        ""
+                    },
+                    muted,
+                ),
+            ])
+            .style(Style::new().bg(bg)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        if area.height < 3 {
+            return;
+        }
+        let rows = self.review_tree_rows();
+        let list_area = Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(2),
+        );
+        let start = self
+            .review_sidebar_scroll_y
+            .min(rows.len().saturating_sub(1));
+        for (visual_index, row) in rows
+            .iter()
+            .skip(start)
+            .take(list_area.height as usize)
+            .enumerate()
+        {
+            let y = list_area.y + visual_index as u16;
+            let selected =
+                self.review_sidebar_focus && start + visual_index == self.review_sidebar_selection;
+            let line = self.render_review_tree_row(row, area.width as usize, selected, palette);
+            frame.render_widget(line, Rect::new(area.x, y, area.width, 1));
+        }
+        let footer_y = area.bottom().saturating_sub(1);
+        frame.render_widget(
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled("tab", key),
+                Span::styled(" focus  ", muted),
+                Span::styled("space", key),
+                Span::styled(" viewed  ", muted),
+                Span::styled("enter", key),
+                Span::styled(" open", muted),
+            ])
+            .style(Style::new().bg(bg)),
+            Rect::new(area.x, footer_y, area.width, 1),
+        );
+    }
+
+    fn render_review_tree_row(
+        &self,
+        row: &ReviewTreeRow,
+        width: usize,
+        selected: bool,
+        palette: HomePalette,
+    ) -> Line<'static> {
+        let bg = if selected {
+            palette.selected_bg
+        } else {
+            palette.bg
+        };
+        let fg = if selected {
+            palette.selected_text
+        } else {
+            palette.fg
+        };
+        let muted = if selected {
+            palette.selected_text
+        } else {
+            palette.muted
+        };
+        let style = Style::new().fg(fg).bg(bg);
+        let muted_style = Style::new().fg(muted).bg(bg);
+        let add = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.success
+            })
+            .bg(bg);
+        let del = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.danger
+            })
+            .bg(bg);
+        let entity_style = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.orange
+            })
+            .bg(bg);
+        let mut spans = vec![Span::styled(" ", Style::new().bg(bg))];
+        match row {
+            ReviewTreeRow::Directory {
+                name,
+                depth,
+                collapsed,
+                file_count,
+                ..
+            } => {
+                let indent = "  ".repeat(*depth);
+                let marker = if *collapsed { "▸" } else { "▾" };
+                let label = format!("{indent}{marker} {name}");
+                let suffix = format!(" {file_count}");
+                let label_width = width.saturating_sub(1 + suffix.chars().count());
+                spans.push(Span::styled(truncate(&label, label_width), muted_style));
+                spans.push(Span::styled(
+                    right_aligned_text(
+                        width as u16,
+                        label.chars().count().min(label_width) + 1,
+                        &suffix,
+                    ),
+                    muted_style,
+                ));
+            }
+            ReviewTreeRow::File {
+                path,
+                name,
+                depth,
+                collapsed,
+                semantic_count,
+                ..
+            } => {
+                let checked = if self.is_file_viewed(path) {
+                    "☑"
+                } else {
+                    "☐"
+                };
+                let marker = if *semantic_count > 0 {
+                    if *collapsed {
+                        "▸"
+                    } else {
+                        "▾"
+                    }
+                } else {
+                    " "
+                };
+                let indent = "  ".repeat(*depth);
+                let label = format!("{indent}{marker} {checked} {name}");
+                let suffix = if *semantic_count > 0 {
+                    format!(" {semantic_count}")
+                } else {
+                    String::new()
+                };
+                let label_width = width.saturating_sub(1 + suffix.chars().count());
+                spans.push(Span::styled(truncate(&label, label_width), style));
+                if !suffix.is_empty() {
+                    spans.push(Span::styled(
+                        right_aligned_text(
+                            width as u16,
+                            label.chars().count().min(label_width) + 1,
+                            &suffix,
+                        ),
+                        muted_style,
+                    ));
+                }
+            }
+            ReviewTreeRow::Entity {
+                key,
+                depth,
+                entity_type,
+                entity_name,
+                change_type,
+                ..
+            } => {
+                let checked = if self.is_entity_viewed(key) {
+                    "☑"
+                } else {
+                    "☐"
+                };
+                let marker = semantic_change_marker(change_type);
+                let marker_style = match marker {
+                    "+" => add,
+                    "-" => del,
+                    _ => entity_style,
+                };
+                let indent = "  ".repeat(*depth);
+                let label = format!("{indent}  {checked} {entity_type} {entity_name}");
+                spans.push(Span::styled(marker, marker_style));
+                spans.push(Span::styled(" ", Style::new().bg(bg)));
+                spans.push(Span::styled(
+                    truncate(&label, width.saturating_sub(3)),
+                    muted_style,
+                ));
+            }
+        }
+        Line::from(spans).style(Style::new().bg(bg))
+    }
+
     pub(super) fn render_commit_list(&mut self, frame: &mut Frame) {
         let frame_area = frame.area();
         let area = app_content_area(frame_area);
@@ -1715,13 +1954,19 @@ impl App {
         let file = &self.document.files[index];
         let additions = file.additions();
         let deletions = file.deletions();
+        let viewed = if self.is_file_viewed(&file.new_path) {
+            "☑ viewed"
+        } else {
+            "☐ viewed"
+        };
         let mut spans = vec![
             Span::styled(
                 format!(" {}/{} ", index + 1, self.document.files.len()),
                 muted,
             ),
+            Span::styled(format!("{viewed}  "), muted),
             Span::styled(
-                truncate(&file.new_path, area.width.saturating_sub(24) as usize),
+                truncate(&file.new_path, area.width.saturating_sub(34) as usize),
                 style,
             ),
             Span::styled("  ", muted),
@@ -1784,6 +2029,10 @@ impl App {
                 Span::styled(" search  ", label),
                 Span::styled("f", key),
                 Span::styled(" files  ", label),
+                Span::styled("s", key),
+                Span::styled(" sidebar  ", label),
+                Span::styled("space", key),
+                Span::styled(" viewed  ", label),
                 Span::styled("v", key),
                 Span::styled(" select  ", label),
                 Span::styled("m", key),

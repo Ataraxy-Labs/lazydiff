@@ -59,8 +59,8 @@ use crate::github::{
 };
 use crate::persistence::{
     CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient, PersistedPullRequestComments,
-    PersistedPullRequestDiff, PersistedSemanticDiff, ReviewItemKind, ReviewNote, ReviewSession,
-    ReviewStore, ReviewUiState,
+    PersistedPullRequestDiff, PersistedSemanticDiff, PersistedViewedState, ReviewItemKind,
+    ReviewNote, ReviewSession, ReviewStore, ReviewUiState,
 };
 use crate::server_query::{
     LocalDiffResult, PullRequestDiffResult, QueryClient, QueryEvent, QueryKey, QueryResult,
@@ -82,7 +82,8 @@ mod modals;
 mod queries;
 mod semantic;
 pub(crate) use semantic::{
-    semantic_tree_body_area, SemanticDiff, SemanticNodeKey, SemanticTreeRow, SemanticViewport,
+    semantic_tree_body_area, SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow,
+    SemanticViewport,
 };
 mod surfaces;
 
@@ -158,6 +159,15 @@ pub(crate) struct App {
     semantic_dragging_scrollbar: bool,
     semantic_scrollbar_drag_offset_virtual: usize,
     pending_semantic_focus: Option<SemanticFocusTarget>,
+    review_sidebar_visible: bool,
+    review_sidebar_focus: bool,
+    review_sidebar_selection: usize,
+    review_sidebar_scroll_y: usize,
+    review_sidebar_expanded: HashSet<ReviewTreeKey>,
+    review_sidebar_seeded_routes: HashSet<String>,
+    viewed_files: HashSet<String>,
+    viewed_entities: HashSet<String>,
+    viewed_session_id: String,
     body_preview_cache: crate::bounded_map::BoundedMap<BodyPreviewCacheKey, Vec<Line<'static>>>,
     query_tx: Sender<QueryEvent>,
     query_rx: Receiver<QueryEvent>,
@@ -186,6 +196,50 @@ pub(crate) struct SemanticFocusTarget {
     pub(crate) path: String,
     pub(crate) line: Option<usize>,
     pub(crate) change_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReviewTreeKey(String);
+
+impl ReviewTreeKey {
+    fn directory(path: &str) -> Self {
+        Self(format!("dir:{path}"))
+    }
+
+    fn file(path: &str) -> Self {
+        Self(format!("file:{path}"))
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ReviewTreeRow {
+    Directory {
+        key: ReviewTreeKey,
+        path: String,
+        name: String,
+        depth: usize,
+        collapsed: bool,
+        file_count: usize,
+    },
+    File {
+        key: ReviewTreeKey,
+        file_index: usize,
+        path: String,
+        name: String,
+        depth: usize,
+        collapsed: bool,
+        semantic_count: usize,
+    },
+    Entity {
+        key: String,
+        file_index: usize,
+        path: String,
+        depth: usize,
+        entity_type: String,
+        entity_name: String,
+        change_type: String,
+        line: Option<usize>,
+    },
 }
 
 const TRANSIENT_FOCUS_DURATION: Duration = Duration::from_millis(900);
@@ -338,6 +392,15 @@ impl App {
             semantic_dragging_scrollbar: false,
             semantic_scrollbar_drag_offset_virtual: 0,
             pending_semantic_focus: None,
+            review_sidebar_visible: true,
+            review_sidebar_focus: false,
+            review_sidebar_selection: 0,
+            review_sidebar_scroll_y: 0,
+            review_sidebar_expanded: HashSet::new(),
+            review_sidebar_seeded_routes: HashSet::new(),
+            viewed_files: HashSet::new(),
+            viewed_entities: HashSet::new(),
+            viewed_session_id: String::new(),
             body_preview_cache: crate::bounded_map::BoundedMap::new(128),
             query_tx,
             query_rx,
@@ -352,6 +415,7 @@ impl App {
         if let Some(persisted_queries) = persisted_queries {
             app.hydrate_persisted_query_client(persisted_queries);
         }
+        app.sync_viewed_state_for_session();
         app.apply_route(initial_route);
         app.restore_view_state_for_current_route();
         app.revalidate_project_label();
@@ -546,7 +610,8 @@ impl App {
             Constraint::Length(1),
         ])
         .areas(area);
-        self.viewport_height = body.height as usize;
+        let (sidebar, sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
+        self.viewport_height = diff_body.height as usize;
         let palette = self.home_palette();
         fill_rect(
             frame.buffer_mut(),
@@ -565,15 +630,28 @@ impl App {
         );
         StatefulWidget::render(
             DiffWidget::new(&self.document).theme(palette.theme.diff_theme()),
-            body,
+            diff_body,
             frame.buffer_mut(),
             &mut self.state,
         );
-        self.render_sticky_file_overlay(frame, body);
-        self.render_note_gutter_markers(frame, body);
+        if let Some(sidebar) = sidebar {
+            self.render_review_sidebar(frame, sidebar, palette);
+        }
+        if let Some(sidebar_divider) = sidebar_divider {
+            draw_vertical_rule(
+                frame.buffer_mut(),
+                sidebar_divider.x,
+                sidebar_divider.y,
+                sidebar_divider.bottom(),
+                palette.rule,
+                palette.bg,
+            );
+        }
+        self.render_sticky_file_overlay(frame, diff_body);
+        self.render_note_gutter_markers(frame, diff_body);
         // Drawn last so it stays visible on top of the sticky file
         // overlay and gutter markers.
-        self.render_transient_focus(frame, body, palette);
+        self.render_transient_focus(frame, diff_body, palette);
         self.render_comment_preview(frame, comment_preview);
         self.render_footer(frame, footer);
         self.render_global_overlays(frame);
@@ -626,6 +704,25 @@ impl App {
         if self.file_picker_open {
             self.handle_file_picker_key(key.code, rows);
             return;
+        }
+        if self.surface == AppSurface::Diff {
+            match key.code {
+                KeyCode::Char('s') => {
+                    self.review_sidebar_visible = !self.review_sidebar_visible;
+                    self.review_sidebar_focus = self.review_sidebar_visible;
+                    return;
+                }
+                KeyCode::Tab if self.review_sidebar_visible => {
+                    self.review_sidebar_focus = !self.review_sidebar_focus;
+                    self.sync_review_sidebar_selection_to_current_file();
+                    return;
+                }
+                _ => {}
+            }
+            if self.review_sidebar_focus && self.review_sidebar_visible {
+                self.handle_review_sidebar_key(key.code, rows);
+                return;
+            }
         }
         if matches!(self.surface, AppSurface::Queue | AppSurface::DetailFull) {
             match key.code {
@@ -766,6 +863,7 @@ impl App {
                 self.state.scroll_y = rows.saturating_sub(self.viewport_height);
             }
             KeyCode::Char('v') => self.toggle_visual_selection(rows),
+            KeyCode::Char(' ') => self.toggle_current_file_viewed(),
             KeyCode::Char('m') => {
                 self.state.mode = self.state.mode.toggle();
                 self.state.scroll_y = 0;
@@ -1449,6 +1547,7 @@ impl App {
         }
         self.session =
             Self::load_session_for_route(&self.store, &route, &self.document_for_route(&route));
+        self.sync_viewed_state_for_session();
         self.restore_view_state_for_current_route();
     }
 
@@ -2061,6 +2160,406 @@ impl App {
             self.state.selected_row,
             self.state.selected_side,
         )
+    }
+
+    fn handle_review_sidebar_key(&mut self, code: KeyCode, rows: usize) {
+        let visible_rows = self.review_tree_rows();
+        match code {
+            KeyCode::Esc => self.review_sidebar_focus = false,
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.review_sidebar_selection = self
+                    .review_sidebar_selection
+                    .saturating_add(1)
+                    .min(visible_rows.len().saturating_sub(1));
+                self.keep_review_sidebar_selection_visible();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.review_sidebar_selection = self.review_sidebar_selection.saturating_sub(1);
+                self.keep_review_sidebar_selection_visible();
+            }
+            KeyCode::PageDown | KeyCode::Char('d') if visible_rows.len() > 1 => {
+                let step = self.viewport_height.max(1) / 2;
+                self.review_sidebar_selection = self
+                    .review_sidebar_selection
+                    .saturating_add(step.max(1))
+                    .min(visible_rows.len().saturating_sub(1));
+                self.keep_review_sidebar_selection_visible();
+            }
+            KeyCode::PageUp | KeyCode::Char('u') if visible_rows.len() > 1 => {
+                let step = self.viewport_height.max(1) / 2;
+                self.review_sidebar_selection =
+                    self.review_sidebar_selection.saturating_sub(step.max(1));
+                self.keep_review_sidebar_selection_visible();
+            }
+            KeyCode::Char('h') | KeyCode::Left => self.collapse_selected_review_tree_row(),
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                self.open_selected_review_tree_row(rows)
+            }
+            KeyCode::Char(' ') => self.toggle_selected_review_tree_viewed(),
+            _ => {}
+        }
+    }
+
+    fn sync_viewed_state_for_session(&mut self) {
+        if self.viewed_session_id == self.session.id {
+            return;
+        }
+        let persisted = self.store.restore_viewed_state(&self.session.id);
+        self.viewed_files = persisted.files.into_iter().collect();
+        self.viewed_entities = persisted.entities.into_iter().collect();
+        self.viewed_session_id = self.session.id.clone();
+        self.review_sidebar_selection = 0;
+        self.review_sidebar_scroll_y = 0;
+    }
+
+    fn persist_viewed_state(&self) {
+        let mut files: Vec<_> = self.viewed_files.iter().cloned().collect();
+        files.sort();
+        let mut entities: Vec<_> = self.viewed_entities.iter().cloned().collect();
+        entities.sort();
+        self.store
+            .persist_viewed_state(&self.session.id, &PersistedViewedState { files, entities });
+    }
+
+    fn review_tree_rows(&self) -> Vec<ReviewTreeRow> {
+        let semantic_by_path = self.semantic_changes_by_path();
+        let mut rows = Vec::new();
+        let mut emitted_dirs = HashSet::new();
+        let mut file_counts: HashMap<String, usize> = HashMap::new();
+        for file in &self.document.files {
+            let parts: Vec<_> = file
+                .new_path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect();
+            let mut prefix = String::new();
+            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                *file_counts.entry(prefix.clone()).or_default() += 1;
+            }
+        }
+
+        for (file_index, file) in self.document.files.iter().enumerate() {
+            let parts: Vec<_> = file
+                .new_path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect();
+            let file_name = parts
+                .last()
+                .copied()
+                .unwrap_or(file.new_path.as_str())
+                .to_string();
+            let mut collapsed_ancestor = false;
+            if parts.len() > 1 {
+                let mut prefix = String::new();
+                for (depth, part) in parts[..parts.len() - 1].iter().enumerate() {
+                    if !prefix.is_empty() {
+                        prefix.push('/');
+                    }
+                    prefix.push_str(part);
+                    let key = ReviewTreeKey::directory(&prefix);
+                    let collapsed = !self.review_sidebar_expanded.contains(&key);
+                    if emitted_dirs.insert(prefix.clone()) {
+                        rows.push(ReviewTreeRow::Directory {
+                            key,
+                            path: prefix.clone(),
+                            name: (*part).to_string(),
+                            depth,
+                            collapsed,
+                            file_count: file_counts.get(&prefix).copied().unwrap_or(0),
+                        });
+                    }
+                    if collapsed {
+                        collapsed_ancestor = true;
+                        break;
+                    }
+                }
+            }
+            if collapsed_ancestor {
+                continue;
+            }
+            let key = ReviewTreeKey::file(&file.new_path);
+            let collapsed = !self.review_sidebar_expanded.contains(&key);
+            let changes = semantic_by_path.get(file.new_path.as_str());
+            rows.push(ReviewTreeRow::File {
+                key,
+                file_index,
+                path: file.new_path.clone(),
+                name: file_name,
+                depth: parts.len().saturating_sub(1),
+                collapsed,
+                semantic_count: changes.map_or(0, |changes| changes.len()),
+            });
+            if collapsed {
+                continue;
+            }
+            if let Some(changes) = changes {
+                rows.extend(changes.iter().map(|change| ReviewTreeRow::Entity {
+                    key: Self::review_entity_key(&file.new_path, change),
+                    file_index,
+                    path: file.new_path.clone(),
+                    depth: parts.len(),
+                    entity_type: change.entity_type.clone(),
+                    entity_name: change.entity_name.clone(),
+                    change_type: change.change_type.clone(),
+                    line: change.line,
+                }));
+            }
+        }
+        rows
+    }
+
+    fn seed_review_sidebar_expansion(&mut self) {
+        let route_id = self.diff_source.session_id();
+        if !self.review_sidebar_seeded_routes.insert(route_id) {
+            return;
+        }
+        for file in &self.document.files {
+            let parts: Vec<_> = file
+                .new_path
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .collect();
+            if parts.len() <= 1 {
+                continue;
+            }
+            let mut prefix = String::new();
+            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                self.review_sidebar_expanded
+                    .insert(ReviewTreeKey::directory(&prefix));
+            }
+        }
+    }
+
+    fn semantic_changes_by_path(&self) -> HashMap<&str, &[SemanticChange]> {
+        self.semantic_diff_for_route(&self.diff_source)
+            .map(|diff| {
+                diff.files
+                    .iter()
+                    .map(|file| (file.path.as_str(), file.changes.as_slice()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn review_entity_key(path: &str, change: &SemanticChange) -> String {
+        format!(
+            "{path}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            change.entity_type,
+            change.entity_name,
+            change.change_type,
+            change.line.unwrap_or(0)
+        )
+    }
+
+    fn current_file_path(&self) -> Option<&str> {
+        let index = self.current_file_index()?;
+        self.document
+            .files
+            .get(index)
+            .map(|file| file.new_path.as_str())
+    }
+
+    fn is_file_viewed(&self, path: &str) -> bool {
+        self.viewed_files.contains(path)
+    }
+
+    fn is_entity_viewed(&self, key: &str) -> bool {
+        self.viewed_entities.contains(key)
+    }
+
+    fn viewed_file_count(&self) -> usize {
+        self.document
+            .files
+            .iter()
+            .filter(|file| self.is_file_viewed(&file.new_path))
+            .count()
+    }
+
+    fn toggle_current_file_viewed(&mut self) {
+        let Some(path) = self.current_file_path().map(str::to_string) else {
+            return;
+        };
+        self.toggle_file_viewed(&path);
+    }
+
+    fn toggle_file_viewed(&mut self, path: &str) {
+        if self.viewed_files.contains(path) {
+            self.viewed_files.remove(path);
+            self.set_file_entities_viewed(path, false);
+        } else {
+            self.viewed_files.insert(path.to_string());
+            self.set_file_entities_viewed(path, true);
+        }
+        self.persist_viewed_state();
+    }
+
+    fn set_file_entities_viewed(&mut self, path: &str, viewed: bool) {
+        let keys: Vec<_> = self
+            .semantic_diff_for_route(&self.diff_source)
+            .and_then(|diff| diff.files.iter().find(|file| file.path == path))
+            .map(|file| {
+                file.changes
+                    .iter()
+                    .map(|change| Self::review_entity_key(path, change))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in keys {
+            if viewed {
+                self.viewed_entities.insert(key);
+            } else {
+                self.viewed_entities.remove(&key);
+            }
+        }
+    }
+
+    fn toggle_selected_review_tree_viewed(&mut self) {
+        let rows = self.review_tree_rows();
+        let Some(row) = rows.get(
+            self.review_sidebar_selection
+                .min(rows.len().saturating_sub(1)),
+        ) else {
+            return;
+        };
+        match row.clone() {
+            ReviewTreeRow::Directory { path, .. } => self.toggle_directory_viewed(&path),
+            ReviewTreeRow::File { path, .. } => self.toggle_file_viewed(&path),
+            ReviewTreeRow::Entity { key, path, .. } => {
+                if !self.viewed_entities.insert(key.clone()) {
+                    self.viewed_entities.remove(&key);
+                    self.viewed_files.remove(&path);
+                }
+                self.persist_viewed_state();
+            }
+        }
+    }
+
+    fn toggle_directory_viewed(&mut self, directory: &str) {
+        let paths: Vec<_> = self
+            .document
+            .files
+            .iter()
+            .filter(|file| file.new_path.starts_with(&format!("{directory}/")))
+            .map(|file| file.new_path.clone())
+            .collect();
+        let should_mark = paths.iter().any(|path| !self.viewed_files.contains(path));
+        for path in paths {
+            if should_mark {
+                self.viewed_files.insert(path.clone());
+            } else {
+                self.viewed_files.remove(&path);
+            }
+            self.set_file_entities_viewed(&path, should_mark);
+        }
+        self.persist_viewed_state();
+    }
+
+    fn open_selected_review_tree_row(&mut self, rows: usize) {
+        let visible_rows = self.review_tree_rows();
+        let Some(row) = visible_rows
+            .get(
+                self.review_sidebar_selection
+                    .min(visible_rows.len().saturating_sub(1)),
+            )
+            .cloned()
+        else {
+            return;
+        };
+        match row {
+            ReviewTreeRow::Directory { key, .. } => {
+                if !self.review_sidebar_expanded.insert(key.clone()) {
+                    self.review_sidebar_expanded.remove(&key);
+                }
+            }
+            ReviewTreeRow::File {
+                key, file_index, ..
+            } => {
+                if !self.review_sidebar_expanded.insert(key.clone()) {
+                    self.review_sidebar_expanded.remove(&key);
+                }
+                self.jump_to_file(file_index, rows);
+            }
+            ReviewTreeRow::Entity {
+                path,
+                line,
+                change_type,
+                ..
+            } => {
+                self.focus_semantic_path(&path, line, Some(&change_type));
+            }
+        }
+        self.keep_review_sidebar_selection_visible();
+    }
+
+    fn collapse_selected_review_tree_row(&mut self) {
+        let rows = self.review_tree_rows();
+        let Some(row) = rows
+            .get(
+                self.review_sidebar_selection
+                    .min(rows.len().saturating_sub(1)),
+            )
+            .cloned()
+        else {
+            return;
+        };
+        match row {
+            ReviewTreeRow::Directory { key, .. } | ReviewTreeRow::File { key, .. } => {
+                self.review_sidebar_expanded.remove(&key);
+            }
+            ReviewTreeRow::Entity { path, .. } => {
+                self.review_sidebar_expanded
+                    .remove(&ReviewTreeKey::file(&path));
+            }
+        }
+        self.review_sidebar_selection = self
+            .review_sidebar_selection
+            .min(self.review_tree_rows().len().saturating_sub(1));
+        self.keep_review_sidebar_selection_visible();
+    }
+
+    fn keep_review_sidebar_selection_visible(&mut self) {
+        let total = self.review_tree_rows().len();
+        let visible = self.viewport_height.max(1);
+        if total == 0 {
+            self.review_sidebar_selection = 0;
+            self.review_sidebar_scroll_y = 0;
+            return;
+        }
+        self.review_sidebar_selection = self.review_sidebar_selection.min(total.saturating_sub(1));
+        if self.review_sidebar_selection < self.review_sidebar_scroll_y {
+            self.review_sidebar_scroll_y = self.review_sidebar_selection;
+        } else if self.review_sidebar_selection
+            >= self.review_sidebar_scroll_y.saturating_add(visible)
+        {
+            self.review_sidebar_scroll_y = self
+                .review_sidebar_selection
+                .saturating_sub(visible.saturating_sub(1));
+        }
+        self.review_sidebar_scroll_y = self
+            .review_sidebar_scroll_y
+            .min(total.saturating_sub(visible));
+    }
+
+    fn sync_review_sidebar_selection_to_current_file(&mut self) {
+        let Some(path) = self.current_file_path() else {
+            return;
+        };
+        let rows = self.review_tree_rows();
+        if let Some(index) = rows.iter().position(
+            |row| matches!(row, ReviewTreeRow::File { path: row_path, .. } if row_path == path),
+        ) {
+            self.review_sidebar_selection = index;
+            self.keep_review_sidebar_selection_visible();
+        }
     }
 
     fn active_review_target(&mut self) -> Option<DiffLineRangeTarget> {

@@ -683,6 +683,15 @@ impl ReviewStore {
         );
     }
 
+    pub(crate) fn restore_viewed_state(&self, session_id: &str) -> PersistedViewedState {
+        self.load_json_cache(&viewed_state_key(session_id))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn persist_viewed_state(&self, session_id: &str, state: &PersistedViewedState) {
+        self.save_json_cache(&viewed_state_key(session_id), state);
+    }
+
     fn load_notes(&self, conn: &Connection, session_id: &str) -> Vec<ReviewNote> {
         let Ok(mut stmt) = conn.prepare(
             "SELECT id, attempt_id, kind, state, file_index, hunk_index, start_line_index, end_line_index, path, side, old_line, new_line, start_line, end_line, line_kind, body, author, parent_id, created_at
@@ -790,6 +799,18 @@ pub(crate) struct PersistedGitHubQueryClient {
     pub(crate) timestamp: i64,
     pub(crate) buster: String,
     pub(crate) client_state: GitHubQueryClientState,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct PersistedViewedState {
+    #[serde(default)]
+    pub(crate) files: Vec<String>,
+    #[serde(default)]
+    pub(crate) entities: Vec<String>,
+}
+
+fn viewed_state_key(session_id: &str) -> String {
+    format!("review:viewed:{session_id}")
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1043,6 +1064,34 @@ mod tests {
         assert_eq!(store.restore_theme_variant(), None);
         store.persist_theme_variant(ThemeVariant::Graphite);
         assert_eq!(store.restore_theme_variant(), Some(ThemeVariant::Graphite));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn viewed_state_round_trips_through_sqlite_cache() {
+        let path = env::temp_dir().join(format!(
+            "quiver-viewed-store-{}-{}.sqlite3",
+            std::process::id(),
+            now_stamp()
+        ));
+        let store = ReviewStore {
+            path: Some(path.clone()),
+        };
+        store.init().expect("store initializes");
+
+        assert!(store.restore_viewed_state("session-a").files.is_empty());
+        store.persist_viewed_state(
+            "session-a",
+            &PersistedViewedState {
+                files: vec!["src/app.rs".to_string()],
+                entities: vec!["src/app.rs\u{1f}fn\u{1f}run".to_string()],
+            },
+        );
+        let restored = store.restore_viewed_state("session-a");
+        assert_eq!(restored.files, vec!["src/app.rs"]);
+        assert_eq!(restored.entities, vec!["src/app.rs\u{1f}fn\u{1f}run"]);
+        assert!(store.restore_viewed_state("session-b").files.is_empty());
 
         let _ = fs::remove_file(path);
     }

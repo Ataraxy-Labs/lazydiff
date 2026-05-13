@@ -151,6 +151,7 @@ impl App {
                                 &route,
                                 &local_diff.document,
                             );
+                            self.sync_viewed_state_for_session();
                             self.diff_source = route;
                             self.replace_document_preserving_view(local_diff.document);
                         }
@@ -194,6 +195,7 @@ impl App {
                         self.replace_route(AppRoute::Diff(route.clone()));
                         self.diff_source = route.clone();
                         self.session = App::load_session_for_route(&self.store, &route, &document);
+                        self.sync_viewed_state_for_session();
                         self.replace_document_preserving_view(document);
                         self.state = DiffViewState::default();
                         self.surface_scroll_y = 0;
@@ -273,6 +275,7 @@ impl App {
                             if self.diff_source == route && self.document.files.is_empty() {
                                 self.session =
                                     App::load_session_for_route(&self.store, &route, &document);
+                                self.sync_viewed_state_for_session();
                                 self.replace_document_preserving_view(document);
                                 self.apply_pending_semantic_focus(&route);
                             }
@@ -526,6 +529,7 @@ impl App {
         };
         if self.diff_source == route {
             self.session = App::load_session_for_route(&self.store, &route, &document);
+            self.sync_viewed_state_for_session();
             self.replace_document_preserving_view(document);
             self.apply_pending_semantic_focus(&route);
         }
