@@ -1,5 +1,6 @@
 use std::{collections::HashMap, time::SystemTime};
 
+use inspect_core::types::ReviewResult;
 use lazydiff_diffs::DiffDocument;
 
 use crate::{
@@ -19,6 +20,7 @@ pub(crate) enum QueryKey {
     PullRequestComments { repository: String, number: u32 },
     PullRequestDiff { repository: String, number: u32 },
     SemanticDiff { route_id: String },
+    InspectAnalysis { route_id: String },
 }
 
 impl QueryKey {
@@ -38,6 +40,12 @@ impl QueryKey {
 
     pub(crate) fn semantic_diff(route_id: impl Into<String>) -> Self {
         Self::SemanticDiff {
+            route_id: route_id.into(),
+        }
+    }
+
+    pub(crate) fn inspect_analysis(route_id: impl Into<String>) -> Self {
+        Self::InspectAnalysis {
             route_id: route_id.into(),
         }
     }
@@ -317,6 +325,10 @@ pub(crate) enum QueryEvent {
     SemanticDiff {
         route: DiffSource,
         result: std::result::Result<SemanticDiff, String>,
+    },
+    InspectAnalysis {
+        route: DiffSource,
+        result: std::result::Result<ReviewResult, String>,
     },
 }
 

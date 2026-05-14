@@ -120,14 +120,80 @@ fn semantic_map_node_style(row: &SemanticTreeRow, palette: HomePalette, bg: Colo
 
 fn semantic_map_node_symbol(row: &SemanticTreeRow, selected: bool) -> &'static str {
     if selected {
-        return "▣";
+        return "[■]";
     }
     match row {
-        SemanticTreeRow::Directory { .. } => "▢",
-        SemanticTreeRow::File { .. } => "▢",
-        SemanticTreeRow::Entity { .. } => "▢",
+        SemanticTreeRow::Directory { .. } => "[ ]",
+        SemanticTreeRow::File { .. } => "[ ]",
+        SemanticTreeRow::Entity { .. } => "[ ]",
         SemanticTreeRow::Status(_) => "·",
     }
+}
+
+fn semantic_map_viewed_node_symbol(selected: bool) -> &'static str {
+    if selected {
+        "[✓]"
+    } else {
+        "[✓]"
+    }
+}
+
+fn semantic_row_is_hazard(row: &SemanticTreeRow) -> bool {
+    match row {
+        SemanticTreeRow::Entity {
+            entity_type,
+            entity_name,
+            change_type,
+            ..
+        } => {
+            matches!(change_type.as_str(), "deleted" | "moved" | "renamed")
+                || matches!(
+                    entity_type.to_ascii_lowercase().as_str(),
+                    "interface" | "trait" | "type" | "class" | "struct"
+                )
+                || {
+                    let name = entity_name.to_ascii_lowercase();
+                    [
+                        "auth", "token", "session", "owner", "delete", "cleanup", "webhook",
+                    ]
+                    .iter()
+                    .any(|needle| name.contains(needle))
+                }
+        }
+        SemanticTreeRow::File { change_count, .. } => *change_count >= 8,
+        SemanticTreeRow::Directory { .. } | SemanticTreeRow::Status(_) => false,
+    }
+}
+
+fn semantic_review_difficulty(total: usize, hazards: usize) -> &'static str {
+    if total >= 40 || hazards >= 6 {
+        "HARD"
+    } else if total >= 16 || hazards >= 2 {
+        "MEDIUM"
+    } else {
+        "EASY"
+    }
+}
+
+fn semantic_change_type_label(change_type: sem_core::model::change::ChangeType) -> String {
+    match change_type {
+        sem_core::model::change::ChangeType::Added => "added",
+        sem_core::model::change::ChangeType::Modified => "modified",
+        sem_core::model::change::ChangeType::Deleted => "deleted",
+        sem_core::model::change::ChangeType::Moved => "moved",
+        sem_core::model::change::ChangeType::Renamed => "renamed",
+        sem_core::model::change::ChangeType::Reordered => "reordered",
+    }
+    .to_string()
+}
+
+fn semantic_difficulty_style(label: &str, palette: HomePalette, bg: Color) -> Style {
+    let color = match label {
+        "HARD" => palette.danger,
+        "MEDIUM" => palette.orange,
+        _ => palette.success,
+    };
+    Style::new().fg(color).bg(bg).add_modifier(Modifier::BOLD)
 }
 
 fn semantic_entity_preview_lines(
@@ -298,9 +364,13 @@ fn draw_semantic_map_symbol(
     if !semantic_map_point_visible(area, x, y) {
         return;
     }
-    buf[(x as u16, y as u16)]
-        .set_symbol(symbol)
-        .set_style(style);
+    for (offset, ch) in symbol.chars().enumerate() {
+        let x = x.saturating_add(offset as i32);
+        if !semantic_map_point_visible(area, x, y) {
+            break;
+        }
+        buf[(x as u16, y as u16)].set_char(ch).set_style(style);
+    }
 }
 
 fn draw_semantic_map_line(
@@ -2011,6 +2081,11 @@ impl App {
             return area.y;
         }
         self.seed_semantic_expansion(route);
+        if matches!(route, DiffSource::LocalWorktree(_))
+            && !self.inspect_analysis_cache.contains_key(route)
+        {
+            self.revalidate_inspect_analysis(route.clone());
+        }
         let rows = self.semantic_tree_rows(route);
         if rows.is_empty() {
             self.set_semantic_viewport(SemanticViewport {
@@ -2020,6 +2095,18 @@ impl App {
                 scroll_y: 0,
             });
             return area.y;
+        }
+        match self.semantic_review_stage {
+            SemanticReviewStage::Briefing => {
+                return self.render_semantic_briefing(frame, area, route, palette, &rows);
+            }
+            SemanticReviewStage::Zone => {
+                return self.render_semantic_zone(frame, area, route, palette, &rows);
+            }
+            SemanticReviewStage::Complete => {
+                return self.render_semantic_completion(frame, area, route, palette, &rows);
+            }
+            SemanticReviewStage::Map => {}
         }
         let total_rows = rows.len();
         let body_area = semantic_tree_body_area(area);
@@ -2111,7 +2198,7 @@ impl App {
                 body_area,
                 root_x,
                 root_y,
-                "□",
+                "[ ]",
                 root_style,
             );
         }
@@ -2127,23 +2214,6 @@ impl App {
             let Some((x, y)) = positions.get(node_index).copied() else {
                 continue;
             };
-            let style = if selected {
-                Style::new()
-                    .fg(palette.selected_text)
-                    .bg(palette.layer_bg(SurfaceLayer::ElevatedSurface))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                semantic_map_node_style(row, palette, bg)
-            };
-            draw_semantic_map_symbol(
-                frame.buffer_mut(),
-                body_area,
-                x,
-                y,
-                semantic_map_node_symbol(row, selected),
-                style,
-            );
-
             let viewed = match row {
                 SemanticTreeRow::File { path, .. } => self.is_file_viewed(path),
                 SemanticTreeRow::Entity {
@@ -2165,16 +2235,28 @@ impl App {
                 }
                 SemanticTreeRow::Directory { .. } | SemanticTreeRow::Status(_) => false,
             };
-            if viewed {
-                draw_semantic_map_symbol(
-                    frame.buffer_mut(),
-                    body_area,
-                    x.saturating_add(2),
-                    y,
-                    "✓",
-                    tick_style,
-                );
-            }
+            let style = if selected {
+                Style::new()
+                    .fg(palette.selected_text)
+                    .bg(palette.layer_bg(SurfaceLayer::ElevatedSurface))
+                    .add_modifier(Modifier::BOLD)
+            } else if viewed {
+                tick_style
+            } else {
+                semantic_map_node_style(row, palette, bg)
+            };
+            draw_semantic_map_symbol(
+                frame.buffer_mut(),
+                body_area,
+                x,
+                y,
+                if viewed {
+                    semantic_map_viewed_node_symbol(selected)
+                } else {
+                    semantic_map_node_symbol(row, selected)
+                },
+                style,
+            );
         }
 
         if let Some(row) = rows.get(selected_row) {
@@ -2296,6 +2378,509 @@ impl App {
             viewport.scroll_y,
         );
         body_area.bottom()
+    }
+
+    fn render_semantic_briefing(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        route: &DiffSource,
+        palette: HomePalette,
+        rows: &[SemanticTreeRow],
+    ) -> u16 {
+        let bg = palette.layer_bg(SurfaceLayer::Surface);
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        draw_box(
+            frame.buffer_mut(),
+            area,
+            Style::new().fg(palette.rule).bg(bg),
+        );
+        let heading = palette.text(TextRole::Heading).bg(bg);
+        let text = palette.text(TextRole::Body).bg(bg);
+        let muted = palette.text(TextRole::Muted).bg(bg);
+        let key = palette.text(TextRole::Key).bg(bg);
+        let (total, viewed, hazards) = self.semantic_review_counts(route, rows);
+        let difficulty = semantic_review_difficulty(total, hazards);
+        let mut y = area.y.saturating_add(1);
+        let x = area.x.saturating_add(2);
+        let width = area.width.saturating_sub(4);
+        for line in [
+            Line::from(Span::styled("Review Briefing", heading)),
+            Line::from(Span::styled(
+                route.patch_label(),
+                text.add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled("Difficulty  ", muted),
+                Span::styled(
+                    difficulty,
+                    semantic_difficulty_style(difficulty, palette, bg),
+                ),
+                Span::styled(
+                    format!("   Rooms {viewed}/{total}   Hazards {hazards}"),
+                    muted,
+                ),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled("Suggested route", heading)),
+            Line::from(Span::styled(
+                "1. Start with data/model and type-shaped files",
+                text,
+            )),
+            Line::from(Span::styled(
+                "2. Clear implementation zones one semantic room at a time",
+                text,
+            )),
+            Line::from(Span::styled(
+                "3. Spend extra attention on hazard rooms",
+                text,
+            )),
+            Line::from(Span::styled(
+                "4. Finish with tests/evidence and unresolved checks",
+                text,
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("enter", key),
+                Span::styled(" begin map   ", muted),
+                Span::styled("n", key),
+                Span::styled(" next room   ", muted),
+                Span::styled("d", key),
+                Span::styled(" raw diff", muted),
+            ]),
+        ] {
+            if y >= area.bottom().saturating_sub(1) {
+                break;
+            }
+            frame.render_widget(line, Rect::new(x, y, width, 1));
+            y += 1;
+        }
+        area.bottom()
+    }
+
+    fn render_semantic_zone(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        route: &DiffSource,
+        palette: HomePalette,
+        rows: &[SemanticTreeRow],
+    ) -> u16 {
+        if area.width < 48 || area.height < 8 {
+            self.semantic_review_stage = SemanticReviewStage::Map;
+            return self.render_semantic_tree(frame, area, route, palette);
+        }
+        let [tree_area, diff_area] = Layout::horizontal([
+            Constraint::Length((area.width / 3).clamp(28, 46)),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        self.render_semantic_zone_tree(frame, tree_area, route, palette, rows);
+        self.render_semantic_zone_diff(frame, diff_area, route, palette);
+        area.bottom()
+    }
+
+    fn render_semantic_zone_tree(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        route: &DiffSource,
+        palette: HomePalette,
+        rows: &[SemanticTreeRow],
+    ) {
+        let bg = palette.layer_bg(SurfaceLayer::Surface);
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        draw_box(
+            frame.buffer_mut(),
+            area,
+            Style::new().fg(palette.accent).bg(bg),
+        );
+        let heading = palette.text(TextRole::Heading).bg(bg);
+        let muted = palette.text(TextRole::Muted).bg(bg);
+        let key = palette.text(TextRole::Key).bg(bg);
+        let (total, viewed, hazards) = self.semantic_review_counts(route, rows);
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(" Zone ", heading),
+                Span::styled(format!(" {viewed}/{total} · {hazards} hazards"), muted),
+            ]),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        let body = semantic_tree_body_area(area);
+        let list_height = body.height.saturating_sub(1) as usize;
+        let viewport = self.semantic_viewport_for(rows.len(), list_height.max(1));
+        self.set_semantic_viewport(viewport);
+        for (offset, row) in rows
+            .iter()
+            .skip(viewport.scroll_y)
+            .take(list_height)
+            .enumerate()
+        {
+            let selected = viewport.scroll_y + offset == viewport.selected;
+            let line =
+                self.semantic_zone_row_line(row, route, body.width as usize, selected, palette, bg);
+            frame.render_widget(
+                line,
+                Rect::new(body.x, body.y + offset as u16, body.width, 1),
+            );
+        }
+        if body.height > 0 {
+            let line = if self.semantic_zone_focus == SemanticZoneFocus::Tree {
+                Line::from(vec![
+                    Span::styled("tree ", heading),
+                    Span::styled("j/k", key),
+                    Span::styled(" room  ", muted),
+                    Span::styled("tab", key),
+                    Span::styled(" diff", muted),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("diff focused ", muted),
+                    Span::styled("tab", key),
+                    Span::styled(" tree", muted),
+                ])
+            };
+            frame.render_widget(
+                line,
+                Rect::new(body.x, body.bottom().saturating_sub(1), body.width, 1),
+            );
+        }
+    }
+
+    fn render_semantic_zone_diff(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        route: &DiffSource,
+        palette: HomePalette,
+    ) {
+        let bg = palette.bg;
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        let [title, rule, body] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        let rows = self.semantic_tree_rows(route);
+        let selected = rows.get(self.semantic_selection.min(rows.len().saturating_sub(1)));
+        let label = selected
+            .map(semantic_map_node_label)
+            .unwrap_or_else(|| "Scope".to_string());
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(" Scope Diff ", palette.text(TextRole::Muted).bg(bg)),
+                Span::styled(
+                    truncate(&label, title.width.saturating_sub(18) as usize),
+                    palette.text(TextRole::Heading).bg(bg),
+                ),
+            ]),
+            title,
+        );
+        frame.render_widget(
+            Line::from("─".repeat(rule.width as usize)).style(Style::new().fg(palette.rule).bg(bg)),
+            rule,
+        );
+        let focused = self.semantic_zone_focus == SemanticZoneFocus::Diff;
+        if self.document_for_route(route).files.is_empty() {
+            match route {
+                DiffSource::LocalWorktree(_) => self.revalidate_local_diff(),
+                DiffSource::PullRequest { repository, number } => {
+                    self.revalidate_pull_request_diff(repository.clone(), *number)
+                }
+                DiffSource::Commit { .. } => {}
+            }
+            frame.render_widget(
+                Line::from(Span::styled(
+                    "Loading full diff for this scope…",
+                    palette.text(TextRole::Muted).bg(bg),
+                )),
+                body,
+            );
+            return;
+        }
+        if let Some(document) = self.semantic_scope_document(route) {
+            self.viewport_height = body.height as usize;
+            StatefulWidget::render(
+                DiffWidget::new(&document).theme(palette.theme.diff_theme()),
+                body,
+                frame.buffer_mut(),
+                &mut self.semantic_room_diff_state,
+            );
+            let footer = if focused {
+                "diff focus · j/k scroll · tab tree · enter full context · space clear"
+            } else {
+                "tree focus · tab diff · enter full context · space clear"
+            };
+            frame.render_widget(
+                Line::from(Span::styled(footer, palette.text(TextRole::Muted).bg(bg))),
+                Rect::new(body.x, body.bottom().saturating_sub(1), body.width, 1),
+            );
+        } else {
+            frame.render_widget(
+                Line::from(Span::styled(
+                    "No scoped diff for this room. Press enter for full context.",
+                    palette.text(TextRole::Muted).bg(bg),
+                )),
+                body,
+            );
+        }
+    }
+
+    fn render_semantic_completion(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        route: &DiffSource,
+        palette: HomePalette,
+        rows: &[SemanticTreeRow],
+    ) -> u16 {
+        let bg = palette.layer_bg(SurfaceLayer::Surface);
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        draw_box(
+            frame.buffer_mut(),
+            area,
+            Style::new().fg(palette.success).bg(bg),
+        );
+        let heading = palette.text(TextRole::Heading).bg(bg);
+        let text = palette.text(TextRole::Body).bg(bg);
+        let muted = palette.text(TextRole::Muted).bg(bg);
+        let key = palette.text(TextRole::Key).bg(bg);
+        let (total, viewed, hazards) = self.semantic_review_counts(route, rows);
+        let remaining = total.saturating_sub(viewed);
+        let lines = [
+            Line::from(Span::styled("Review Progress", heading)),
+            Line::from(Span::styled(
+                route.patch_label(),
+                text.add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!("✓ {viewed} / {total} rooms cleared")),
+            Line::from(format!("⚠ {hazards} hazard rooms identified")),
+            Line::from(format!("○ {remaining} rooms remaining")),
+            Line::from(""),
+            Line::from(Span::styled("Suggested next", heading)),
+            Line::from(if remaining == 0 {
+                "All rooms are clear. Check CI/evidence before final review."
+            } else {
+                "Press n to jump to the next uncleared room."
+            }),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("n", key),
+                Span::styled(" next  ", muted),
+                Span::styled("m", key),
+                Span::styled(" map  ", muted),
+                Span::styled("esc", key),
+                Span::styled(" back", muted),
+            ]),
+        ];
+        for (index, line) in lines.into_iter().enumerate() {
+            let y = area.y.saturating_add(1 + index as u16);
+            if y >= area.bottom().saturating_sub(1) {
+                break;
+            }
+            frame.render_widget(
+                line.style(Style::new().bg(bg)),
+                Rect::new(area.x.saturating_add(2), y, area.width.saturating_sub(4), 1),
+            );
+        }
+        area.bottom()
+    }
+
+    fn semantic_review_counts(
+        &self,
+        route: &DiffSource,
+        rows: &[SemanticTreeRow],
+    ) -> (usize, usize, usize) {
+        if let Some(analysis) = self.inspect_analysis_cache.get(route) {
+            let total = analysis.stats.total_entities;
+            let hazards = analysis
+                .entity_reviews
+                .iter()
+                .filter(|review| {
+                    matches!(
+                        review.risk_level,
+                        inspect_core::types::RiskLevel::High
+                            | inspect_core::types::RiskLevel::Critical
+                    )
+                })
+                .count();
+            let viewed = analysis
+                .entity_reviews
+                .iter()
+                .filter(|review| {
+                    let line = (review.start_line > 0).then_some(review.start_line);
+                    let key = Self::semantic_entity_key_parts(
+                        &review.file_path,
+                        &review.entity_type,
+                        &review.entity_name,
+                        &semantic_change_type_label(review.change_type),
+                        line,
+                    );
+                    self.is_entity_viewed(&key)
+                })
+                .count();
+            return (total, viewed, hazards);
+        }
+        let mut total = 0usize;
+        let mut viewed = 0usize;
+        let mut hazards = 0usize;
+        for row in rows {
+            match row {
+                SemanticTreeRow::File {
+                    path, change_count, ..
+                } => {
+                    total += 1;
+                    viewed += usize::from(self.is_file_viewed(path));
+                    hazards += usize::from(*change_count >= 8);
+                }
+                SemanticTreeRow::Entity {
+                    path,
+                    entity_type,
+                    entity_name,
+                    change_type,
+                    line,
+                    ..
+                } => {
+                    total += 1;
+                    let key = Self::semantic_entity_key_parts(
+                        path,
+                        entity_type,
+                        entity_name,
+                        change_type,
+                        *line,
+                    );
+                    viewed += usize::from(self.is_entity_viewed(&key));
+                    hazards += usize::from(semantic_row_is_hazard(row));
+                }
+                SemanticTreeRow::Directory { .. } | SemanticTreeRow::Status(_) => {}
+            }
+        }
+        if total == 0 {
+            let files = self
+                .semantic_diff_for_route(route)
+                .map_or(0, |diff| diff.files.len());
+            (files, 0, hazards)
+        } else {
+            (total, viewed, hazards)
+        }
+    }
+
+    fn semantic_zone_row_line(
+        &self,
+        row: &SemanticTreeRow,
+        _route: &DiffSource,
+        width: usize,
+        selected: bool,
+        palette: HomePalette,
+        bg: Color,
+    ) -> Line<'static> {
+        let row_bg = if selected { palette.selected_bg } else { bg };
+        let muted = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.muted
+            })
+            .bg(row_bg);
+        let text = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.fg
+            })
+            .bg(row_bg);
+        let tick = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.success
+            })
+            .bg(row_bg)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(" ", Style::new().bg(row_bg))];
+        match row {
+            SemanticTreeRow::Directory {
+                name,
+                depth,
+                collapsed,
+                ..
+            } => {
+                spans.push(Span::styled(
+                    format!(
+                        "{}{} {}",
+                        " ".repeat(*depth),
+                        if *collapsed { "▶" } else { "▼" },
+                        name
+                    ),
+                    muted,
+                ));
+            }
+            SemanticTreeRow::File {
+                path,
+                name,
+                depth,
+                collapsed,
+                ..
+            } => {
+                let checked = if self.is_file_viewed(path) {
+                    "✓"
+                } else {
+                    "○"
+                };
+                spans.push(Span::styled(
+                    format!(
+                        "{}{} {} {}",
+                        " ".repeat(*depth),
+                        checked,
+                        if *collapsed { "▶" } else { "▼" },
+                        truncate(name, width.saturating_sub(depth + 6))
+                    ),
+                    if checked == "✓" { tick } else { text },
+                ));
+            }
+            SemanticTreeRow::Entity {
+                path,
+                depth,
+                entity_type,
+                entity_name,
+                change_type,
+                line,
+                ..
+            } => {
+                let key = Self::semantic_entity_key_parts(
+                    path,
+                    entity_type,
+                    entity_name,
+                    change_type,
+                    *line,
+                );
+                let checked = if self.is_entity_viewed(&key) {
+                    "✓"
+                } else if semantic_row_is_hazard(row) {
+                    "⚠"
+                } else {
+                    "○"
+                };
+                let style = if checked == "✓" { tick } else { text };
+                spans.push(Span::styled(
+                    format!(
+                        "{}{} {}",
+                        " ".repeat(*depth),
+                        checked,
+                        truncate(entity_name, width.saturating_sub(depth + 4))
+                    ),
+                    style,
+                ));
+            }
+            SemanticTreeRow::Status(status) => spans.push(Span::styled(status.clone(), muted)),
+        }
+        Line::from(spans).style(Style::new().bg(row_bg))
     }
 
     pub(super) fn render_queue_group_header(

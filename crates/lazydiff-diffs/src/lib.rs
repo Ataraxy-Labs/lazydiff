@@ -190,6 +190,16 @@ struct LineRef {
 }
 
 impl DiffDocument {
+    pub fn from_files(files: Vec<FileDiff>) -> Self {
+        let mut document = Self {
+            files,
+            unified_rows: Vec::new(),
+            split_rows: Vec::new(),
+        };
+        document.rebuild_row_cache();
+        document
+    }
+
     fn rows(&self, mode: DiffMode) -> &[RowRef] {
         match mode {
             DiffMode::Unified => &self.unified_rows,
@@ -1873,21 +1883,18 @@ fn render_split_cell(
         theme,
         selected,
     );
-    let visible_text = if cell.kind == RowKind::Empty {
-        " ".to_string()
-    } else {
-        concealed_text(cell.text, cell.conceal_first)
-    };
+    let prefix_segments = [
+        (gutter.rail, gutter.rail_style),
+        (&gutter.line_number, gutter.line_number_style),
+        (gutter.sign, gutter.sign_style),
+        (gutter.trailing, gutter.line_number_style),
+    ];
+    let visible_text = concealed_text(cell.text, cell.conceal_first);
     render_segments(
         area,
         area.y,
         buf,
-        &[
-            (gutter.rail, gutter.rail_style),
-            (&gutter.line_number, gutter.line_number_style),
-            (gutter.sign, gutter.sign_style),
-            (gutter.trailing, gutter.line_number_style),
-        ],
+        &prefix_segments,
         visible_text.as_str(),
         cell.syntax_spans,
         cell.inline_spans,
@@ -1897,6 +1904,17 @@ fn render_split_cell(
         selection_range,
         scroll_x,
     );
+
+    if cell.kind == RowKind::Empty {
+        let gutter_width = prefix_segments
+            .iter()
+            .map(|(text, _)| text.chars().count() as u16)
+            .sum::<u16>();
+        let start = area.x.saturating_add(gutter_width).min(area.right());
+        for x in start..area.right() {
+            buf[(x, area.y)].set_symbol("╱").set_style(style);
+        }
+    }
 }
 
 fn fill(area: Rect, buf: &mut Buffer, symbol: &str, style: Style) {

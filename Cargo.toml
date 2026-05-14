@@ -17,12 +17,19 @@ nucleo-matcher = "0.3"
 ratatui = "0.29"
 regex = "1"
 lazydiff-diffs = { path = "crates/lazydiff-diffs" }
+inspect-core = { path = "../inspect/crates/inspect-core" }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sem-core = { git = "https://github.com/Ataraxy-Labs/sem.git", branch = "lazydiff-optional-grammars", default-features = false, features = ["lang-minimal"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
+
+[patch."https://github.com/Ataraxy-Labs/sem"]
+sem-core = { path = "../sem/crates/sem-core" }
+
+[patch."https://github.com/Ataraxy-Labs/sem.git"]
+sem-core = { path = "../sem/crates/sem-core" }
 
 # Interactive development profile: much faster runtime than `dev`
 # without the slow fat-LTO/link-time work from `release`. Use with:

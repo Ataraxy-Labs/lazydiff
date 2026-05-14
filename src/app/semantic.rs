@@ -255,6 +255,13 @@ impl SemanticViewport {
             .min(viewport.total_rows.saturating_sub(viewport.visible_rows));
         viewport
     }
+
+    #[cfg(test)]
+    fn row_at(&self, visible_index: usize) -> Option<usize> {
+        (visible_index < self.visible_rows)
+            .then(|| self.scroll_y.saturating_add(visible_index))
+            .filter(|row| *row < self.total_rows)
+    }
 }
 
 pub(crate) fn semantic_tree_body_area(area: Rect) -> Rect {
@@ -267,6 +274,25 @@ pub(crate) fn semantic_tree_body_area(area: Rect) -> Rect {
 }
 
 impl App {
+    pub(super) fn revalidate_inspect_analysis(&mut self, route: DiffSource) {
+        let DiffSource::LocalWorktree(local_route) = route.clone() else {
+            return;
+        };
+        let query_key = QueryKey::inspect_analysis(route.session_id());
+        if !self.query_client.start_fetch(query_key) {
+            return;
+        }
+        let sender = self.query_tx.clone();
+        thread::spawn(move || {
+            let scope = DiffScope::RefToWorking {
+                refspec: local_route.base_ref,
+            };
+            let result = inspect_core::analyze::analyze(Path::new(&local_route.repo_path), scope)
+                .map_err(|error| format!("inspect analysis failed: {error}"));
+            let _ = sender.send(QueryEvent::InspectAnalysis { route, result });
+        });
+    }
+
     pub(super) fn revalidate_semantic_diff(&mut self, route: DiffSource) {
         if route.requires_github_auth() && !self.ensure_github_auth() {
             return;
@@ -848,6 +874,52 @@ impl App {
         self.set_semantic_viewport(viewport);
     }
 
+    pub(super) fn move_to_next_unviewed_semantic_row(&mut self) -> bool {
+        let Some(route) = self.current_semantic_route() else {
+            return false;
+        };
+        let rows = self.semantic_tree_rows(&route);
+        if rows.is_empty() {
+            return false;
+        }
+        let start = self.semantic_selection.min(rows.len().saturating_sub(1));
+        let is_unviewed = |row: &SemanticTreeRow, app: &App| match row {
+            SemanticTreeRow::File { path, .. } => !app.is_file_viewed(path),
+            SemanticTreeRow::Entity {
+                path,
+                entity_type,
+                entity_name,
+                change_type,
+                line,
+                ..
+            } => {
+                let key = App::semantic_entity_key_parts(
+                    path,
+                    entity_type,
+                    entity_name,
+                    change_type,
+                    *line,
+                );
+                !app.is_entity_viewed(&key)
+            }
+            SemanticTreeRow::Directory { .. } | SemanticTreeRow::Status(_) => false,
+        };
+        let target = (1..=rows.len())
+            .map(|offset| (start + offset) % rows.len())
+            .find(|index| is_unviewed(&rows[*index], self));
+        let Some(target) = target else {
+            return false;
+        };
+        self.semantic_selection = target;
+        let viewport = SemanticViewport::centered(
+            rows.len(),
+            self.semantic_visible_rows.max(1),
+            self.semantic_selection,
+        );
+        self.set_semantic_viewport(viewport);
+        true
+    }
+
     pub(super) fn move_semantic_selection_structural(&mut self, code: KeyCode) -> bool {
         let Some(route) = self.current_semantic_route() else {
             return false;
@@ -1189,7 +1261,7 @@ fn best_line_match(
         .or_else(|| before.map(|(_, pos)| pos))
 }
 
-fn diff_line_side_line(diff_line: &DiffLine, use_old_side: bool) -> Option<(u32, bool)> {
+pub(super) fn diff_line_side_line(diff_line: &DiffLine, use_old_side: bool) -> Option<(u32, bool)> {
     match diff_line {
         DiffLine::Context {
             old_line, new_line, ..

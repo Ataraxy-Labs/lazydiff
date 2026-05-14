@@ -331,6 +331,17 @@ impl App {
                         Err(error) => self.query_client.finish_error(query_key, error),
                     }
                 }
+                QueryEvent::InspectAnalysis { route, result } => {
+                    let query_key = QueryKey::inspect_analysis(route.session_id());
+                    match result {
+                        Ok(analysis) => {
+                            self.inspect_analysis_cache.insert(route, analysis);
+                            self.query_client
+                                .finish_success(query_key, now_stamp() as i64);
+                        }
+                        Err(error) => self.query_client.finish_error(query_key, error),
+                    }
+                }
             }
         }
         if changed || self.last_query_gc_at.elapsed() >= QUERY_CACHE_GC_INTERVAL {
@@ -373,6 +384,10 @@ impl App {
                         .retain(|key| key.route_id != route_id);
                     self.semantic_expansion_seeded.remove(&route_id);
                 }
+                QueryKey::InspectAnalysis { route_id } => {
+                    self.inspect_analysis_cache
+                        .retain(|route, _| route.session_id() != route_id);
+                }
                 QueryKey::ProjectLabel
                 | QueryKey::ThemePreference
                 | QueryKey::LocalDiff
@@ -392,6 +407,7 @@ impl App {
             keys.push(QueryKey::pull_request_comments(repository, *number));
         }
         keys.push(QueryKey::semantic_diff(self.diff_source.session_id()));
+        keys.push(QueryKey::inspect_analysis(self.diff_source.session_id()));
         if let Some(pull_request) = self
             .selected_work_item()
             .and_then(|item| item.pr_index)
@@ -408,6 +424,7 @@ impl App {
         }
         if let Some(item) = self.selected_work_item() {
             keys.push(QueryKey::semantic_diff(item.route(self).session_id()));
+            keys.push(QueryKey::inspect_analysis(item.route(self).session_id()));
         }
         if let (Some(route), Some(commit)) =
             (&self.commit_route, self.commits.get(self.commit_selection))

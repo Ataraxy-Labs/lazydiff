@@ -26,7 +26,7 @@ use crossterm::{
 use lazydiff_diffs::{
     add_pierre_highlights, parse_unified_diff, render_scrollbar, row_count_for_mode, DiffDocument,
     DiffLine, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
-    DiffViewState, DiffWidget, FileDiff, FileDiffKind, InlineDiffSpan, SliderState,
+    DiffViewState, DiffWidget, FileDiff, FileDiffKind, Hunk, InlineDiffSpan, SliderState,
     SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar,
 };
 use nucleo_matcher::{
@@ -164,6 +164,8 @@ pub(crate) struct App {
     pr_comments_cache: crate::bounded_map::BoundedMap<(String, u32), Vec<GitHubComment>>,
     semantic_diff_cache: crate::bounded_map::BoundedMap<DiffSource, SemanticDiff>,
     persisted_semantic_diff_cache: crate::bounded_map::BoundedMap<String, SemanticDiff>,
+    inspect_analysis_cache:
+        crate::bounded_map::BoundedMap<DiffSource, inspect_core::types::ReviewResult>,
     semantic_expanded: HashSet<SemanticNodeKey>,
     semantic_expansion_seeded: HashSet<String>,
     semantic_selection: usize,
@@ -174,6 +176,9 @@ pub(crate) struct App {
     semantic_map_zoom: f32,
     semantic_map_pan_x: i32,
     semantic_map_pan_y: i32,
+    semantic_review_stage: SemanticReviewStage,
+    semantic_zone_focus: SemanticZoneFocus,
+    semantic_room_diff_state: DiffViewState,
     pending_semantic_focus: Option<SemanticFocusTarget>,
     review_sidebar_visible: bool,
     review_sidebar_focus: bool,
@@ -442,6 +447,7 @@ impl App {
             pr_comments_cache: crate::bounded_map::BoundedMap::new(32),
             semantic_diff_cache: crate::bounded_map::BoundedMap::new(32),
             persisted_semantic_diff_cache: crate::bounded_map::BoundedMap::new(32),
+            inspect_analysis_cache: crate::bounded_map::BoundedMap::new(16),
             semantic_expanded: HashSet::new(),
             semantic_expansion_seeded: HashSet::new(),
             semantic_selection: 0,
@@ -452,6 +458,9 @@ impl App {
             semantic_map_zoom: 1.0,
             semantic_map_pan_x: 0,
             semantic_map_pan_y: 0,
+            semantic_review_stage: SemanticReviewStage::Briefing,
+            semantic_zone_focus: SemanticZoneFocus::Tree,
+            semantic_room_diff_state: DiffViewState::default(),
             pending_semantic_focus: None,
             review_sidebar_visible: true,
             review_sidebar_focus: false,
@@ -883,6 +892,9 @@ impl App {
             self.handle_file_picker_key(key.code, rows);
             return;
         }
+        if self.handle_semantic_review_key(key.code) {
+            return;
+        }
         if self.handle_pane_navigation_key(key) {
             return;
         }
@@ -1056,6 +1068,147 @@ impl App {
     fn detail_shortcuts_active(&self) -> bool {
         self.surface == AppSurface::DetailFull
             || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
+    }
+
+    fn handle_semantic_review_key(&mut self, code: KeyCode) -> bool {
+        if self.detail_tab != DetailTab::Semantic
+            || !(self.surface == AppSurface::DetailFull
+                || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
+                || (self.surface == AppSurface::CommitList
+                    && self.commit_focus == CommitPane::Detail))
+        {
+            return false;
+        }
+        match code {
+            KeyCode::Char('m') => {
+                self.semantic_review_stage = SemanticReviewStage::Map;
+                true
+            }
+            KeyCode::Char('b') => {
+                self.semantic_review_stage = SemanticReviewStage::Briefing;
+                true
+            }
+            KeyCode::Tab if self.semantic_review_stage == SemanticReviewStage::Zone => {
+                self.semantic_zone_focus = match self.semantic_zone_focus {
+                    SemanticZoneFocus::Tree => SemanticZoneFocus::Diff,
+                    SemanticZoneFocus::Diff => SemanticZoneFocus::Tree,
+                };
+                true
+            }
+            KeyCode::Esc => match self.semantic_review_stage {
+                SemanticReviewStage::Complete => {
+                    self.semantic_review_stage = SemanticReviewStage::Map;
+                    true
+                }
+                SemanticReviewStage::Zone => {
+                    self.semantic_review_stage = SemanticReviewStage::Map;
+                    true
+                }
+                SemanticReviewStage::Map => {
+                    self.semantic_review_stage = SemanticReviewStage::Briefing;
+                    true
+                }
+                SemanticReviewStage::Briefing => false,
+            },
+            KeyCode::Enter => match self.semantic_review_stage {
+                SemanticReviewStage::Briefing => {
+                    self.semantic_review_stage = SemanticReviewStage::Map;
+                    true
+                }
+                SemanticReviewStage::Map => {
+                    self.semantic_review_stage = SemanticReviewStage::Zone;
+                    self.semantic_zone_focus = SemanticZoneFocus::Tree;
+                    true
+                }
+                SemanticReviewStage::Zone => self.open_selected_semantic_row(),
+                SemanticReviewStage::Complete => false,
+            },
+            KeyCode::Char('d') if self.semantic_review_stage == SemanticReviewStage::Zone => {
+                self.open_selected_semantic_row()
+            }
+            KeyCode::Char('n') => {
+                let moved = self.move_to_next_unviewed_semantic_row();
+                if moved {
+                    self.semantic_review_stage = SemanticReviewStage::Zone;
+                    self.semantic_zone_focus = SemanticZoneFocus::Tree;
+                    self.reset_semantic_room_diff_state();
+                }
+                moved
+            }
+            KeyCode::Char(' ') => self.toggle_selected_semantic_viewed(),
+            KeyCode::Char('c') => {
+                self.semantic_review_stage = SemanticReviewStage::Complete;
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Down
+                if self.semantic_review_stage == SemanticReviewStage::Zone
+                    && self.semantic_zone_focus == SemanticZoneFocus::Tree =>
+            {
+                self.move_semantic_selection(1);
+                self.reset_semantic_room_diff_state();
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up
+                if self.semantic_review_stage == SemanticReviewStage::Zone
+                    && self.semantic_zone_focus == SemanticZoneFocus::Tree =>
+            {
+                self.move_semantic_selection(-1);
+                self.reset_semantic_room_diff_state();
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Down
+                if self.semantic_review_stage == SemanticReviewStage::Zone
+                    && self.semantic_zone_focus == SemanticZoneFocus::Diff =>
+            {
+                if let Some(document) = self.current_semantic_scope_document() {
+                    let rows = row_count_for_mode(&document, self.semantic_room_diff_state.mode);
+                    self.semantic_room_diff_state.move_selection(
+                        1,
+                        rows,
+                        self.viewport_height.max(1),
+                    );
+                }
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up
+                if self.semantic_review_stage == SemanticReviewStage::Zone
+                    && self.semantic_zone_focus == SemanticZoneFocus::Diff =>
+            {
+                if let Some(document) = self.current_semantic_scope_document() {
+                    let rows = row_count_for_mode(&document, self.semantic_room_diff_state.mode);
+                    self.semantic_room_diff_state.move_selection(
+                        -1,
+                        rows,
+                        self.viewport_height.max(1),
+                    );
+                }
+                true
+            }
+            KeyCode::Char('h') | KeyCode::Left
+                if self.semantic_review_stage == SemanticReviewStage::Zone
+                    && self.semantic_zone_focus == SemanticZoneFocus::Tree =>
+            {
+                self.collapse_focused_semantic_branch();
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Right
+                if self.semantic_review_stage == SemanticReviewStage::Zone
+                    && self.semantic_zone_focus == SemanticZoneFocus::Tree =>
+            {
+                self.expand_focused_semantic_branch();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn reset_semantic_room_diff_state(&mut self) {
+        self.semantic_room_diff_state = DiffViewState::default();
+    }
+
+    fn current_semantic_scope_document(&self) -> Option<DiffDocument> {
+        let route = self.current_semantic_route()?;
+        self.semantic_scope_document(&route)
     }
 
     fn semantic_map_keyboard_active(&self) -> bool {
@@ -3222,6 +3375,140 @@ impl App {
         }
     }
 
+    fn semantic_scope_document(&self, route: &DiffSource) -> Option<DiffDocument> {
+        let document = self.document_for_route(route);
+        let rows = self.semantic_tree_rows(route);
+        let row = rows.get(self.semantic_selection.min(rows.len().saturating_sub(1)))?;
+        let files = match row {
+            SemanticTreeRow::Directory { key, .. } => {
+                let directory = key.path.strip_prefix("dir:")?;
+                document
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(file_index, file)| {
+                        if !file.new_path.starts_with(&format!("{directory}/")) {
+                            return None;
+                        }
+                        self.semantic_scoped_file_for_path(
+                            &document,
+                            route,
+                            file_index,
+                            &file.new_path,
+                        )
+                        .or_else(|| Some(file.clone()))
+                    })
+                    .collect()
+            }
+            SemanticTreeRow::File { path, .. } => document
+                .files
+                .iter()
+                .position(|file| file.new_path == *path)
+                .and_then(|file_index| {
+                    self.semantic_scoped_file_for_path(&document, route, file_index, path)
+                        .or_else(|| document.files.get(file_index).cloned())
+                })
+                .into_iter()
+                .collect(),
+            SemanticTreeRow::Entity {
+                path,
+                line,
+                end_line,
+                change_type,
+                ..
+            } => document
+                .files
+                .iter()
+                .position(|file| file.new_path == *path)
+                .and_then(|file_index| {
+                    let start = (*line)?;
+                    let end = end_line.unwrap_or(start).max(start);
+                    Self::scoped_file_for_ranges(
+                        &document,
+                        file_index,
+                        &[(start, end, matches!(change_type.as_str(), "deleted"))],
+                    )
+                    .or_else(|| document.files.get(file_index).cloned())
+                })
+                .into_iter()
+                .collect(),
+            SemanticTreeRow::Status(_) => Vec::new(),
+        };
+        (!files.is_empty()).then(|| DiffDocument::from_files(files))
+    }
+
+    fn semantic_scoped_file_for_path(
+        &self,
+        document: &DiffDocument,
+        route: &DiffSource,
+        file_index: usize,
+        path: &str,
+    ) -> Option<FileDiff> {
+        let changes = self
+            .semantic_diff_for_route(route)?
+            .files
+            .iter()
+            .find(|file| file.path == path)?
+            .changes
+            .as_slice();
+        let ranges: Vec<_> = changes
+            .iter()
+            .filter_map(|change| {
+                let start = change.line?;
+                let end = change.end_line.unwrap_or(start).max(start);
+                Some((start, end, matches!(change.change_type.as_str(), "deleted")))
+            })
+            .collect();
+        Self::scoped_file_for_ranges(document, file_index, &ranges)
+    }
+
+    fn scoped_file_for_ranges(
+        document: &DiffDocument,
+        file_index: usize,
+        ranges: &[(usize, usize, bool)],
+    ) -> Option<FileDiff> {
+        let file = document.files.get(file_index)?;
+        let mut hunks = Vec::new();
+        for hunk in &file.hunks {
+            let mut keep = vec![false; hunk.lines.len()];
+            for (line_index, diff_line) in hunk.lines.iter().enumerate() {
+                if ranges.iter().any(|(start, end, use_old_side)| {
+                    semantic::diff_line_side_line(diff_line, *use_old_side).is_some_and(
+                        |(line, changed)| changed && (*start as u32..=*end as u32).contains(&line),
+                    )
+                }) {
+                    let from = line_index.saturating_sub(2);
+                    let to = line_index
+                        .saturating_add(2)
+                        .min(hunk.lines.len().saturating_sub(1));
+                    for slot in keep.iter_mut().take(to + 1).skip(from) {
+                        *slot = true;
+                    }
+                }
+            }
+            let lines: Vec<DiffLine> = hunk
+                .lines
+                .iter()
+                .cloned()
+                .zip(keep.into_iter())
+                .filter_map(|(line, keep)| keep.then_some(line))
+                .collect();
+            if !lines.is_empty() {
+                hunks.push(Hunk {
+                    old_start: hunk.old_start,
+                    new_start: hunk.new_start,
+                    header: hunk.header.clone(),
+                    lines,
+                });
+            }
+        }
+        (!hunks.is_empty()).then(|| FileDiff {
+            old_path: file.old_path.clone(),
+            new_path: file.new_path.clone(),
+            hunks,
+        })
+    }
+
     fn active_review_target(&mut self) -> Option<DiffLineRangeTarget> {
         if let Some(selection) = self.state.selection {
             if let Some(target) = self.document.selection_target(self.state.mode, selection) {
@@ -3332,6 +3619,20 @@ enum TerminalFlowResult {
 enum DetailTab {
     Semantic,
     Description,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SemanticReviewStage {
+    Briefing,
+    Map,
+    Zone,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SemanticZoneFocus {
+    Tree,
+    Diff,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
