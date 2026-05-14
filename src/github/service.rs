@@ -4,6 +4,7 @@ use std::{
 };
 
 use convex::{ConvexClient, FunctionResult, Value};
+use lazydiff_diffs::{DiffLineRangeTarget, DiffSide};
 use serde::{Deserialize, Serialize};
 
 use crate::app::WorkItemKind;
@@ -250,6 +251,36 @@ fn github_get_json<T: for<'de> Deserialize<'de>>(
     response.json().map_err(|error| error.to_string())
 }
 
+fn github_post_json(
+    endpoint: &str,
+    token: &str,
+    payload: serde_json::Value,
+    label: &str,
+) -> std::result::Result<serde_json::Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(format!("https://api.github.com/{endpoint}"))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .json(&payload)
+        .send()
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        let details = response.text().unwrap_or_default();
+        let details = details.trim();
+        return Err(if details.is_empty() {
+            format!("{label} request failed: {status}")
+        } else {
+            format!("{label} request failed: {status}: {details}")
+        });
+    }
+    response.json().map_err(|error| error.to_string())
+}
+
 fn persist_auth(token: &str, user: &GitHubUser) -> std::result::Result<(), String> {
     let auth = PersistedAuth {
         token: token.to_string(),
@@ -342,6 +373,69 @@ pub(crate) fn fetch_pull_request_comments(
     )?);
     comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(comments)
+}
+
+pub(crate) fn post_pull_request_comment(
+    repository: &str,
+    number: u32,
+    target: &DiffLineRangeTarget,
+    body: &str,
+) -> std::result::Result<GitHubComment, String> {
+    let token =
+        github_token().ok_or_else(|| "sign in to Quiver to post GitHub comments".to_string())?;
+    let commit_id = fetch_pull_request_head_sha(repository, number, &token)?;
+    let side = match target.side() {
+        DiffSide::Left => "LEFT",
+        DiffSide::Right => "RIGHT",
+    };
+    let start_line = target.start.line.min(target.end.line);
+    let end_line = target.start.line.max(target.end.line);
+    let mut payload = serde_json::json!({
+        "body": body.trim(),
+        "commit_id": commit_id,
+        "path": target.path(),
+        "line": end_line,
+        "side": side,
+    });
+    if start_line != end_line {
+        payload["start_line"] = serde_json::json!(start_line);
+        payload["start_side"] = serde_json::json!(side);
+    }
+
+    let value: serde_json::Value = github_post_json(
+        &format!("repos/{repository}/pulls/{number}/comments"),
+        &token,
+        payload,
+        "GitHub PR comment",
+    )?;
+    let raw: RawRestComment = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    Ok(GitHubComment {
+        author: raw
+            .user
+            .map(|user| user.login)
+            .unwrap_or_else(|| "unknown".to_string()),
+        body: raw.body.unwrap_or_default(),
+        created_at: raw.created_at.unwrap_or_default(),
+    })
+}
+
+fn fetch_pull_request_head_sha(
+    repository: &str,
+    number: u32,
+    token: &str,
+) -> std::result::Result<String, String> {
+    let value: serde_json::Value = github_get_json(
+        &format!("repos/{repository}/pulls/{number}"),
+        token,
+        "GitHub PR",
+    )?;
+    value
+        .get("head")
+        .and_then(|head| head.get("sha"))
+        .and_then(|sha| sha.as_str())
+        .filter(|sha| !sha.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "GitHub PR returned no head SHA".to_string())
 }
 
 fn fetch_pull_request_comment_endpoint(

@@ -53,6 +53,9 @@ impl App {
         {
             return;
         }
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            self.focus_pane_at_mouse(mouse.column, mouse.row, terminal_width, terminal_height);
+        }
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && scrollbar_target.is_some()
         {
@@ -68,6 +71,40 @@ impl App {
             && self.handle_semantic_mouse_down(mouse, terminal_width, terminal_height)
         {
             return;
+        }
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            if let Some((route, semantic_area)) =
+                self.semantic_mouse_target_area(terminal_width, terminal_height)
+            {
+                if self.select_semantic_node_at(&route, semantic_area, mouse.column, mouse.row) {
+                    return;
+                }
+            }
+        }
+        if let Some((_route, semantic_area)) =
+            self.semantic_mouse_target_area(terminal_width, terminal_height)
+        {
+            if contains_point(semantic_area, mouse.column, mouse.row) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.zoom_semantic_map_at(semantic_area, mouse.column, mouse.row, 1);
+                        return;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.zoom_semantic_map_at(semantic_area, mouse.column, mouse.row, -1);
+                        return;
+                    }
+                    MouseEventKind::ScrollLeft => {
+                        self.pan_semantic_map(8, 0);
+                        return;
+                    }
+                    MouseEventKind::ScrollRight => {
+                        self.pan_semantic_map(-8, 0);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
         }
         match (self.surface, mouse.kind) {
             (AppSurface::Queue, MouseEventKind::Down(MouseButton::Left)) => {
@@ -496,7 +533,7 @@ impl App {
         }
     }
 
-    fn semantic_mouse_target_area(
+    pub(super) fn semantic_mouse_target_area(
         &self,
         terminal_width: u16,
         terminal_height: u16,
@@ -646,6 +683,71 @@ impl App {
             anchor,
             Some(self.selection_pane_bounds(mouse, terminal_width, terminal_height)),
         ));
+    }
+
+    fn focus_pane_at_mouse(
+        &mut self,
+        column: u16,
+        row: u16,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) {
+        match self.surface {
+            AppSurface::Queue => {
+                if self
+                    .home_detail_area(terminal_width, terminal_height)
+                    .is_some_and(|area| contains_point(area, column, row))
+                {
+                    self.queue_focus = QueuePane::Detail;
+                } else if self
+                    .home_wide_queue_area(terminal_width, terminal_height)
+                    .is_some_and(|area| contains_point(area, column, row))
+                {
+                    self.queue_focus = QueuePane::List;
+                }
+            }
+            AppSurface::Diff => {
+                let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+                let [_header, _divider, body, _comment_preview, _footer] = Layout::vertical([
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                    Constraint::Fill(1),
+                    Constraint::Length(2),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                let (sidebar, _sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
+                if sidebar.is_some_and(|area| contains_point(area, column, row)) {
+                    self.review_sidebar_focus = true;
+                    self.sync_review_sidebar_selection_to_current_file();
+                } else if contains_point(diff_body, column, row) {
+                    self.review_sidebar_focus = false;
+                }
+            }
+            AppSurface::CommitList => {
+                let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+                let [_header, body, _footer] = Layout::vertical([
+                    Constraint::Length(2),
+                    Constraint::Fill(1),
+                    Constraint::Length(1),
+                ])
+                .areas(area);
+                if body.width >= 96 {
+                    let [list, _gap, meta] = Layout::horizontal([
+                        Constraint::Percentage(56),
+                        Constraint::Length(2),
+                        Constraint::Fill(1),
+                    ])
+                    .areas(body);
+                    if contains_point(meta, column, row) {
+                        self.commit_focus = CommitPane::Detail;
+                    } else if contains_point(list, column, row) {
+                        self.commit_focus = CommitPane::List;
+                    }
+                }
+            }
+            AppSurface::Comments | AppSurface::DetailFull => {}
+        }
     }
 
     fn start_pending_screen_text_selection(&mut self) {

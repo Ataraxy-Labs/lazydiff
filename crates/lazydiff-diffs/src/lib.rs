@@ -17,7 +17,7 @@ pub use gutter::{GutterCell, LineSign};
 use inline_diff::compute_inline_diff_spans;
 pub use inline_diff::InlineDiffSpan;
 pub use metadata::{FileDiffKind, FileDiffMetadata, HunkContent, HunkMetadata};
-pub use pierre::{RenderCellKind, RenderSpan, SplitLineCell};
+pub use pierre::{line_render_spans, RenderCellKind, RenderSpan, SplitLineCell};
 pub use scrollbar::{render_scrollbar, SliderGeometry, SliderState, VerticalScrollbar};
 pub use selection::{DiffSelection, TextPoint, TextSelection, TextSelectionRange, TextViewport};
 use text::{concealed_text, render_full_line, render_segments};
@@ -699,7 +699,7 @@ impl DiffViewState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RowKind {
+pub enum RowKind {
     Context,
     Add,
     Delete,

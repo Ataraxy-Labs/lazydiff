@@ -298,6 +298,11 @@ pub(crate) enum QueryEvent {
         number: u32,
         result: std::result::Result<Vec<GitHubComment>, String>,
     },
+    PostedComment {
+        repository: String,
+        number: u32,
+        result: std::result::Result<GitHubComment, String>,
+    },
     Diff {
         repository: String,
         number: u32,

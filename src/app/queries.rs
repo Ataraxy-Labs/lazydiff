@@ -239,6 +239,39 @@ impl App {
                         }
                     }
                 }
+                QueryEvent::PostedComment {
+                    repository,
+                    number,
+                    result,
+                } => match result {
+                    Ok(comment) => {
+                        let key = (repository.clone(), number);
+                        let mut comments = self
+                            .pr_comments_cache
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_default();
+                        comments.push(comment.clone());
+                        self.pr_comments_cache.insert(key, comments);
+                        if let Some(pull_request) = self
+                            .github
+                            .items
+                            .iter_mut()
+                            .find(|pr| pr.repository == repository && pr.number == number)
+                        {
+                            pull_request.comments.push(comment);
+                        }
+                        self.query_client.finish_success(
+                            QueryKey::pull_request_comments(&repository, number),
+                            now_stamp() as i64,
+                        );
+                        self.branch_operation_status = Some("posted PR comment".to_string());
+                        self.persist_github_query_client();
+                    }
+                    Err(error) => {
+                        self.branch_operation_status = Some(format!("PR comment failed: {error}"));
+                    }
+                },
                 QueryEvent::Diff {
                     repository,
                     number,

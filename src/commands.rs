@@ -84,9 +84,6 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
         return Some(Command::ScrollRight);
     }
-    if key.code == KeyCode::Char('l') && key.modifiers.is_empty() {
-        return Some(Command::LoginGitHub);
-    }
     // Global quit: `q` quits from any non-modal surface. Modal layers
     // (composer, file picker, attempt modal) intercept keys earlier in
     // `App::handle_key` so this can't close them by accident.
@@ -101,17 +98,22 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
             KeyCode::Enter | KeyCode::Char('d') => Some(Command::OpenSelectedCommit),
             KeyCode::Char('j') | KeyCode::Down => Some(Command::MoveDown),
             KeyCode::Char('k') | KeyCode::Up => Some(Command::MoveUp),
+            KeyCode::Char('g') => Some(Command::JumpFirst),
+            KeyCode::Char('G') => Some(Command::JumpLast),
             _ => None,
         },
         Layer::Queue if is_tab_key(key) => Some(Command::OpenCommitList),
         Layer::Queue => match key.code {
             KeyCode::Esc => Some(Command::Quit),
             KeyCode::Enter => Some(Command::OpenDetail),
+            KeyCode::Char('C') => Some(Command::OpenCommitList),
             KeyCode::Char('d') => Some(Command::OpenDiff),
             KeyCode::Char('o') => Some(Command::OpenInBrowser),
             KeyCode::Char('c') => Some(Command::OpenComments),
             KeyCode::Char('j') | KeyCode::Down => Some(Command::MoveDown),
             KeyCode::Char('k') | KeyCode::Up => Some(Command::MoveUp),
+            KeyCode::Char('g') => Some(Command::JumpFirst),
+            KeyCode::Char('G') => Some(Command::JumpLast),
             KeyCode::Char('r') => Some(Command::Refresh),
             KeyCode::Char('p') => Some(Command::PullBranch),
             KeyCode::Char('P') => Some(Command::PushBranch),
@@ -128,6 +130,8 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
             KeyCode::Char('c') => Some(Command::OpenComments),
             KeyCode::Char('j') | KeyCode::Down => Some(Command::MoveDown),
             KeyCode::Char('k') | KeyCode::Up => Some(Command::MoveUp),
+            KeyCode::Char('g') => Some(Command::JumpFirst),
+            KeyCode::Char('G') => Some(Command::JumpLast),
             KeyCode::PageDown => Some(Command::PageDown),
             KeyCode::PageUp => Some(Command::PageUp),
             _ => None,
@@ -138,6 +142,8 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
             KeyCode::Char('o') => Some(Command::OpenInBrowser),
             KeyCode::Char('j') | KeyCode::Down => Some(Command::MoveDown),
             KeyCode::Char('k') | KeyCode::Up => Some(Command::MoveUp),
+            KeyCode::Char('g') => Some(Command::JumpFirst),
+            KeyCode::Char('G') => Some(Command::JumpLast),
             KeyCode::PageDown => Some(Command::PageDown),
             KeyCode::PageUp => Some(Command::PageUp),
             _ => None,
@@ -165,6 +171,8 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
             KeyCode::Char('N') => Some(Command::NextHunk),
             KeyCode::Char('p') => Some(Command::PreviousHunk),
             KeyCode::Char('A') => Some(Command::ShowAttempts),
+            KeyCode::Char('H') => Some(Command::ScrollLeft),
+            KeyCode::Char('L') => Some(Command::ScrollRight),
             KeyCode::Left => Some(Command::SelectLeft),
             KeyCode::Right => Some(Command::SelectRight),
             _ => None,

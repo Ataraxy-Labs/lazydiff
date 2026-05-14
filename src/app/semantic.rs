@@ -9,7 +9,6 @@ use sem_core::{
 };
 
 const SEMANTIC_CHANGE_LIMIT: usize = 240;
-const SEMANTIC_DEFAULT_OPEN_FILE_COUNT: usize = 1;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SemanticDiff {
@@ -84,6 +83,120 @@ pub(crate) enum SemanticTreeRow {
     Status(String),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SemanticMapNode {
+    pub(crate) row_index: Option<usize>,
+    pub(crate) parent: Option<usize>,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
+pub(crate) fn build_semantic_map_nodes(rows: &[SemanticTreeRow]) -> Vec<SemanticMapNode> {
+    let mut nodes = vec![SemanticMapNode {
+        row_index: None,
+        parent: None,
+        x: 0,
+        y: 0,
+    }];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut depth_stack: Vec<Option<usize>> = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let depth = match row {
+            SemanticTreeRow::Directory { depth, .. }
+            | SemanticTreeRow::File { depth, .. }
+            | SemanticTreeRow::Entity { depth, .. } => *depth,
+            SemanticTreeRow::Status(_) => continue,
+        };
+        if depth_stack.len() <= depth {
+            depth_stack.resize(depth.saturating_add(1), None);
+        }
+        depth_stack.truncate(depth.saturating_add(1));
+        let parent = depth
+            .checked_sub(1)
+            .and_then(|parent_depth| depth_stack.get(parent_depth).copied().flatten());
+        let node_index = nodes.len();
+        let parent = parent.or(Some(0));
+        nodes.push(SemanticMapNode {
+            row_index: Some(row_index),
+            parent,
+            x: 0,
+            y: ((depth as i32).saturating_add(1)).saturating_mul(4),
+        });
+        children.push(Vec::new());
+        if let Some(parent) = parent {
+            children[parent].push(node_index);
+        }
+        depth_stack[depth] = Some(node_index);
+    }
+    if nodes.len() == 1 {
+        return Vec::new();
+    }
+
+    fn assign_tree_x(
+        node_index: usize,
+        nodes: &mut [SemanticMapNode],
+        children: &[Vec<usize>],
+        next_leaf: &mut i32,
+    ) -> i32 {
+        if children[node_index].is_empty() {
+            let x = *next_leaf;
+            *next_leaf = next_leaf.saturating_add(8);
+            nodes[node_index].x = x;
+            return x;
+        }
+        let mut first = None;
+        let mut last = None;
+        for child_index in &children[node_index] {
+            let child_x = assign_tree_x(*child_index, nodes, children, next_leaf);
+            first.get_or_insert(child_x);
+            last = Some(child_x);
+        }
+        let x = (first.unwrap_or(0) + last.unwrap_or(0)) / 2;
+        nodes[node_index].x = x;
+        x
+    }
+
+    let mut next_leaf = 0;
+    assign_tree_x(0, &mut nodes, &children, &mut next_leaf);
+    nodes
+}
+
+pub(crate) fn semantic_map_screen_positions(
+    nodes: &[SemanticMapNode],
+    area: Rect,
+    zoom: f32,
+    pan_x: i32,
+    pan_y: i32,
+) -> Vec<(i32, i32)> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let min_x = nodes.iter().map(|node| node.x).min().unwrap_or(0);
+    let max_x = nodes.iter().map(|node| node.x).max().unwrap_or(min_x);
+    let min_y = nodes.iter().map(|node| node.y).min().unwrap_or(0);
+    let max_y = nodes.iter().map(|node| node.y).max().unwrap_or(min_y);
+    let x_range = (max_x - min_x).max(1) as f32;
+    let y_range = (max_y - min_y).max(1) as f32;
+    let left = area.x.saturating_add(2) as i32;
+    let top = area.y.saturating_add(1) as i32;
+    let width = area.width.saturating_sub(5).max(1) as f32;
+    let height = area.height.saturating_sub(5).max(1) as f32;
+    let center_x = area.x as f32 + area.width as f32 / 2.0;
+    let center_y = area.y as f32 + area.height as f32 / 2.0;
+    let zoom = zoom.clamp(0.5, 4.0);
+
+    nodes
+        .iter()
+        .map(|node| {
+            let base_x = left as f32 + ((node.x - min_x) as f32 / x_range) * width;
+            let base_y = top as f32 + ((node.y - min_y) as f32 / y_range) * height;
+            let x = center_x + (base_x - center_x) * zoom + pan_x as f32;
+            let y = center_y + (base_y - center_y) * zoom + pan_y as f32;
+            (x.round() as i32, y.round() as i32)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SemanticViewport {
     pub(crate) total_rows: usize,
@@ -141,11 +254,6 @@ impl SemanticViewport {
             .scroll_y
             .min(viewport.total_rows.saturating_sub(viewport.visible_rows));
         viewport
-    }
-
-    fn row_at(self, viewport_row: usize) -> Option<usize> {
-        let row = self.scroll_y.saturating_add(viewport_row);
-        (viewport_row < self.visible_rows && row < self.total_rows).then_some(row)
     }
 }
 
@@ -462,14 +570,13 @@ impl App {
         route: &DiffSource,
         diff: &SemanticDiff,
     ) -> Vec<SemanticNodeKey> {
-        // Keep path scaffolding open so every changed file remains visible,
-        // but only open the first file's entities by default. Enter/`]` can
-        // still explode the focused branch on demand.
+        // Keep the map useful as a semantic graph: path scaffolding and all
+        // changed files are open by default so entity nodes are immediately
+        // reachable by mouse/keyboard.
         let mut keys = Self::semantic_directory_keys(route, diff);
         keys.extend(
             diff.files
                 .iter()
-                .take(SEMANTIC_DEFAULT_OPEN_FILE_COUNT)
                 .map(|file| SemanticNodeKey::file(route, &file.path)),
         );
         keys
@@ -618,7 +725,41 @@ impl App {
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
         self.set_semantic_viewport(viewport);
-        let Some(row_index) = viewport.row_at(row.saturating_sub(body.y) as usize) else {
+        let nodes = build_semantic_map_nodes(&rows);
+        let positions = semantic_map_screen_positions(
+            &nodes,
+            body,
+            self.semantic_map_zoom,
+            self.semantic_map_pan_x,
+            self.semantic_map_pan_y,
+        );
+        let selected_node_index = nodes
+            .iter()
+            .position(|node| node.row_index == Some(viewport.selected))
+            .unwrap_or(1.min(nodes.len().saturating_sub(1)));
+        if nodes.get(selected_node_index).is_none() {
+            return false;
+        }
+        let click_x = column as i32;
+        let click_y = row as i32;
+        let Some(row_index) = nodes
+            .iter()
+            .zip(positions.iter())
+            .filter_map(|(node, (x, y))| {
+                if *x < body.left() as i32
+                    || *x >= body.right() as i32
+                    || *y < body.top() as i32
+                    || *y >= body.bottom() as i32
+                {
+                    return None;
+                }
+                let row_index = node.row_index?;
+                let distance = x.abs_diff(click_x).saturating_add(y.abs_diff(click_y));
+                (distance <= 3).then_some((distance, row_index))
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, row_index)| row_index)
+        else {
             return false;
         };
         let Some(tree_row) = rows.get(row_index).cloned() else {
@@ -637,6 +778,52 @@ impl App {
             } => self.open_semantic_path(route, path, line, end_line, Some(change_type)),
             SemanticTreeRow::Status(_) => return false,
         }
+        true
+    }
+
+    pub(super) fn select_semantic_node_at(
+        &mut self,
+        route: &DiffSource,
+        area: Rect,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let body = semantic_tree_body_area(area);
+        if area.width == 0
+            || area.height == 0
+            || column < area.x
+            || column >= area.right()
+            || !contains_point(body, column, row)
+        {
+            return false;
+        }
+        let rows = self.semantic_tree_rows(route);
+        let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
+        self.set_semantic_viewport(viewport);
+        let nodes = build_semantic_map_nodes(&rows);
+        let positions = semantic_map_screen_positions(
+            &nodes,
+            body,
+            self.semantic_map_zoom,
+            self.semantic_map_pan_x,
+            self.semantic_map_pan_y,
+        );
+        let click_x = column as i32;
+        let click_y = row as i32;
+        let Some(row_index) = nodes
+            .iter()
+            .zip(positions.iter())
+            .filter_map(|(node, (x, y))| {
+                let row_index = node.row_index?;
+                let distance = x.abs_diff(click_x).saturating_add(y.abs_diff(click_y));
+                (distance <= 3).then_some((distance, row_index))
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, row_index)| row_index)
+        else {
+            return false;
+        };
+        self.semantic_selection = row_index.min(rows.len().saturating_sub(1));
         true
     }
 
@@ -661,8 +848,115 @@ impl App {
         self.set_semantic_viewport(viewport);
     }
 
+    pub(super) fn move_semantic_selection_structural(&mut self, code: KeyCode) -> bool {
+        let Some(route) = self.current_semantic_route() else {
+            return false;
+        };
+        let rows = self.semantic_tree_rows(&route);
+        if rows.is_empty() {
+            return false;
+        }
+        let nodes = build_semantic_map_nodes(&rows);
+        let Some(current_index) = nodes
+            .iter()
+            .position(|node| node.row_index == Some(self.semantic_selection.min(rows.len() - 1)))
+        else {
+            return false;
+        };
+        let current_x = nodes[current_index].x;
+        let current_y = nodes[current_index].y;
+        let nearest_on_level = |target_y: i32, direction: isize| {
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|(index, node)| {
+                    *index != current_index
+                        && node.row_index.is_some()
+                        && node.y == target_y
+                        && if direction.is_negative() {
+                            node.x < current_x
+                        } else if direction.is_positive() {
+                            node.x > current_x
+                        } else {
+                            true
+                        }
+                })
+                .min_by_key(|(_, node)| node.x.abs_diff(current_x))
+                .map(|(index, _)| index)
+        };
+        let nearest_vertical = |target_y: i32| {
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.row_index.is_some() && node.y == target_y)
+                .min_by_key(|(_, node)| node.x.abs_diff(current_x))
+                .map(|(index, _)| index)
+        };
+        let target_index = match code {
+            KeyCode::Char('h') | KeyCode::Left => nearest_on_level(current_y, -1),
+            KeyCode::Char('l') | KeyCode::Right => nearest_on_level(current_y, 1),
+            KeyCode::Char('k') | KeyCode::Up => nearest_vertical(current_y.saturating_sub(4)),
+            KeyCode::Char('j') | KeyCode::Down => nearest_vertical(current_y.saturating_add(4)),
+            _ => None,
+        };
+        let Some(target_row) = target_index
+            .and_then(|index| nodes.get(index))
+            .and_then(|node| node.row_index)
+        else {
+            return false;
+        };
+        self.semantic_selection = target_row.min(rows.len().saturating_sub(1));
+        let viewport = SemanticViewport::centered(
+            rows.len(),
+            self.semantic_visible_rows.max(1),
+            self.semantic_selection,
+        );
+        self.set_semantic_viewport(viewport);
+        true
+    }
+
     pub(super) fn scroll_semantic_tree(&mut self, delta: isize) {
         self.move_semantic_selection(delta);
+    }
+
+    pub(super) fn zoom_semantic_map_at(&mut self, area: Rect, column: u16, row: u16, delta: isize) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let old_zoom = self.semantic_map_zoom.clamp(0.5, 4.0);
+        let factor = if delta.is_positive() {
+            1.18
+        } else {
+            1.0 / 1.18
+        };
+        let new_zoom = (old_zoom * factor).clamp(0.5, 4.0);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            self.semantic_map_zoom = new_zoom;
+            return;
+        }
+        let center_x = area.x as f32 + area.width as f32 / 2.0;
+        let center_y = area.y as f32 + area.height as f32 / 2.0;
+        let cursor_x = column as f32;
+        let cursor_y = row as f32;
+        let ratio = new_zoom / old_zoom;
+        let new_pan_x =
+            cursor_x - center_x - (cursor_x - center_x - self.semantic_map_pan_x as f32) * ratio;
+        let new_pan_y =
+            cursor_y - center_y - (cursor_y - center_y - self.semantic_map_pan_y as f32) * ratio;
+        self.semantic_map_zoom = new_zoom;
+        self.semantic_map_pan_x = new_pan_x.round() as i32;
+        self.semantic_map_pan_y = new_pan_y.round() as i32;
+    }
+
+    pub(super) fn pan_semantic_map(&mut self, dx: i32, dy: i32) {
+        self.semantic_map_pan_x = self.semantic_map_pan_x.saturating_add(dx);
+        self.semantic_map_pan_y = self.semantic_map_pan_y.saturating_add(dy);
+    }
+
+    pub(super) fn reset_semantic_map_view(&mut self) {
+        self.semantic_map_zoom = 1.0;
+        self.semantic_map_pan_x = 0;
+        self.semantic_map_pan_y = 0;
     }
 
     pub(super) fn scroll_semantic_viewport_to(&mut self, row: u16, area: Rect) -> bool {

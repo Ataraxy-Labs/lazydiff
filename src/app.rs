@@ -34,7 +34,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, List, ListItem, ListState, StatefulWidget},
+    widgets::{Clear, StatefulWidget},
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
@@ -54,8 +54,8 @@ use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
 use crate::github::{
     fetch_commit_patch, fetch_pull_request_comments, fetch_pull_request_commits,
     fetch_pull_request_patch, github_auth_status, link_worktree_pr, list_branch_commits,
-    list_worktrees, login_with_device_flow, GitCommit, GitHubAuthStatus, GitHubComment,
-    GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
+    list_worktrees, login_with_device_flow, post_pull_request_comment, GitCommit, GitHubAuthStatus,
+    GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
 };
 use crate::persistence::{
     CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient, PersistedPullRequestComments,
@@ -83,8 +83,8 @@ mod modals;
 mod queries;
 mod semantic;
 pub(crate) use semantic::{
-    semantic_tree_body_area, SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow,
-    SemanticViewport,
+    build_semantic_map_nodes, semantic_map_screen_positions, semantic_tree_body_area,
+    SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow, SemanticViewport,
 };
 mod selection;
 use selection::{ScreenPoint, ScreenTextSelection};
@@ -119,6 +119,8 @@ pub(crate) struct App {
     viewport_height: usize,
     surface_scroll_y: usize,
     detail_tab: DetailTab,
+    queue_focus: QueuePane,
+    commit_focus: CommitPane,
     /// Index of the currently selected comment in the Comments reader.
     /// j/k step between comments (not lines); selected comment renders
     /// with elevated bg + amber rail.
@@ -165,6 +167,9 @@ pub(crate) struct App {
     semantic_visible_rows: usize,
     semantic_dragging_scrollbar: bool,
     semantic_scrollbar_drag_offset_virtual: usize,
+    semantic_map_zoom: f32,
+    semantic_map_pan_x: i32,
+    semantic_map_pan_y: i32,
     pending_semantic_focus: Option<SemanticFocusTarget>,
     review_sidebar_visible: bool,
     review_sidebar_focus: bool,
@@ -395,6 +400,8 @@ impl App {
             viewport_height: 1,
             surface_scroll_y: 0,
             detail_tab: DetailTab::Semantic,
+            queue_focus: QueuePane::List,
+            commit_focus: CommitPane::List,
             comments_selection: 0,
             dragging_scrollbar: false,
             active_scrollbar_drag: None,
@@ -438,6 +445,9 @@ impl App {
             semantic_visible_rows: 1,
             semantic_dragging_scrollbar: false,
             semantic_scrollbar_drag_offset_virtual: 0,
+            semantic_map_zoom: 1.0,
+            semantic_map_pan_x: 0,
+            semantic_map_pan_y: 0,
             pending_semantic_focus: None,
             review_sidebar_visible: true,
             review_sidebar_focus: false,
@@ -529,12 +539,19 @@ impl App {
                             needs_redraw = true;
                         }
                         Event::Mouse(mouse) => {
+                            let size = terminal.size()?;
                             // Plain cursor movement (no button held)
                             // would otherwise force a redraw on every
                             // pixel of motion — the app has no handler
-                            // for it, so swallow these cheaply.
-                            if !matches!(mouse.kind, MouseEventKind::Moved) {
-                                let size = terminal.size()?;
+                            // for it outside the semantic map, so swallow
+                            // non-semantic motion cheaply.
+                            if !matches!(mouse.kind, MouseEventKind::Moved)
+                                || self
+                                    .semantic_mouse_target_area(size.width, size.height)
+                                    .is_some_and(|(_, area)| {
+                                        contains_point(area, mouse.column, mouse.row)
+                                    })
+                            {
                                 self.handle_mouse(mouse, size.width, size.height);
                                 needs_redraw = true;
                             }
@@ -829,6 +846,9 @@ impl App {
             self.handle_file_picker_key(key.code, rows);
             return;
         }
+        if self.handle_pane_navigation_key(key) {
+            return;
+        }
         if self.surface == AppSurface::Diff {
             match key.code {
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -867,6 +887,15 @@ impl App {
         }
         if matches!(self.surface, AppSurface::Queue | AppSurface::DetailFull) {
             match key.code {
+                KeyCode::Enter
+                    if self.surface == AppSurface::Queue
+                        && self.queue_focus == QueuePane::Detail
+                        && self.detail_tab == DetailTab::Semantic =>
+                {
+                    if self.open_selected_semantic_row() {
+                        return;
+                    }
+                }
                 KeyCode::Char(' ') if self.detail_tab == DetailTab::Semantic => {
                     if self.toggle_selected_semantic_viewed() {
                         return;
@@ -880,27 +909,29 @@ impl App {
                         return;
                     }
                 }
-                KeyCode::Left => {
+                KeyCode::Char('1') if self.detail_shortcuts_active() => {
                     self.set_detail_tab(DetailTab::Semantic);
                     return;
                 }
-                KeyCode::Right => {
+                KeyCode::Char('2') if self.detail_shortcuts_active() => {
                     self.set_detail_tab(DetailTab::Description);
                     return;
                 }
-                KeyCode::Char('1') => {
-                    self.set_detail_tab(DetailTab::Semantic);
+                KeyCode::Char('0')
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                {
+                    self.reset_semantic_map_view();
                     return;
                 }
-                KeyCode::Char('2') => {
-                    self.set_detail_tab(DetailTab::Description);
-                    return;
-                }
-                KeyCode::Char('[') if self.detail_tab == DetailTab::Semantic => {
+                KeyCode::Char('[')
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                {
                     self.collapse_focused_semantic_branch();
                     return;
                 }
-                KeyCode::Char(']') if self.detail_tab == DetailTab::Semantic => {
+                KeyCode::Char(']')
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                {
                     self.expand_focused_semantic_branch();
                     return;
                 }
@@ -922,6 +953,23 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        if key.modifiers.is_empty()
+            && self.semantic_map_keyboard_active()
+            && matches!(
+                key.code,
+                KeyCode::Char('h')
+                    | KeyCode::Char('j')
+                    | KeyCode::Char('k')
+                    | KeyCode::Char('l')
+                    | KeyCode::Left
+                    | KeyCode::Down
+                    | KeyCode::Up
+                    | KeyCode::Right
+            )
+            && self.move_semantic_selection_structural(key.code)
+        {
+            return;
         }
         if let Some(command) = self.command_for_key(key) {
             self.execute_command(command, rows);
@@ -952,16 +1000,72 @@ impl App {
         }
     }
 
+    fn handle_pane_navigation_key(&mut self, key: KeyEvent) -> bool {
+        let shift_tab = matches!(key.code, KeyCode::BackTab)
+            || (matches!(key.code, KeyCode::Tab | KeyCode::Char('\t'))
+                && key.modifiers.contains(KeyModifiers::SHIFT));
+        let plain_tab = matches!(key.code, KeyCode::Tab | KeyCode::Char('\t'))
+            && !key.modifiers.contains(KeyModifiers::SHIFT);
+        if !shift_tab && !plain_tab {
+            return false;
+        }
+        if shift_tab {
+            self.move_pane_focus(-1)
+        } else {
+            self.move_pane_focus(1)
+        }
+    }
+
+    fn detail_shortcuts_active(&self) -> bool {
+        self.surface == AppSurface::DetailFull
+            || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
+    }
+
+    fn semantic_map_keyboard_active(&self) -> bool {
+        self.detail_tab == DetailTab::Semantic
+            && (self.surface == AppSurface::DetailFull
+                || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
+                || (self.surface == AppSurface::CommitList
+                    && self.commit_focus == CommitPane::Detail))
+    }
+
+    fn move_pane_focus(&mut self, _direction: isize) -> bool {
+        match self.surface {
+            AppSurface::Queue => {
+                self.queue_focus = match self.queue_focus {
+                    QueuePane::List => QueuePane::Detail,
+                    QueuePane::Detail => QueuePane::List,
+                };
+                true
+            }
+            AppSurface::Diff if self.review_sidebar_visible => {
+                self.review_sidebar_focus = !self.review_sidebar_focus;
+                if self.review_sidebar_focus {
+                    self.sync_review_sidebar_selection_to_current_file();
+                }
+                true
+            }
+            AppSurface::CommitList => {
+                self.commit_focus = match self.commit_focus {
+                    CommitPane::List => CommitPane::Detail,
+                    CommitPane::Detail => CommitPane::List,
+                };
+                true
+            }
+            AppSurface::Comments | AppSurface::DetailFull | AppSurface::Diff => false,
+        }
+    }
+
     /// Half-page scroll dispatcher used by ctrl-d / ctrl-u from any surface.
     fn page_surface_half(&mut self, direction: isize, rows: usize) {
         match self.surface {
             AppSurface::Queue => {
                 let half = (self.viewport_height.max(2) / 2).max(1) as isize;
-                self.move_home_selection(direction.saturating_mul(half));
+                self.move_queue_focused(direction.saturating_mul(half));
             }
             AppSurface::CommitList => {
                 let half = (self.viewport_height.max(2) / 2).max(1) as isize;
-                self.move_commit_selection(direction.saturating_mul(half));
+                self.move_commit_focused(direction.saturating_mul(half));
             }
             AppSurface::Comments => {
                 let half = (self.viewport_height.max(2) / 2).max(1) as isize;
@@ -1120,8 +1224,8 @@ impl App {
                 self.state.selected_row = 0;
                 self.state.clear_mouse_selection();
             }
-            Command::JumpFirst => self.state.scroll_y = 0,
-            Command::JumpLast => self.state.scroll_y = rows.saturating_sub(self.viewport_height),
+            Command::JumpFirst => self.jump_focused_boundary(false, rows),
+            Command::JumpLast => self.jump_focused_boundary(true, rows),
             Command::PreviousFile => self.jump_relative_file(-1, rows),
             Command::NextFile => self.jump_relative_file(1, rows),
             Command::PreviousHunk => self.jump_relative_hunk(-1, rows),
@@ -1149,6 +1253,80 @@ impl App {
             "scroll_x delta={delta} before={before} after={} surface={:?} sidebar_focus={}",
             self.state.scroll_x, self.surface, self.review_sidebar_focus
         ));
+    }
+
+    fn jump_focused_boundary(&mut self, last: bool, rows: usize) {
+        match self.surface {
+            AppSurface::Queue => match self.queue_focus {
+                QueuePane::List => {
+                    self.home_selection = if last {
+                        self.home_work_items().len().saturating_sub(1)
+                    } else {
+                        0
+                    };
+                    self.home_selection_changed_at = Instant::now();
+                    self.surface_scroll_y = 0;
+                    self.semantic_scroll_y = 0;
+                    self.semantic_selection = 0;
+                    self.revalidate_selected_semantic_diff();
+                }
+                QueuePane::Detail => {
+                    if self.detail_tab == DetailTab::Semantic {
+                        self.semantic_selection = if last {
+                            self.semantic_tree_rows(&self.current_semantic_route().unwrap_or_else(
+                                || {
+                                    self.selected_work_item()
+                                        .map(|item| item.route(self))
+                                        .unwrap_or_else(|| self.diff_source.clone())
+                                },
+                            ))
+                            .len()
+                            .saturating_sub(1)
+                        } else {
+                            0
+                        };
+                        self.semantic_scroll_y = self.semantic_selection;
+                    } else {
+                        self.surface_scroll_y = if last { usize::MAX / 2 } else { 0 };
+                    }
+                }
+            },
+            AppSurface::CommitList => match self.commit_focus {
+                CommitPane::List => {
+                    self.commit_selection = if last {
+                        self.commits.len().saturating_sub(1)
+                    } else {
+                        0
+                    };
+                }
+                CommitPane::Detail => {
+                    self.semantic_selection = if last { usize::MAX / 2 } else { 0 };
+                    self.semantic_scroll_y = self.semantic_selection;
+                }
+            },
+            AppSurface::Comments => {
+                self.comments_selection = if last {
+                    self.current_comment_count().saturating_sub(1)
+                } else {
+                    0
+                };
+            }
+            AppSurface::DetailFull => {
+                if self.detail_tab == DetailTab::Semantic {
+                    self.semantic_selection = if last { usize::MAX / 2 } else { 0 };
+                    self.semantic_scroll_y = self.semantic_selection;
+                } else {
+                    self.surface_scroll_y = if last { usize::MAX / 2 } else { 0 };
+                }
+            }
+            AppSurface::Diff => {
+                self.state.scroll_y = if last {
+                    rows.saturating_sub(self.viewport_height)
+                } else {
+                    0
+                }
+            }
+        }
     }
 
     fn go_back(&mut self) {
@@ -1208,8 +1386,8 @@ impl App {
 
     fn move_surface_down(&mut self, rows: usize) {
         match self.surface {
-            AppSurface::Queue => self.move_home_selection(1),
-            AppSurface::CommitList => self.move_commit_selection(1),
+            AppSurface::Queue => self.move_queue_focused(1),
+            AppSurface::CommitList => self.move_commit_focused(1),
             AppSurface::Comments => self.move_comments_selection(1),
             AppSurface::DetailFull => {
                 if self.detail_tab == DetailTab::Semantic {
@@ -1224,8 +1402,8 @@ impl App {
 
     fn move_surface_up(&mut self, rows: usize) {
         match self.surface {
-            AppSurface::Queue => self.move_home_selection(-1),
-            AppSurface::CommitList => self.move_commit_selection(-1),
+            AppSurface::Queue => self.move_queue_focused(-1),
+            AppSurface::CommitList => self.move_commit_focused(-1),
             AppSurface::Comments => self.move_comments_selection(-1),
             AppSurface::DetailFull => {
                 if self.detail_tab == DetailTab::Semantic {
@@ -1235,6 +1413,26 @@ impl App {
                 }
             }
             AppSurface::Diff => self.move_active_relative(-1, rows),
+        }
+    }
+
+    fn move_queue_focused(&mut self, delta: isize) {
+        match self.queue_focus {
+            QueuePane::List => self.move_home_selection(delta),
+            QueuePane::Detail => {
+                if self.detail_tab == DetailTab::Semantic {
+                    self.move_semantic_selection(delta);
+                } else {
+                    self.surface_scroll_y = self.surface_scroll_y.saturating_add_signed(delta);
+                }
+            }
+        }
+    }
+
+    fn move_commit_focused(&mut self, delta: isize) {
+        match self.commit_focus {
+            CommitPane::List => self.move_commit_selection(delta),
+            CommitPane::Detail => self.move_semantic_selection(delta),
         }
     }
 
@@ -1276,7 +1474,7 @@ impl App {
     fn page_surface(&mut self, direction: isize, rows: usize) {
         match self.surface {
             AppSurface::CommitList => {
-                self.move_commit_selection(direction * self.viewport_height.max(1) as isize)
+                self.move_commit_focused(direction * self.viewport_height.max(1) as isize)
             }
             AppSurface::Comments => {
                 self.move_comments_selection(direction * self.viewport_height.max(1) as isize)
@@ -1296,9 +1494,7 @@ impl App {
                 self.scroll_relative(direction * self.viewport_height as isize, rows)
             }
             AppSurface::Queue => {
-                self.surface_scroll_y = self
-                    .surface_scroll_y
-                    .saturating_add_signed(direction * self.viewport_height.max(1) as isize)
+                self.move_queue_focused(direction * self.viewport_height.max(1) as isize)
             }
         }
     }
@@ -2982,6 +3178,18 @@ enum TerminalFlow {
 enum DetailTab {
     Semantic,
     Description,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuePane {
+    List,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitPane {
+    List,
+    Detail,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
