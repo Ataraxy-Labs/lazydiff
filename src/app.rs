@@ -3,8 +3,8 @@ use std::{
     fs::OpenOptions,
     hash::{Hash, Hasher},
     io::{self, Write},
-    path::Path,
-    process::Command as ProcessCommand,
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -12,12 +12,16 @@ use std::{
 
 use color_eyre::Result;
 use crossterm::{
+    cursor::{MoveTo, Show},
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear as TerminalClear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use lazydiff_diffs::{
     add_pierre_highlights, parse_unified_diff, render_scrollbar, row_count_for_mode, DiffDocument,
@@ -579,34 +583,67 @@ impl App {
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
+            DisableMouseCapture,
+            Show,
             LeaveAlternateScreen,
-            DisableMouseCapture
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0)
         )?;
+        terminal.backend_mut().flush()?;
 
         let result = match flow {
-            TerminalFlow::GitHubLogin => login_with_device_flow().map(|user| user.login),
+            TerminalFlow::GitHubLogin => {
+                TerminalFlowResult::GitHubLogin(login_with_device_flow().map(|user| user.login))
+            }
+            TerminalFlow::OpenEditor { command, cwd } => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                TerminalFlowResult::Editor(
+                    match ProcessCommand::new(shell)
+                        .arg("-c")
+                        .arg(command)
+                        .current_dir(cwd)
+                        .stdin(Stdio::inherit())
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status()
+                    {
+                        Ok(status) if status.success() => Ok(()),
+                        Ok(status) => Err(format!("editor exited with {status}")),
+                        Err(error) => Err(format!("failed to open editor: {error}")),
+                    },
+                )
+            }
         };
 
         execute!(
             terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableMouseCapture
+            EnableMouseCapture,
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0)
         )?;
         enable_raw_mode()?;
         terminal.clear()?;
+        while event::poll(Duration::ZERO)? {
+            let _ = event::read()?;
+        }
 
         self.github_auth = github_auth_status();
         match result {
-            Ok(login) if self.github_auth.can_load_github() => {
+            TerminalFlowResult::GitHubLogin(Ok(login)) if self.github_auth.can_load_github() => {
                 self.github.viewer = Some(login);
                 self.github.status = GitHubQueueStatus::Loading;
                 self.revalidate_queue();
             }
-            Ok(_) => {
+            TerminalFlowResult::GitHubLogin(Ok(_)) => {
                 self.github.status = GitHubQueueStatus::MissingToken;
             }
-            Err(error) => {
+            TerminalFlowResult::GitHubLogin(Err(error)) => {
                 self.github.status = GitHubQueueStatus::Error(error);
+            }
+            TerminalFlowResult::Editor(Ok(())) => self.revalidate_local_diff(),
+            TerminalFlowResult::Editor(Err(error)) => {
+                self.branch_operation_status = Some(error);
             }
         }
         Ok(())
@@ -1210,6 +1247,7 @@ impl App {
             }
             Command::OpenDiff => self.open_selected_diff(),
             Command::OpenInBrowser => self.open_selected_in_browser(),
+            Command::OpenInEditor => self.open_current_file_in_editor(),
             Command::OpenCommandPalette => self.open_root_palette(),
             Command::OpenFileSearch => self.open_file_search(),
             Command::OpenTextSearch => self.open_text_search(),
@@ -2159,6 +2197,93 @@ impl App {
         if let Err(error) = ProcessCommand::new(opener).arg(&url).spawn() {
             self.branch_operation_status = Some(format!("failed to open browser: {error}"));
         }
+    }
+
+    fn open_current_file_in_editor(&mut self) {
+        if self.surface != AppSurface::Diff {
+            return;
+        }
+        let DiffSource::LocalWorktree(route) = &self.diff_source else {
+            return;
+        };
+        let repo_path = PathBuf::from(&route.repo_path);
+        if !repo_path.is_dir() {
+            return;
+        }
+
+        let line_target = self.line_target_at(self.state.selected_row);
+        let file_index = line_target
+            .as_ref()
+            .map(|target| target.file_index)
+            .or_else(|| self.current_file_index());
+        let Some(file) = file_index.and_then(|index| self.document.files.get(index)) else {
+            return;
+        };
+        let path = if file.new_path == "/dev/null" {
+            file.old_path.as_deref().unwrap_or(file.new_path.as_str())
+        } else {
+            file.new_path.as_str()
+        };
+        if path == "/dev/null" {
+            return;
+        }
+
+        let file_path = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            repo_path.join(path)
+        };
+        let line = line_target.and_then(|target| target.new_line.or(target.old_line));
+        self.pending_terminal_flow = Some(TerminalFlow::OpenEditor {
+            command: self.editor_command(&file_path, line, &repo_path),
+            cwd: repo_path,
+        });
+    }
+
+    fn editor_command(&self, path: &Path, line: Option<u32>, repo_path: &Path) -> String {
+        let editor = self.guess_default_editor(repo_path);
+        let preset = editor_preset_name(&editor);
+        let filename = shell_quote(&path.display().to_string());
+        let Some(line) = line.filter(|line| *line > 0) else {
+            return match preset.as_str() {
+                "code" => format!("{editor} --reuse-window -- {filename}"),
+                _ => format!("{editor} -- {filename}"),
+            };
+        };
+
+        match preset.as_str() {
+            "code" => format!("{editor} --reuse-window --goto -- {filename}:{line}"),
+            "subl" | "zed" | "hx" | "helix" => format!("{editor} -- {filename}:{line}"),
+            "bbedit" => format!("{editor} +{line} -- {filename}"),
+            "xed" => format!("{editor} --line {line} -- {filename}"),
+            _ => format!("{editor} +{line} -- {filename}"),
+        }
+    }
+
+    fn guess_default_editor(&self, repo_path: &Path) -> String {
+        if let Ok(output) = ProcessCommand::new("git")
+            .args(["config", "--get", "core.editor"])
+            .current_dir(repo_path)
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(editor) = String::from_utf8(output.stdout) {
+                    let editor = editor.trim();
+                    if !editor.is_empty() {
+                        return editor.to_string();
+                    }
+                }
+            }
+        }
+
+        ["GIT_EDITOR", "VISUAL", "EDITOR"]
+            .into_iter()
+            .find_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "vim".to_string())
     }
 
     fn run_selected_branch_operation(&mut self, operation: BranchOperation) {
@@ -3160,6 +3285,28 @@ impl App {
     }
 }
 
+fn editor_preset_name(editor: &str) -> String {
+    let first_word = editor
+        .split_whitespace()
+        .next()
+        .unwrap_or(editor)
+        .trim_matches(['\'', '"']);
+    let name = Path::new(first_word)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(first_word);
+    match name {
+        "codium" | "code-insiders" => "code".to_string(),
+        "vim" | "nvim" | "vi" | "lvim" | "nano" | "micro" | "kak" | "hx" | "helix" | "code"
+        | "subl" | "bbedit" | "xed" | "zed" => name.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppSurface {
     Queue,
@@ -3169,9 +3316,16 @@ enum AppSurface {
     Diff,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TerminalFlow {
     GitHubLogin,
+    OpenEditor { command: String, cwd: PathBuf },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalFlowResult {
+    GitHubLogin(std::result::Result<String, String>),
+    Editor(std::result::Result<(), String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

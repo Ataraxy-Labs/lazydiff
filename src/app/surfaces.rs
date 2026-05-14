@@ -2597,7 +2597,7 @@ impl App {
                 Span::styled(" jump", label),
             ])
         } else {
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(" esc", key),
                 Span::styled(" clear  ", label),
                 Span::styled("↑↓", key),
@@ -2608,6 +2608,12 @@ impl App {
                 Span::styled(" instruct  ", label),
                 Span::styled("n", key),
                 Span::styled(" note  ", label),
+            ];
+            if matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
+                spans.push(Span::styled("e", key));
+                spans.push(Span::styled(" vim  ", label));
+            }
+            spans.extend([
                 Span::styled("enter", key),
                 Span::styled(" discuss  ", label),
                 Span::styled(":", key),
@@ -2627,7 +2633,8 @@ impl App {
                 Span::styled("A", key),
                 Span::styled(" attempts", label),
                 Span::styled(current, label),
-            ])
+            ]);
+            Line::from(spans)
         };
         frame.render_widget(line.style(Style::new().bg(bg)), area);
     }
