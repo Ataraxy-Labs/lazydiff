@@ -1,9 +1,10 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    fs::OpenOptions,
     hash::{Hash, Hasher},
-    io,
-    path::Path,
-    process::Command as ProcessCommand,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -11,18 +12,22 @@ use std::{
 
 use color_eyre::Result;
 use crossterm::{
+    cursor::{MoveTo, Show},
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear as TerminalClear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use lazydiff_diffs::{
-    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffLine,
-    DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
-    DiffViewState, DiffWidget, FileDiff, InlineDiffSpan, SliderState, SyntaxHighlightKind,
-    SyntaxSpan, TextSelection, TextViewport,
+    add_pierre_highlights, parse_unified_diff, render_scrollbar, row_count_for_mode, DiffDocument,
+    DiffLine, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
+    DiffViewState, DiffWidget, FileDiff, FileDiffKind, InlineDiffSpan, SliderState,
+    SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar,
 };
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -33,12 +38,11 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, List, ListItem, ListState, StatefulWidget},
+    widgets::{Clear, StatefulWidget},
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 
-const SPLIT_TEXT_COLUMN: u16 = 8;
 const BODY_TOP: u16 = 2;
 const APP_TOP_PADDING: u16 = 1;
 const STICKY_FILE_OVERLAY_ROWS: usize = 2;
@@ -54,8 +58,8 @@ use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
 use crate::github::{
     fetch_commit_patch, fetch_pull_request_comments, fetch_pull_request_commits,
     fetch_pull_request_patch, github_auth_status, link_worktree_pr, list_branch_commits,
-    list_worktrees, login_with_device_flow, GitCommit, GitHubAuthStatus, GitHubComment,
-    GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
+    list_worktrees, login_with_device_flow, post_pull_request_comment, GitCommit, GitHubAuthStatus,
+    GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
 };
 use crate::persistence::{
     CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient, PersistedPullRequestComments,
@@ -71,7 +75,8 @@ use crate::text::{
 };
 use crate::ui::{
     centered_rect, contains_point, draw_box, draw_horizontal_rule, draw_vertical_rule, fill_rect,
-    render_home_rule, right_aligned_text, set_symbol, short_path, truncate, truncate_middle,
+    list_item_rows, list_row_at, render_home_rule, right_aligned_text, set_symbol, short_path,
+    truncate, truncate_middle, ListGeometryBuilder, ListRowGeometry, ListRowKind,
 };
 
 mod finder;
@@ -82,9 +87,11 @@ mod modals;
 mod queries;
 mod semantic;
 pub(crate) use semantic::{
-    semantic_tree_body_area, SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow,
-    SemanticViewport,
+    build_semantic_map_nodes, semantic_map_screen_positions, semantic_tree_body_area,
+    SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow, SemanticViewport,
 };
+mod selection;
+use selection::{ScreenPoint, ScreenTextSelection};
 mod surfaces;
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
@@ -116,13 +123,20 @@ pub(crate) struct App {
     viewport_height: usize,
     surface_scroll_y: usize,
     detail_tab: DetailTab,
+    queue_focus: QueuePane,
+    commit_focus: CommitPane,
     /// Index of the currently selected comment in the Comments reader.
     /// j/k step between comments (not lines); selected comment renders
     /// with elevated bg + amber rail.
     comments_selection: usize,
     dragging_scrollbar: bool,
+    active_scrollbar_drag: Option<ScrollbarDrag>,
     selecting_text: bool,
     text_selection_dragged: bool,
+    pending_screen_selection: Option<(ScreenPoint, Option<Rect>)>,
+    screen_selection: Option<ScreenTextSelection>,
+    screen_selection_bounds: Option<Rect>,
+    screen_text: Vec<String>,
     file_picker_open: bool,
     finder_kind: FinderKind,
     file_picker_selection: usize,
@@ -132,7 +146,6 @@ pub(crate) struct App {
     home_selection_changed_at: Instant,
     theme_variant: crate::design_system::ThemeVariant,
     attempt_modal_open: bool,
-    last_selection_mouse: Option<(usize, usize)>,
     scrollbar_drag_offset_virtual: usize,
     session: ReviewSession,
     store: ReviewStore,
@@ -158,6 +171,9 @@ pub(crate) struct App {
     semantic_visible_rows: usize,
     semantic_dragging_scrollbar: bool,
     semantic_scrollbar_drag_offset_virtual: usize,
+    semantic_map_zoom: f32,
+    semantic_map_pan_x: i32,
+    semantic_map_pan_y: i32,
     pending_semantic_focus: Option<SemanticFocusTarget>,
     review_sidebar_visible: bool,
     review_sidebar_focus: bool,
@@ -190,11 +206,24 @@ pub(crate) struct TransientFocus {
     pub(crate) started_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollbarTarget {
+    DetailDescription,
+    Comments,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScrollbarDrag {
+    pub(crate) target: ScrollbarTarget,
+    pub(crate) offset_virtual: usize,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticFocusTarget {
     pub(crate) route: DiffSource,
     pub(crate) path: String,
     pub(crate) line: Option<usize>,
+    pub(crate) end_line: Option<usize>,
     pub(crate) change_type: Option<String>,
 }
 
@@ -219,13 +248,13 @@ enum ReviewTreeRow {
         name: String,
         depth: usize,
         collapsed: bool,
-        file_count: usize,
     },
     File {
         key: ReviewTreeKey,
         file_index: usize,
         path: String,
         name: String,
+        status: FileDiffKind,
         depth: usize,
         collapsed: bool,
         semantic_count: usize,
@@ -240,6 +269,26 @@ enum ReviewTreeRow {
         change_type: String,
         line: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone)]
+enum GroupedWorkItemRow {
+    Header {
+        label: String,
+        geometry: ListRowGeometry,
+    },
+    Item {
+        index: usize,
+        geometry: ListRowGeometry,
+    },
+}
+
+impl GroupedWorkItemRow {
+    fn area(&self) -> Rect {
+        match self {
+            Self::Header { geometry, .. } | Self::Item { geometry, .. } => geometry.area,
+        }
+    }
 }
 
 const TRANSIENT_FOCUS_DURATION: Duration = Duration::from_millis(900);
@@ -332,9 +381,12 @@ impl App {
         // Read the persisted theme synchronously so the first paint
         // already uses the user's preferred variant — no warm→cool
         // flicker once the async revalidate finishes.
-        let theme_variant = store
-            .restore_theme_variant()
-            .unwrap_or(crate::design_system::ThemeVariant::Warm);
+        let theme_variant = std::env::var("LAZYDIFF_THEME")
+            .ok()
+            .or_else(|| std::env::var("LUMEN_THEME").ok())
+            .and_then(|label| crate::design_system::ThemeVariant::from_label(&label))
+            .or_else(|| store.restore_theme_variant())
+            .unwrap_or(crate::design_system::ThemeVariant::DefaultDark);
         let mut app = Self {
             path,
             project_label,
@@ -352,10 +404,17 @@ impl App {
             viewport_height: 1,
             surface_scroll_y: 0,
             detail_tab: DetailTab::Semantic,
+            queue_focus: QueuePane::List,
+            commit_focus: CommitPane::List,
             comments_selection: 0,
             dragging_scrollbar: false,
+            active_scrollbar_drag: None,
             selecting_text: false,
             text_selection_dragged: false,
+            pending_screen_selection: None,
+            screen_selection: None,
+            screen_selection_bounds: None,
+            screen_text: Vec::new(),
             file_picker_open: false,
             finder_kind: FinderKind::Files,
             file_picker_selection: 0,
@@ -365,7 +424,6 @@ impl App {
             home_selection_changed_at: Instant::now(),
             theme_variant,
             attempt_modal_open: false,
-            last_selection_mouse: None,
             scrollbar_drag_offset_virtual: 0,
             session,
             store,
@@ -391,6 +449,9 @@ impl App {
             semantic_visible_rows: 1,
             semantic_dragging_scrollbar: false,
             semantic_scrollbar_drag_offset_virtual: 0,
+            semantic_map_zoom: 1.0,
+            semantic_map_pan_x: 0,
+            semantic_map_pan_y: 0,
             pending_semantic_focus: None,
             review_sidebar_visible: true,
             review_sidebar_focus: false,
@@ -454,6 +515,7 @@ impl App {
 
             let poll_interval = if self.query_client.is_fetching()
                 || self.dragging_scrollbar
+                || self.active_scrollbar_drag.is_some()
                 || self.selecting_text
             {
                 ACTIVE_POLL_INTERVAL
@@ -473,6 +535,7 @@ impl App {
                 loop {
                     match event::read()? {
                         Event::Key(key) => {
+                            Self::debug_key_event(key);
                             self.handle_key(key);
                             if let Some(flow) = self.pending_terminal_flow.take() {
                                 self.run_terminal_flow(terminal, flow)?;
@@ -480,12 +543,19 @@ impl App {
                             needs_redraw = true;
                         }
                         Event::Mouse(mouse) => {
+                            let size = terminal.size()?;
                             // Plain cursor movement (no button held)
                             // would otherwise force a redraw on every
                             // pixel of motion — the app has no handler
-                            // for it, so swallow these cheaply.
-                            if !matches!(mouse.kind, MouseEventKind::Moved) {
-                                let size = terminal.size()?;
+                            // for it outside the semantic map, so swallow
+                            // non-semantic motion cheaply.
+                            if !matches!(mouse.kind, MouseEventKind::Moved)
+                                || self
+                                    .semantic_mouse_target_area(size.width, size.height)
+                                    .is_some_and(|(_, area)| {
+                                        contains_point(area, mouse.column, mouse.row)
+                                    })
+                            {
                                 self.handle_mouse(mouse, size.width, size.height);
                                 needs_redraw = true;
                             }
@@ -513,34 +583,67 @@ impl App {
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
+            DisableMouseCapture,
+            Show,
             LeaveAlternateScreen,
-            DisableMouseCapture
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0)
         )?;
+        terminal.backend_mut().flush()?;
 
         let result = match flow {
-            TerminalFlow::GitHubLogin => login_with_device_flow().map(|user| user.login),
+            TerminalFlow::GitHubLogin => {
+                TerminalFlowResult::GitHubLogin(login_with_device_flow().map(|user| user.login))
+            }
+            TerminalFlow::OpenEditor { command, cwd } => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                TerminalFlowResult::Editor(
+                    match ProcessCommand::new(shell)
+                        .arg("-c")
+                        .arg(command)
+                        .current_dir(cwd)
+                        .stdin(Stdio::inherit())
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status()
+                    {
+                        Ok(status) if status.success() => Ok(()),
+                        Ok(status) => Err(format!("editor exited with {status}")),
+                        Err(error) => Err(format!("failed to open editor: {error}")),
+                    },
+                )
+            }
         };
 
         execute!(
             terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableMouseCapture
+            EnableMouseCapture,
+            TerminalClear(ClearType::All),
+            MoveTo(0, 0)
         )?;
         enable_raw_mode()?;
         terminal.clear()?;
+        while event::poll(Duration::ZERO)? {
+            let _ = event::read()?;
+        }
 
         self.github_auth = github_auth_status();
         match result {
-            Ok(login) if self.github_auth.can_load_github() => {
+            TerminalFlowResult::GitHubLogin(Ok(login)) if self.github_auth.can_load_github() => {
                 self.github.viewer = Some(login);
                 self.github.status = GitHubQueueStatus::Loading;
                 self.revalidate_queue();
             }
-            Ok(_) => {
+            TerminalFlowResult::GitHubLogin(Ok(_)) => {
                 self.github.status = GitHubQueueStatus::MissingToken;
             }
-            Err(error) => {
+            TerminalFlowResult::GitHubLogin(Err(error)) => {
                 self.github.status = GitHubQueueStatus::Error(error);
+            }
+            TerminalFlowResult::Editor(Ok(())) => self.revalidate_local_diff(),
+            TerminalFlowResult::Editor(Err(error)) => {
+                self.branch_operation_status = Some(error);
             }
         }
         Ok(())
@@ -576,26 +679,31 @@ impl App {
             AppSurface::Queue => {
                 self.render_home(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::CommitList => {
                 self.render_commit_list(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::DetailFull => {
                 self.render_detail_full(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::Comments => {
                 self.render_comments_surface(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::Diff if self.should_render_diff_placeholder() => {
                 self.render_diff_placeholder(frame);
                 self.render_global_overlays(frame);
+                self.finish_render(frame);
                 return;
             }
             AppSurface::Diff => {}
@@ -628,6 +736,7 @@ impl App {
             palette.rule,
             palette.bg,
         );
+        self.render_diff_pane_slider(frame, divider, diff_body, palette);
         StatefulWidget::render(
             DiffWidget::new(&self.document).theme(palette.theme.diff_theme()),
             diff_body,
@@ -655,6 +764,75 @@ impl App {
         self.render_comment_preview(frame, comment_preview);
         self.render_footer(frame, footer);
         self.render_global_overlays(frame);
+        self.finish_render(frame);
+    }
+
+    fn finish_render(&mut self, frame: &mut Frame) {
+        self.capture_screen_text(frame);
+        self.render_screen_selection(frame);
+    }
+
+    fn render_screen_selection(&self, frame: &mut Frame) {
+        let Some(selection) = self.screen_selection else {
+            return;
+        };
+        let area = frame.area();
+        let bounds = self.screen_selection_bounds.unwrap_or(area);
+        let (start, end) = selection.normalized();
+        if start.y >= bounds.bottom() || end.y < bounds.y {
+            return;
+        }
+        let style = crate::design_system::QuiverTheme::for_variant(self.theme_variant)
+            .typography
+            .style(
+                TextRole::Selected,
+                self.home_palette().theme,
+                self.home_palette().bg,
+            );
+        for y in start.y.max(bounds.y)..=end.y.min(bounds.bottom().saturating_sub(1)) {
+            let x_start = if y == start.y { start.x } else { bounds.x };
+            let x_end = if y == end.y {
+                end.x
+            } else {
+                bounds.right().saturating_sub(1)
+            };
+            if x_start > x_end {
+                continue;
+            }
+            let Some((trimmed_start, trimmed_end)) = selection::selectable_row_range(
+                self.screen_text
+                    .get(y as usize)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                x_start.max(bounds.x) as usize,
+                x_end.min(bounds.right().saturating_sub(1)) as usize,
+            ) else {
+                continue;
+            };
+            for x in trimmed_start as u16..=trimmed_end as u16 {
+                frame.buffer_mut()[(x, y)].set_style(style);
+            }
+        }
+    }
+
+    fn capture_screen_text(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let mut lines = Vec::with_capacity(area.height as usize);
+        for y in area.top()..area.bottom() {
+            let mut line = String::new();
+            for x in area.left()..area.right() {
+                line.push_str(frame.buffer_mut()[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        self.screen_text = lines;
+    }
+
+    fn screen_point_is_text(&self, point: ScreenPoint) -> bool {
+        self.screen_text
+            .get(point.y as usize)
+            .and_then(|line| line.chars().nth(point.x as usize))
+            .is_some_and(selection::is_selectable_text_char)
     }
 
     fn render_global_overlays(&mut self, frame: &mut Frame) {
@@ -705,8 +883,28 @@ impl App {
             self.handle_file_picker_key(key.code, rows);
             return;
         }
+        if self.handle_pane_navigation_key(key) {
+            return;
+        }
         if self.surface == AppSurface::Diff {
             match key.code {
+                KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.scroll_active_pane_horizontally(-8);
+                    return;
+                }
+                // Most terminals encode Ctrl-H as ASCII backspace, so crossterm
+                // may surface it as Backspace instead of Char('h') + CONTROL.
+                KeyCode::Backspace
+                    if key.modifiers.is_empty()
+                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    self.scroll_active_pane_horizontally(-8);
+                    return;
+                }
+                KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.scroll_active_pane_horizontally(8);
+                    return;
+                }
                 KeyCode::Char('s') => {
                     self.review_sidebar_visible = !self.review_sidebar_visible;
                     self.review_sidebar_focus = self.review_sidebar_visible;
@@ -727,6 +925,20 @@ impl App {
         if matches!(self.surface, AppSurface::Queue | AppSurface::DetailFull) {
             match key.code {
                 KeyCode::Enter
+                    if self.surface == AppSurface::Queue
+                        && self.queue_focus == QueuePane::Detail
+                        && self.detail_tab == DetailTab::Semantic =>
+                {
+                    if self.open_selected_semantic_row() {
+                        return;
+                    }
+                }
+                KeyCode::Char(' ') if self.detail_tab == DetailTab::Semantic => {
+                    if self.toggle_selected_semantic_viewed() {
+                        return;
+                    }
+                }
+                KeyCode::Enter
                     if self.surface == AppSurface::DetailFull
                         && self.detail_tab == DetailTab::Semantic =>
                 {
@@ -734,27 +946,29 @@ impl App {
                         return;
                     }
                 }
-                KeyCode::Left => {
+                KeyCode::Char('1') if self.detail_shortcuts_active() => {
                     self.set_detail_tab(DetailTab::Semantic);
                     return;
                 }
-                KeyCode::Right => {
+                KeyCode::Char('2') if self.detail_shortcuts_active() => {
                     self.set_detail_tab(DetailTab::Description);
                     return;
                 }
-                KeyCode::Char('1') => {
-                    self.set_detail_tab(DetailTab::Semantic);
+                KeyCode::Char('0')
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                {
+                    self.reset_semantic_map_view();
                     return;
                 }
-                KeyCode::Char('2') => {
-                    self.set_detail_tab(DetailTab::Description);
-                    return;
-                }
-                KeyCode::Char('[') if self.detail_tab == DetailTab::Semantic => {
+                KeyCode::Char('[')
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                {
                     self.collapse_focused_semantic_branch();
                     return;
                 }
-                KeyCode::Char(']') if self.detail_tab == DetailTab::Semantic => {
+                KeyCode::Char(']')
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                {
                     self.expand_focused_semantic_branch();
                     return;
                 }
@@ -777,6 +991,23 @@ impl App {
                 _ => {}
             }
         }
+        if key.modifiers.is_empty()
+            && self.semantic_map_keyboard_active()
+            && matches!(
+                key.code,
+                KeyCode::Char('h')
+                    | KeyCode::Char('j')
+                    | KeyCode::Char('k')
+                    | KeyCode::Char('l')
+                    | KeyCode::Left
+                    | KeyCode::Down
+                    | KeyCode::Up
+                    | KeyCode::Right
+            )
+            && self.move_semantic_selection_structural(key.code)
+        {
+            return;
+        }
         if let Some(command) = self.command_for_key(key) {
             self.execute_command(command, rows);
             return;
@@ -786,16 +1017,92 @@ impl App {
         }
     }
 
+    fn debug_key_event(key: KeyEvent) {
+        Self::debug_input_event(format_args!(
+            "key code={:?} modifiers={:?} kind={:?} state={:?}",
+            key.code, key.modifiers, key.kind, key.state
+        ));
+    }
+
+    fn debug_input_event(args: std::fmt::Arguments<'_>) {
+        if std::env::var_os("LAZYDIFF_KEY_DEBUG").is_none() {
+            return;
+        }
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/lazydiff-key-debug.log")
+        {
+            let _ = writeln!(file, "{args}");
+        }
+    }
+
+    fn handle_pane_navigation_key(&mut self, key: KeyEvent) -> bool {
+        let shift_tab = matches!(key.code, KeyCode::BackTab)
+            || (matches!(key.code, KeyCode::Tab | KeyCode::Char('\t'))
+                && key.modifiers.contains(KeyModifiers::SHIFT));
+        let plain_tab = matches!(key.code, KeyCode::Tab | KeyCode::Char('\t'))
+            && !key.modifiers.contains(KeyModifiers::SHIFT);
+        if !shift_tab && !plain_tab {
+            return false;
+        }
+        if shift_tab {
+            self.move_pane_focus(-1)
+        } else {
+            self.move_pane_focus(1)
+        }
+    }
+
+    fn detail_shortcuts_active(&self) -> bool {
+        self.surface == AppSurface::DetailFull
+            || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
+    }
+
+    fn semantic_map_keyboard_active(&self) -> bool {
+        self.detail_tab == DetailTab::Semantic
+            && (self.surface == AppSurface::DetailFull
+                || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
+                || (self.surface == AppSurface::CommitList
+                    && self.commit_focus == CommitPane::Detail))
+    }
+
+    fn move_pane_focus(&mut self, _direction: isize) -> bool {
+        match self.surface {
+            AppSurface::Queue => {
+                self.queue_focus = match self.queue_focus {
+                    QueuePane::List => QueuePane::Detail,
+                    QueuePane::Detail => QueuePane::List,
+                };
+                true
+            }
+            AppSurface::Diff if self.review_sidebar_visible => {
+                self.review_sidebar_focus = !self.review_sidebar_focus;
+                if self.review_sidebar_focus {
+                    self.sync_review_sidebar_selection_to_current_file();
+                }
+                true
+            }
+            AppSurface::CommitList => {
+                self.commit_focus = match self.commit_focus {
+                    CommitPane::List => CommitPane::Detail,
+                    CommitPane::Detail => CommitPane::List,
+                };
+                true
+            }
+            AppSurface::Comments | AppSurface::DetailFull | AppSurface::Diff => false,
+        }
+    }
+
     /// Half-page scroll dispatcher used by ctrl-d / ctrl-u from any surface.
     fn page_surface_half(&mut self, direction: isize, rows: usize) {
         match self.surface {
             AppSurface::Queue => {
                 let half = (self.viewport_height.max(2) / 2).max(1) as isize;
-                self.move_home_selection(direction.saturating_mul(half));
+                self.move_queue_focused(direction.saturating_mul(half));
             }
             AppSurface::CommitList => {
                 let half = (self.viewport_height.max(2) / 2).max(1) as isize;
-                self.move_commit_selection(direction.saturating_mul(half));
+                self.move_commit_focused(direction.saturating_mul(half));
             }
             AppSurface::Comments => {
                 let half = (self.viewport_height.max(2) / 2).max(1) as isize;
@@ -940,6 +1247,7 @@ impl App {
             }
             Command::OpenDiff => self.open_selected_diff(),
             Command::OpenInBrowser => self.open_selected_in_browser(),
+            Command::OpenInEditor => self.open_current_file_in_editor(),
             Command::OpenCommandPalette => self.open_root_palette(),
             Command::OpenFileSearch => self.open_file_search(),
             Command::OpenTextSearch => self.open_text_search(),
@@ -954,8 +1262,8 @@ impl App {
                 self.state.selected_row = 0;
                 self.state.clear_mouse_selection();
             }
-            Command::JumpFirst => self.state.scroll_y = 0,
-            Command::JumpLast => self.state.scroll_y = rows.saturating_sub(self.viewport_height),
+            Command::JumpFirst => self.jump_focused_boundary(false, rows),
+            Command::JumpLast => self.jump_focused_boundary(true, rows),
             Command::PreviousFile => self.jump_relative_file(-1, rows),
             Command::NextFile => self.jump_relative_file(1, rows),
             Command::PreviousHunk => self.jump_relative_hunk(-1, rows),
@@ -963,7 +1271,99 @@ impl App {
             Command::ShowAttempts => self.attempt_modal_open = true,
             Command::SelectLeft => self.state.selected_side = DiffSide::Left,
             Command::SelectRight => self.state.selected_side = DiffSide::Right,
-            Command::ToggleTheme => self.toggle_theme_variant(),
+            Command::ScrollLeft => self.scroll_active_pane_horizontally(-8),
+            Command::ScrollRight => self.scroll_active_pane_horizontally(8),
+            Command::OpenThemePicker => self.open_theme_picker(),
+            Command::SelectTheme(theme) => self.select_theme_variant(theme),
+        }
+    }
+
+    fn scroll_active_pane_horizontally(&mut self, delta: isize) {
+        let before = self.state.scroll_x;
+        match self.surface {
+            AppSurface::Diff => self.state.scroll_horizontal(delta),
+            AppSurface::Queue
+            | AppSurface::DetailFull
+            | AppSurface::CommitList
+            | AppSurface::Comments => {}
+        }
+        Self::debug_input_event(format_args!(
+            "scroll_x delta={delta} before={before} after={} surface={:?} sidebar_focus={}",
+            self.state.scroll_x, self.surface, self.review_sidebar_focus
+        ));
+    }
+
+    fn jump_focused_boundary(&mut self, last: bool, rows: usize) {
+        match self.surface {
+            AppSurface::Queue => match self.queue_focus {
+                QueuePane::List => {
+                    self.home_selection = if last {
+                        self.home_work_items().len().saturating_sub(1)
+                    } else {
+                        0
+                    };
+                    self.home_selection_changed_at = Instant::now();
+                    self.surface_scroll_y = 0;
+                    self.semantic_scroll_y = 0;
+                    self.semantic_selection = 0;
+                    self.revalidate_selected_semantic_diff();
+                }
+                QueuePane::Detail => {
+                    if self.detail_tab == DetailTab::Semantic {
+                        self.semantic_selection = if last {
+                            self.semantic_tree_rows(&self.current_semantic_route().unwrap_or_else(
+                                || {
+                                    self.selected_work_item()
+                                        .map(|item| item.route(self))
+                                        .unwrap_or_else(|| self.diff_source.clone())
+                                },
+                            ))
+                            .len()
+                            .saturating_sub(1)
+                        } else {
+                            0
+                        };
+                        self.semantic_scroll_y = self.semantic_selection;
+                    } else {
+                        self.surface_scroll_y = if last { usize::MAX / 2 } else { 0 };
+                    }
+                }
+            },
+            AppSurface::CommitList => match self.commit_focus {
+                CommitPane::List => {
+                    self.commit_selection = if last {
+                        self.commits.len().saturating_sub(1)
+                    } else {
+                        0
+                    };
+                }
+                CommitPane::Detail => {
+                    self.semantic_selection = if last { usize::MAX / 2 } else { 0 };
+                    self.semantic_scroll_y = self.semantic_selection;
+                }
+            },
+            AppSurface::Comments => {
+                self.comments_selection = if last {
+                    self.current_comment_count().saturating_sub(1)
+                } else {
+                    0
+                };
+            }
+            AppSurface::DetailFull => {
+                if self.detail_tab == DetailTab::Semantic {
+                    self.semantic_selection = if last { usize::MAX / 2 } else { 0 };
+                    self.semantic_scroll_y = self.semantic_selection;
+                } else {
+                    self.surface_scroll_y = if last { usize::MAX / 2 } else { 0 };
+                }
+            }
+            AppSurface::Diff => {
+                self.state.scroll_y = if last {
+                    rows.saturating_sub(self.viewport_height)
+                } else {
+                    0
+                }
+            }
         }
     }
 
@@ -1024,8 +1424,8 @@ impl App {
 
     fn move_surface_down(&mut self, rows: usize) {
         match self.surface {
-            AppSurface::Queue => self.move_home_selection(1),
-            AppSurface::CommitList => self.move_commit_selection(1),
+            AppSurface::Queue => self.move_queue_focused(1),
+            AppSurface::CommitList => self.move_commit_focused(1),
             AppSurface::Comments => self.move_comments_selection(1),
             AppSurface::DetailFull => {
                 if self.detail_tab == DetailTab::Semantic {
@@ -1040,8 +1440,8 @@ impl App {
 
     fn move_surface_up(&mut self, rows: usize) {
         match self.surface {
-            AppSurface::Queue => self.move_home_selection(-1),
-            AppSurface::CommitList => self.move_commit_selection(-1),
+            AppSurface::Queue => self.move_queue_focused(-1),
+            AppSurface::CommitList => self.move_commit_focused(-1),
             AppSurface::Comments => self.move_comments_selection(-1),
             AppSurface::DetailFull => {
                 if self.detail_tab == DetailTab::Semantic {
@@ -1051,6 +1451,26 @@ impl App {
                 }
             }
             AppSurface::Diff => self.move_active_relative(-1, rows),
+        }
+    }
+
+    fn move_queue_focused(&mut self, delta: isize) {
+        match self.queue_focus {
+            QueuePane::List => self.move_home_selection(delta),
+            QueuePane::Detail => {
+                if self.detail_tab == DetailTab::Semantic {
+                    self.move_semantic_selection(delta);
+                } else {
+                    self.surface_scroll_y = self.surface_scroll_y.saturating_add_signed(delta);
+                }
+            }
+        }
+    }
+
+    fn move_commit_focused(&mut self, delta: isize) {
+        match self.commit_focus {
+            CommitPane::List => self.move_commit_selection(delta),
+            CommitPane::Detail => self.move_semantic_selection(delta),
         }
     }
 
@@ -1092,7 +1512,7 @@ impl App {
     fn page_surface(&mut self, direction: isize, rows: usize) {
         match self.surface {
             AppSurface::CommitList => {
-                self.move_commit_selection(direction * self.viewport_height.max(1) as isize)
+                self.move_commit_focused(direction * self.viewport_height.max(1) as isize)
             }
             AppSurface::Comments => {
                 self.move_comments_selection(direction * self.viewport_height.max(1) as isize)
@@ -1112,9 +1532,7 @@ impl App {
                 self.scroll_relative(direction * self.viewport_height as isize, rows)
             }
             AppSurface::Queue => {
-                self.surface_scroll_y = self
-                    .surface_scroll_y
-                    .saturating_add_signed(direction * self.viewport_height.max(1) as isize)
+                self.move_queue_focused(direction * self.viewport_height.max(1) as isize)
             }
         }
     }
@@ -1178,6 +1596,80 @@ impl App {
         Some(details)
     }
 
+    fn home_wide_queue_area(&self, terminal_width: u16, terminal_height: u16) -> Option<Rect> {
+        let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
+        if area.width < 118 || area.height < 8 {
+            return None;
+        }
+        let [_header, body, _footer] = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let [queue, _gap, _details] = Layout::horizontal([
+            Constraint::Percentage(58),
+            Constraint::Length(2),
+            Constraint::Fill(1),
+        ])
+        .areas(body);
+        Some(queue)
+    }
+
+    fn grouped_work_item_rows(
+        &self,
+        items: &[WorkItem],
+        area: Rect,
+        start_y: u16,
+    ) -> Vec<GroupedWorkItemRow> {
+        let mut builder = ListGeometryBuilder::new(area, start_y);
+        let mut rows = Vec::new();
+        let mut previous_group: Option<&str> = None;
+        for (index, item) in items.iter().enumerate() {
+            if previous_group != Some(item.group.as_str()) {
+                if previous_group.is_some() {
+                    builder.gap();
+                }
+                if let Some(geometry) = builder.header() {
+                    rows.push(GroupedWorkItemRow::Header {
+                        label: item.group.clone(),
+                        geometry,
+                    });
+                }
+                previous_group = Some(item.group.as_str());
+            }
+            if let Some(geometry) = builder.item(index) {
+                rows.push(GroupedWorkItemRow::Item { index, geometry });
+            }
+            if rows.last().is_some_and(|row| row.area().y >= area.bottom()) {
+                break;
+            }
+        }
+        rows.into_iter()
+            .filter(|row| row.area().y < area.bottom())
+            .collect()
+    }
+
+    fn home_wide_queue_rows(
+        &self,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> Option<Vec<GroupedWorkItemRow>> {
+        let queue = self.home_wide_queue_area(terminal_width, terminal_height)?;
+        let items = self.home_work_items();
+        let start_y = queue.y.saturating_add(2);
+        Some(self.grouped_work_item_rows(
+            &items,
+            Rect::new(
+                queue.x,
+                queue.y,
+                queue.width.saturating_sub(1),
+                queue.height,
+            ),
+            start_y,
+        ))
+    }
+
     pub(crate) fn theme_variant(&self) -> crate::design_system::ThemeVariant {
         self.theme_variant
     }
@@ -1190,12 +1682,11 @@ impl App {
         FinderPalette::for_variant(self.theme_variant)
     }
 
-    /// Flip between the warm and graphite registers. The diff body's syntax
-    /// spans are theme-independent (Pierre's IDE palette), so toggling is a
-    /// single field write — no pierre re-highlight, no document mutation.
-    /// Only the diff_theme's bg/text/structural colors change.
-    pub(crate) fn toggle_theme_variant(&mut self) {
-        self.theme_variant = self.theme_variant.toggled();
+    /// Select a theme without mutating the parsed/highlighted document. The
+    /// diff body's Pierre spans are theme-independent; this only changes
+    /// structural UI/diff colors and persists the chosen Lumen preset.
+    pub(crate) fn select_theme_variant(&mut self, theme: crate::design_system::ThemeVariant) {
+        self.theme_variant = theme;
         self.store.persist_theme_variant(self.theme_variant);
         self.query_client
             .finish_success(QueryKey::ThemePreference, now_stamp() as i64);
@@ -1706,6 +2197,93 @@ impl App {
         if let Err(error) = ProcessCommand::new(opener).arg(&url).spawn() {
             self.branch_operation_status = Some(format!("failed to open browser: {error}"));
         }
+    }
+
+    fn open_current_file_in_editor(&mut self) {
+        if self.surface != AppSurface::Diff {
+            return;
+        }
+        let DiffSource::LocalWorktree(route) = &self.diff_source else {
+            return;
+        };
+        let repo_path = PathBuf::from(&route.repo_path);
+        if !repo_path.is_dir() {
+            return;
+        }
+
+        let line_target = self.line_target_at(self.state.selected_row);
+        let file_index = line_target
+            .as_ref()
+            .map(|target| target.file_index)
+            .or_else(|| self.current_file_index());
+        let Some(file) = file_index.and_then(|index| self.document.files.get(index)) else {
+            return;
+        };
+        let path = if file.new_path == "/dev/null" {
+            file.old_path.as_deref().unwrap_or(file.new_path.as_str())
+        } else {
+            file.new_path.as_str()
+        };
+        if path == "/dev/null" {
+            return;
+        }
+
+        let file_path = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            repo_path.join(path)
+        };
+        let line = line_target.and_then(|target| target.new_line.or(target.old_line));
+        self.pending_terminal_flow = Some(TerminalFlow::OpenEditor {
+            command: self.editor_command(&file_path, line, &repo_path),
+            cwd: repo_path,
+        });
+    }
+
+    fn editor_command(&self, path: &Path, line: Option<u32>, repo_path: &Path) -> String {
+        let editor = self.guess_default_editor(repo_path);
+        let preset = editor_preset_name(&editor);
+        let filename = shell_quote(&path.display().to_string());
+        let Some(line) = line.filter(|line| *line > 0) else {
+            return match preset.as_str() {
+                "code" => format!("{editor} --reuse-window -- {filename}"),
+                _ => format!("{editor} -- {filename}"),
+            };
+        };
+
+        match preset.as_str() {
+            "code" => format!("{editor} --reuse-window --goto -- {filename}:{line}"),
+            "subl" | "zed" | "hx" | "helix" => format!("{editor} -- {filename}:{line}"),
+            "bbedit" => format!("{editor} +{line} -- {filename}"),
+            "xed" => format!("{editor} --line {line} -- {filename}"),
+            _ => format!("{editor} +{line} -- {filename}"),
+        }
+    }
+
+    fn guess_default_editor(&self, repo_path: &Path) -> String {
+        if let Ok(output) = ProcessCommand::new("git")
+            .args(["config", "--get", "core.editor"])
+            .current_dir(repo_path)
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(editor) = String::from_utf8(output.stdout) {
+                    let editor = editor.trim();
+                    if !editor.is_empty() {
+                        return editor.to_string();
+                    }
+                }
+            }
+        }
+
+        ["GIT_EDITOR", "VISUAL", "EDITOR"]
+            .into_iter()
+            .find_map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .unwrap_or_else(|| "vim".to_string())
     }
 
     fn run_selected_branch_operation(&mut self, operation: BranchOperation) {
@@ -2225,22 +2803,6 @@ impl App {
         let semantic_by_path = self.semantic_changes_by_path();
         let mut rows = Vec::new();
         let mut emitted_dirs = HashSet::new();
-        let mut file_counts: HashMap<String, usize> = HashMap::new();
-        for file in &self.document.files {
-            let parts: Vec<_> = file
-                .new_path
-                .split('/')
-                .filter(|part| !part.is_empty())
-                .collect();
-            let mut prefix = String::new();
-            for part in parts.iter().take(parts.len().saturating_sub(1)) {
-                if !prefix.is_empty() {
-                    prefix.push('/');
-                }
-                prefix.push_str(part);
-                *file_counts.entry(prefix.clone()).or_default() += 1;
-            }
-        }
 
         for (file_index, file) in self.document.files.iter().enumerate() {
             let parts: Vec<_> = file
@@ -2270,7 +2832,6 @@ impl App {
                             name: (*part).to_string(),
                             depth,
                             collapsed,
-                            file_count: file_counts.get(&prefix).copied().unwrap_or(0),
                         });
                     }
                     if collapsed {
@@ -2290,6 +2851,7 @@ impl App {
                 file_index,
                 path: file.new_path.clone(),
                 name: file_name,
+                status: file.metadata().kind,
                 depth: parts.len().saturating_sub(1),
                 collapsed,
                 semantic_count: changes.map_or(0, |changes| changes.len()),
@@ -2351,12 +2913,25 @@ impl App {
     }
 
     fn review_entity_key(path: &str, change: &SemanticChange) -> String {
+        Self::semantic_entity_key_parts(
+            path,
+            &change.entity_type,
+            &change.entity_name,
+            &change.change_type,
+            change.line,
+        )
+    }
+
+    fn semantic_entity_key_parts(
+        path: &str,
+        entity_type: &str,
+        entity_name: &str,
+        change_type: &str,
+        line: Option<usize>,
+    ) -> String {
         format!(
-            "{path}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
-            change.entity_type,
-            change.entity_name,
-            change.change_type,
-            change.line.unwrap_or(0)
+            "{path}\u{1f}{entity_type}\u{1f}{entity_name}\u{1f}{change_type}\u{1f}{}",
+            line.unwrap_or(0)
         )
     }
 
@@ -2392,19 +2967,29 @@ impl App {
     }
 
     fn toggle_file_viewed(&mut self, path: &str) {
+        let route = self.diff_source.clone();
+        self.toggle_file_viewed_for_route(&route, path);
+    }
+
+    fn toggle_file_viewed_for_route(&mut self, route: &DiffSource, path: &str) {
         if self.viewed_files.contains(path) {
             self.viewed_files.remove(path);
-            self.set_file_entities_viewed(path, false);
+            self.set_file_entities_viewed_for_route(route, path, false);
         } else {
             self.viewed_files.insert(path.to_string());
-            self.set_file_entities_viewed(path, true);
+            self.set_file_entities_viewed_for_route(route, path, true);
         }
         self.persist_viewed_state();
     }
 
     fn set_file_entities_viewed(&mut self, path: &str, viewed: bool) {
+        let route = self.diff_source.clone();
+        self.set_file_entities_viewed_for_route(&route, path, viewed);
+    }
+
+    fn set_file_entities_viewed_for_route(&mut self, route: &DiffSource, path: &str, viewed: bool) {
         let keys: Vec<_> = self
-            .semantic_diff_for_route(&self.diff_source)
+            .semantic_diff_for_route(route)
             .and_then(|diff| diff.files.iter().find(|file| file.path == path))
             .map(|file| {
                 file.changes
@@ -2420,6 +3005,81 @@ impl App {
                 self.viewed_entities.remove(&key);
             }
         }
+    }
+
+    fn toggle_selected_semantic_viewed(&mut self) -> bool {
+        let Some(route) = self.current_semantic_route() else {
+            return false;
+        };
+        let rows = self.semantic_tree_rows(&route);
+        let Some(row) = rows
+            .get(self.semantic_selection.min(rows.len().saturating_sub(1)))
+            .cloned()
+        else {
+            return false;
+        };
+        match row {
+            SemanticTreeRow::Directory { key, .. } => {
+                let Some(directory) = key.path.strip_prefix("dir:") else {
+                    return false;
+                };
+                self.toggle_semantic_directory_viewed(&route, directory);
+            }
+            SemanticTreeRow::File { path, .. } => self.toggle_file_viewed_for_route(&route, &path),
+            SemanticTreeRow::Entity {
+                path,
+                entity_type,
+                entity_name,
+                change_type,
+                line,
+                ..
+            } => {
+                let key = Self::semantic_entity_key_parts(
+                    &path,
+                    &entity_type,
+                    &entity_name,
+                    &change_type,
+                    line,
+                );
+                if !self.viewed_entities.insert(key) {
+                    self.viewed_entities
+                        .remove(&Self::semantic_entity_key_parts(
+                            &path,
+                            &entity_type,
+                            &entity_name,
+                            &change_type,
+                            line,
+                        ));
+                    self.viewed_files.remove(&path);
+                }
+                self.persist_viewed_state();
+            }
+            SemanticTreeRow::Status(_) => return false,
+        }
+        true
+    }
+
+    fn toggle_semantic_directory_viewed(&mut self, route: &DiffSource, directory: &str) {
+        let paths: Vec<String> = self
+            .semantic_diff_for_route(route)
+            .map(|diff| {
+                diff.files
+                    .iter()
+                    .filter(|file| file.path.starts_with(&format!("{directory}/")))
+                    .map(|file| file.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let should_mark = paths.iter().any(|path| !self.viewed_files.contains(path));
+        for path in paths {
+            if should_mark {
+                self.viewed_files.insert(path.clone());
+            } else {
+                self.viewed_files.remove(&path);
+            }
+            self.set_file_entities_viewed_for_route(route, &path, should_mark);
+        }
+        self.persist_viewed_state();
     }
 
     fn toggle_selected_review_tree_viewed(&mut self) {
@@ -2625,6 +3285,28 @@ impl App {
     }
 }
 
+fn editor_preset_name(editor: &str) -> String {
+    let first_word = editor
+        .split_whitespace()
+        .next()
+        .unwrap_or(editor)
+        .trim_matches(['\'', '"']);
+    let name = Path::new(first_word)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(first_word);
+    match name {
+        "codium" | "code-insiders" => "code".to_string(),
+        "vim" | "nvim" | "vi" | "lvim" | "nano" | "micro" | "kak" | "hx" | "helix" | "code"
+        | "subl" | "bbedit" | "xed" | "zed" => name.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AppSurface {
     Queue,
@@ -2634,15 +3316,34 @@ enum AppSurface {
     Diff,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum TerminalFlow {
     GitHubLogin,
+    OpenEditor { command: String, cwd: PathBuf },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalFlowResult {
+    GitHubLogin(std::result::Result<String, String>),
+    Editor(std::result::Result<(), String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailTab {
     Semantic,
     Description,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuePane {
+    List,
+    Detail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommitPane {
+    List,
+    Detail,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

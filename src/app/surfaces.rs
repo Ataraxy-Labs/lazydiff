@@ -1,6 +1,6 @@
 use super::*;
 
-const DETAIL_DESCRIPTION_ROW_LIMIT: usize = 2000;
+pub(super) const DETAIL_DESCRIPTION_ROW_LIMIT: usize = 2000;
 
 /// Find the first and last row indices in `rows` belonging to the
 /// comment at `selection`. Returns (0, 0) when no rows match (empty list
@@ -23,6 +23,315 @@ fn semantic_change_marker(change_type: &str) -> &'static str {
     }
 }
 
+fn file_tree_color(path: &str, palette: HomePalette, selected: bool) -> Color {
+    if selected {
+        return palette.selected_text;
+    }
+    match path.rsplit('.').next().unwrap_or_default() {
+        "rs" => Color::Rgb(250, 179, 135),
+        "ts" | "tsx" | "js" | "jsx" => Color::Rgb(137, 180, 250),
+        "py" => Color::Rgb(249, 226, 175),
+        "go" => Color::Rgb(137, 220, 235),
+        "md" | "markdown" => Color::Rgb(166, 227, 161),
+        "toml" | "yaml" | "yml" | "json" => Color::Rgb(203, 166, 247),
+        "css" | "scss" | "sass" => Color::Rgb(245, 194, 231),
+        _ => palette.fg,
+    }
+}
+
+fn entity_tree_color(entity_type: &str, palette: HomePalette, selected: bool) -> Color {
+    if selected {
+        return palette.selected_text;
+    }
+    match entity_type.to_ascii_lowercase().as_str() {
+        "function" | "fn" | "method" => Color::Rgb(137, 180, 250),
+        "class" | "struct" | "trait" | "interface" | "type" => Color::Rgb(203, 166, 247),
+        "module" | "namespace" | "package" => Color::Rgb(249, 226, 175),
+        "const" | "constant" | "static" => Color::Rgb(250, 179, 135),
+        _ => palette.orange,
+    }
+}
+
+fn file_status_marker(status: FileDiffKind) -> (&'static str, fn(HomePalette) -> Color) {
+    match status {
+        FileDiffKind::New => ("A", |palette| palette.success),
+        FileDiffKind::Deleted => ("D", |palette| palette.danger),
+        FileDiffKind::RenamePure | FileDiffKind::RenameChanged => ("R", |palette| palette.accent),
+        FileDiffKind::Change => ("M", |palette| palette.orange),
+    }
+}
+
+fn compact_entity_type(entity_type: &str) -> &'static str {
+    match entity_type.to_ascii_lowercase().as_str() {
+        "function" | "method" => "fn",
+        "property" => "prop",
+        "constant" => "const",
+        "module" => "mod",
+        "section" => "sec",
+        "orphan" => "orphan",
+        "class" => "class",
+        "struct" => "struct",
+        "trait" => "trait",
+        "interface" => "iface",
+        "type" => "type",
+        _ => "sym",
+    }
+}
+
+fn semantic_map_node_label(row: &SemanticTreeRow) -> String {
+    match row {
+        SemanticTreeRow::Directory { name, .. } => name.clone(),
+        SemanticTreeRow::File {
+            name, change_count, ..
+        } => format!("{name} · {change_count}"),
+        SemanticTreeRow::Entity {
+            entity_type,
+            entity_name,
+            line,
+            ..
+        } => {
+            let line = line.map(|line| format!(" :{line}")).unwrap_or_default();
+            format!("{} {entity_name}{line}", compact_entity_type(entity_type))
+        }
+        SemanticTreeRow::Status(status) => status.clone(),
+    }
+}
+
+fn semantic_map_node_style(row: &SemanticTreeRow, palette: HomePalette, bg: Color) -> Style {
+    match row {
+        SemanticTreeRow::Directory { .. } => Style::new().fg(palette.accent).bg(bg),
+        SemanticTreeRow::File { path, .. } => Style::new()
+            .fg(file_tree_color(path, palette, false))
+            .bg(bg),
+        SemanticTreeRow::Entity {
+            entity_type,
+            change_type,
+            ..
+        } => match semantic_change_marker(change_type) {
+            "+" => Style::new().fg(palette.success).bg(bg),
+            "-" => Style::new().fg(palette.danger).bg(bg),
+            _ => Style::new()
+                .fg(entity_tree_color(entity_type, palette, false))
+                .bg(bg),
+        },
+        SemanticTreeRow::Status(_) => palette.text(TextRole::Muted).bg(bg),
+    }
+}
+
+fn semantic_map_node_symbol(row: &SemanticTreeRow, selected: bool) -> &'static str {
+    if selected {
+        return "▣";
+    }
+    match row {
+        SemanticTreeRow::Directory { .. } => "▢",
+        SemanticTreeRow::File { .. } => "▢",
+        SemanticTreeRow::Entity { .. } => "▢",
+        SemanticTreeRow::Status(_) => "·",
+    }
+}
+
+fn semantic_entity_preview_lines(
+    document: &DiffDocument,
+    path: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    width: usize,
+    limit: usize,
+    palette: HomePalette,
+    bg: Color,
+) -> Vec<Line<'static>> {
+    let Some(start_line) = start_line else {
+        return Vec::new();
+    };
+    let end_line = end_line.unwrap_or(start_line).max(start_line);
+    let Some(file) = document.files.iter().find(|file| file.new_path == path) else {
+        return Vec::new();
+    };
+    let render_diff_line = |diff_line: &DiffLine| -> (usize, Line<'static>) {
+        let (line_number, marker, text, syntax_spans, inline_spans, row_kind, base_style) =
+            match diff_line {
+                DiffLine::Context {
+                    new_line,
+                    text,
+                    syntax_spans,
+                    ..
+                } => (
+                    *new_line as usize,
+                    " ",
+                    text.as_str(),
+                    syntax_spans.as_slice(),
+                    &[][..],
+                    lazydiff_diffs::RowKind::Context,
+                    palette.text(TextRole::Body).bg(bg),
+                ),
+                DiffLine::Add {
+                    new_line,
+                    text,
+                    syntax_spans,
+                    inline_spans,
+                } => (
+                    *new_line as usize,
+                    "+",
+                    text.as_str(),
+                    syntax_spans.as_slice(),
+                    inline_spans.as_slice(),
+                    lazydiff_diffs::RowKind::Add,
+                    Style::new().fg(palette.success).bg(bg),
+                ),
+                DiffLine::Delete {
+                    old_line,
+                    text,
+                    syntax_spans,
+                    inline_spans,
+                } => (
+                    *old_line as usize,
+                    "-",
+                    text.as_str(),
+                    syntax_spans.as_slice(),
+                    inline_spans.as_slice(),
+                    lazydiff_diffs::RowKind::Delete,
+                    Style::new().fg(palette.danger).bg(bg),
+                ),
+            };
+        let theme = DiffTheme::default();
+        let mut spans = vec![
+            Span::styled(marker.to_string(), base_style.add_modifier(Modifier::BOLD)),
+            Span::styled(" ", base_style),
+        ];
+        for render_span in lazydiff_diffs::line_render_spans(
+            text,
+            syntax_spans,
+            inline_spans,
+            row_kind,
+            theme,
+            base_style,
+        ) {
+            let style = if render_span.style.bg.is_some() {
+                render_span.style
+            } else {
+                render_span.style.bg(bg)
+            };
+            spans.push(Span::styled(render_span.text, style));
+        }
+        let mut line = Line::from(spans);
+        if width > 0 {
+            line = Line::from(
+                line.spans
+                    .into_iter()
+                    .scan(0usize, |used, span| {
+                        if *used >= width {
+                            return None;
+                        }
+                        let remaining = width.saturating_sub(*used);
+                        let text = truncate(&span.content, remaining);
+                        *used = used.saturating_add(text.chars().count());
+                        Some(Span::styled(text, span.style))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        };
+        (line_number, line)
+    };
+
+    let mut lines = Vec::new();
+    for hunk in &file.hunks {
+        for diff_line in &hunk.lines {
+            let (line_number, line) = render_diff_line(diff_line);
+            if line_number < start_line || line_number > end_line {
+                continue;
+            }
+            lines.push(line);
+            if lines.len() >= limit {
+                return lines;
+            }
+        }
+    }
+
+    if !lines.is_empty() {
+        return lines;
+    }
+
+    let Some(nearest_hunk) = file.hunks.iter().min_by_key(|hunk| {
+        let hunk_start = hunk.new_start as usize;
+        let hunk_end = hunk
+            .lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Context { .. } | DiffLine::Add { .. }))
+            .count()
+            .saturating_sub(1)
+            .saturating_add(hunk_start);
+        if start_line < hunk_start {
+            hunk_start.saturating_sub(start_line)
+        } else if start_line > hunk_end {
+            start_line.saturating_sub(hunk_end)
+        } else {
+            0
+        }
+    }) else {
+        return Vec::new();
+    };
+    for diff_line in &nearest_hunk.lines {
+        let (_, line) = render_diff_line(diff_line);
+        lines.push(line);
+        if lines.len() >= limit {
+            return lines;
+        }
+    }
+    lines
+}
+
+fn semantic_map_point_visible(area: Rect, x: i32, y: i32) -> bool {
+    x >= area.left() as i32
+        && x < area.right() as i32
+        && y >= area.top() as i32
+        && y < area.bottom() as i32
+}
+
+fn draw_semantic_map_symbol(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    x: i32,
+    y: i32,
+    symbol: &str,
+    style: Style,
+) {
+    if !semantic_map_point_visible(area, x, y) {
+        return;
+    }
+    buf[(x as u16, y as u16)]
+        .set_symbol(symbol)
+        .set_style(style);
+}
+
+fn draw_semantic_map_line(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+    style: Style,
+) {
+    if !semantic_map_point_visible(area, from_x, from_y)
+        || !semantic_map_point_visible(area, to_x, to_y)
+    {
+        return;
+    }
+    if from_x == to_x {
+        for y in from_y.min(to_y)..=from_y.max(to_y) {
+            draw_semantic_map_symbol(buf, area, from_x, y, "│", style);
+        }
+        return;
+    }
+    for y in from_y.min(to_y)..=from_y.max(to_y) {
+        draw_semantic_map_symbol(buf, area, from_x, y, "│", style);
+    }
+    for x in from_x.min(to_x)..=from_x.max(to_x) {
+        draw_semantic_map_symbol(buf, area, x, to_y, "─", style);
+    }
+    draw_semantic_map_symbol(buf, area, from_x, to_y, "└", style);
+}
+
 fn centered_line_rect(area: Rect, y: u16, width: usize) -> Rect {
     let width = (width as u16).min(area.width);
     let x = area.x + area.width.saturating_sub(width) / 2;
@@ -36,14 +345,13 @@ impl App {
         }
         let sidebar_width = (body.width / 3).clamp(28, 42);
         let sidebar = Rect::new(body.x, body.y, sidebar_width, body.height);
-        let divider = Rect::new(body.x + sidebar_width, body.y, 1, body.height);
         let diff_body = Rect::new(
-            divider.x.saturating_add(1),
+            body.x.saturating_add(sidebar_width),
             body.y,
-            body.width.saturating_sub(sidebar_width).saturating_sub(1),
+            body.width.saturating_sub(sidebar_width),
             body.height,
         );
-        (Some(sidebar), Some(divider), diff_body)
+        (Some(sidebar), None, diff_body)
     }
 
     pub(super) fn render_review_sidebar(
@@ -59,6 +367,13 @@ impl App {
         self.keep_review_sidebar_selection_visible();
         let bg = palette.bg;
         fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        let border = if self.review_sidebar_focus {
+            palette.theme.colors.border_focused
+        } else {
+            palette.rule
+        };
+        let border_style = Style::new().fg(border).bg(bg);
+        draw_box(frame.buffer_mut(), area, border_style);
         let heading = if self.review_sidebar_focus {
             palette.text(TextRole::Heading)
         } else {
@@ -68,32 +383,26 @@ impl App {
         let key = palette.text(TextRole::Key);
         let viewed = self.viewed_file_count();
         let total = self.document.files.len();
-        let title = format!("Changes {viewed}/{total}");
+        let title = format!(" Changes {viewed}/{total} ");
         frame.render_widget(
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(title, heading),
-                Span::styled(
-                    if self.review_sidebar_focus {
-                        " · focused"
-                    } else {
-                        ""
-                    },
-                    muted,
-                ),
-            ])
-            .style(Style::new().bg(bg)),
-            Rect::new(area.x, area.y, area.width, 1),
+            Line::from(vec![Span::styled(title, heading)]).style(Style::new().bg(bg)),
+            Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
         );
         if area.height < 3 {
             return;
         }
+        let inner = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
         let rows = self.review_tree_rows();
         let list_area = Rect::new(
-            area.x,
-            area.y + 1,
-            area.width,
-            area.height.saturating_sub(2),
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(1),
         );
         let start = self
             .review_sidebar_scroll_y
@@ -107,10 +416,10 @@ impl App {
             let y = list_area.y + visual_index as u16;
             let selected =
                 self.review_sidebar_focus && start + visual_index == self.review_sidebar_selection;
-            let line = self.render_review_tree_row(row, area.width as usize, selected, palette);
-            frame.render_widget(line, Rect::new(area.x, y, area.width, 1));
+            let line = self.render_review_tree_row(row, inner.width as usize, selected, palette);
+            frame.render_widget(line, Rect::new(inner.x, y, inner.width, 1));
         }
-        let footer_y = area.bottom().saturating_sub(1);
+        let footer_y = inner.bottom().saturating_sub(1);
         frame.render_widget(
             Line::from(vec![
                 Span::raw(" "),
@@ -122,7 +431,7 @@ impl App {
                 Span::styled(" open", muted),
             ])
             .style(Style::new().bg(bg)),
-            Rect::new(area.x, footer_y, area.width, 1),
+            Rect::new(inner.x, footer_y, inner.width, 1),
         );
     }
 
@@ -138,17 +447,19 @@ impl App {
         } else {
             palette.bg
         };
-        let fg = if selected {
-            palette.selected_text
-        } else {
-            palette.fg
-        };
         let muted = if selected {
             palette.selected_text
         } else {
             palette.muted
         };
-        let style = Style::new().fg(fg).bg(bg);
+        let tick = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.success
+            })
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
         let muted_style = Style::new().fg(muted).bg(bg);
         let add = Style::new()
             .fg(if selected {
@@ -177,65 +488,69 @@ impl App {
                 name,
                 depth,
                 collapsed,
-                file_count,
                 ..
             } => {
-                let indent = "  ".repeat(*depth);
-                let marker = if *collapsed { "▸" } else { "▾" };
-                let label = format!("{indent}{marker} {name}");
-                let suffix = format!(" {file_count}");
-                let label_width = width.saturating_sub(1 + suffix.chars().count());
-                spans.push(Span::styled(truncate(&label, label_width), muted_style));
+                let indent = " ".repeat(*depth);
+                let marker = if *collapsed { "▶" } else { "▼" };
+                let label = format!("{indent}  {marker} {name}");
                 spans.push(Span::styled(
-                    right_aligned_text(
-                        width as u16,
-                        label.chars().count().min(label_width) + 1,
-                        &suffix,
-                    ),
+                    truncate(&label, width.saturating_sub(1)),
                     muted_style,
                 ));
             }
             ReviewTreeRow::File {
                 path,
                 name,
+                status,
                 depth,
                 collapsed,
                 semantic_count,
                 ..
             } => {
                 let checked = if self.is_file_viewed(path) {
-                    "☑"
+                    "✓ "
                 } else {
-                    "☐"
+                    "  "
                 };
                 let marker = if *semantic_count > 0 {
                     if *collapsed {
-                        "▸"
+                        "▶"
                     } else {
-                        "▾"
+                        "▼"
                     }
                 } else {
                     " "
                 };
-                let indent = "  ".repeat(*depth);
-                let label = format!("{indent}{marker} {checked} {name}");
-                let suffix = if *semantic_count > 0 {
-                    format!(" {semantic_count}")
-                } else {
-                    String::new()
-                };
+                let (status_marker, status_color) = file_status_marker(*status);
+                let status_style = Style::new()
+                    .fg(if selected {
+                        palette.selected_text
+                    } else {
+                        status_color(palette)
+                    })
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD);
+                let indent = " ".repeat(*depth);
+                let suffix = format!(" {status_marker}");
+                let label = format!("{indent}{checked}{marker} {name}");
                 let label_width = width.saturating_sub(1 + suffix.chars().count());
-                spans.push(Span::styled(truncate(&label, label_width), style));
-                if !suffix.is_empty() {
-                    spans.push(Span::styled(
-                        right_aligned_text(
-                            width as u16,
-                            label.chars().count().min(label_width) + 1,
-                            &suffix,
-                        ),
-                        muted_style,
-                    ));
-                }
+                spans.push(Span::styled(indent, muted_style));
+                spans.push(Span::styled(checked, tick));
+                spans.push(Span::styled(format!("{marker} "), muted_style));
+                spans.push(Span::styled(
+                    truncate(name, label_width.saturating_sub(depth.saturating_add(3))),
+                    Style::new()
+                        .fg(file_tree_color(path, palette, selected))
+                        .bg(bg),
+                ));
+                spans.push(Span::styled(
+                    right_aligned_text(
+                        width as u16,
+                        label.chars().count().min(label_width) + 1,
+                        &suffix,
+                    ),
+                    status_style,
+                ));
             }
             ReviewTreeRow::Entity {
                 key,
@@ -246,9 +561,9 @@ impl App {
                 ..
             } => {
                 let checked = if self.is_entity_viewed(key) {
-                    "☑"
+                    "✓ "
                 } else {
-                    "☐"
+                    "  "
                 };
                 let marker = semantic_change_marker(change_type);
                 let marker_style = match marker {
@@ -256,13 +571,29 @@ impl App {
                     "-" => del,
                     _ => entity_style,
                 };
-                let indent = "  ".repeat(*depth);
-                let label = format!("{indent}  {checked} {entity_type} {entity_name}");
-                spans.push(Span::styled(marker, marker_style));
-                spans.push(Span::styled(" ", Style::new().bg(bg)));
+                let indent = " ".repeat(*depth);
+                let compact_type = compact_entity_type(entity_type);
+                let suffix = format!(" {marker} {compact_type}");
+                let label = format!("{indent}{checked}{entity_name}");
+                let label_width = width.saturating_sub(1 + suffix.chars().count());
+                spans.push(Span::styled(indent, muted_style));
+                spans.push(Span::styled(checked, tick));
                 spans.push(Span::styled(
-                    truncate(&label, width.saturating_sub(3)),
-                    muted_style,
+                    truncate(
+                        entity_name,
+                        label_width.saturating_sub(depth.saturating_add(2)),
+                    ),
+                    Style::new()
+                        .fg(entity_tree_color(entity_type, palette, selected))
+                        .bg(bg),
+                ));
+                spans.push(Span::styled(
+                    right_aligned_text(
+                        width as u16,
+                        label.chars().count().min(label_width) + 1,
+                        &suffix,
+                    ),
+                    marker_style,
                 ));
             }
         }
@@ -325,6 +656,11 @@ impl App {
             palette.bg,
         );
 
+        let list_active = self.commit_focus == CommitPane::List;
+        let focus_line = Style::new()
+            .fg(palette.theme.colors.border_focused)
+            .bg(palette.bg)
+            .add_modifier(Modifier::BOLD);
         let heading = palette.text(TextRole::Heading);
         let text = palette.text(TextRole::Body);
         let muted = palette.text(TextRole::Muted);
@@ -342,8 +678,18 @@ impl App {
             .areas(body);
             (list, Some(meta))
         } else {
+            self.commit_focus = CommitPane::List;
             (body, None)
         };
+        let active_rule = if list_active {
+            list_area
+        } else {
+            meta_area.unwrap_or(list_area)
+        };
+        frame.render_widget(
+            Line::from("━".repeat(active_rule.width as usize)).style(focus_line),
+            Rect::new(active_rule.x, header.y + 1, active_rule.width, 1),
+        );
         let mut y = list_area.y;
         frame.render_widget(
             Line::from(vec![Span::raw(" "), Span::styled("commit list", heading)]),
@@ -401,7 +747,7 @@ impl App {
         frame.render_widget(
             Line::from(vec![
                 Span::styled("tab", key),
-                Span::styled(" diff  ", muted),
+                Span::styled(" pane  ", muted),
                 Span::styled("enter", key),
                 Span::styled(" diff  ", muted),
                 Span::styled("esc", key),
@@ -537,9 +883,29 @@ impl App {
         );
 
         if area.width >= 118 {
+            let [queue, _gap, details] = Layout::horizontal([
+                Constraint::Percentage(58),
+                Constraint::Length(2),
+                Constraint::Fill(1),
+            ])
+            .areas(body);
+            let active = if self.queue_focus == QueuePane::List {
+                Rect::new(queue.x, header.y + 1, queue.width.saturating_sub(1), 1)
+            } else {
+                Rect::new(details.x, header.y + 1, details.width, 1)
+            };
+            let focus_line = Style::new()
+                .fg(palette.theme.colors.border_focused)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD);
+            frame.render_widget(
+                Line::from("━".repeat(active.width as usize)).style(focus_line),
+                active,
+            );
             self.render_home_wide(frame, body, footer, &items, selected, palette);
             return;
         }
+        self.queue_focus = QueuePane::List;
 
         let content = body;
         let mut y = content.y;
@@ -654,39 +1020,27 @@ impl App {
             y += 1;
         }
 
-        let mut previous_group: Option<&str> = None;
-        for (index, item) in items.iter().enumerate() {
-            if y >= content.bottom() {
-                break;
-            }
-            if previous_group != Some(item.group.as_str()) {
-                if previous_group.is_some() && y + 1 < content.bottom() {
-                    // One blank row between groups for vertical rhythm.
-                    y += 1;
+        let rows = self.grouped_work_item_rows(&items, content, y);
+        for row in &rows {
+            match row {
+                GroupedWorkItemRow::Header { label, geometry } => {
+                    self.render_queue_group_header(frame, geometry.area, label, palette);
                 }
-                if y >= content.bottom() {
-                    break;
+                GroupedWorkItemRow::Item { index, geometry } => {
+                    if let Some(item) = items.get(*index) {
+                        self.render_quiver_work_item(
+                            frame,
+                            geometry.area,
+                            item,
+                            *index == self.home_selection,
+                            palette,
+                        );
+                    }
                 }
-                self.render_queue_group_header(
-                    frame,
-                    Rect::new(content.x, y, content.width, 1),
-                    &item.group,
-                    palette,
-                );
-                y += 1;
-                previous_group = Some(item.group.as_str());
             }
-            if y >= content.bottom() {
-                break;
-            }
-            self.render_quiver_work_item(
-                frame,
-                Rect::new(content.x, y, content.width, 1),
-                item,
-                index == self.home_selection,
-                palette,
-            );
-            y += 1;
+        }
+        if let Some(last) = rows.last() {
+            y = last.area().bottom();
         }
 
         if let Some(notice) = self.github_notice() {
@@ -710,7 +1064,7 @@ impl App {
             Line::from(vec![
                 Span::styled(" /", key),
                 Span::styled(" filter  ", muted),
-                Span::styled("tab", key),
+                Span::styled("C", key),
                 Span::styled(" commits  ", muted),
                 Span::styled("enter", key),
                 Span::styled(" details  ", muted),
@@ -764,39 +1118,33 @@ impl App {
         if y + 1 < queue.bottom() {
             y += 1;
         }
-        let mut previous_group: Option<&str> = None;
-        for (index, item) in items.iter().enumerate() {
-            if y >= queue.bottom() {
-                break;
-            }
-            if previous_group != Some(item.group.as_str()) {
-                if previous_group.is_some() && y + 1 < queue.bottom() {
-                    // One blank row between groups for vertical rhythm.
-                    y += 1;
+        let list_area = Rect::new(
+            queue.x,
+            queue.y,
+            queue.width.saturating_sub(1),
+            queue.height,
+        );
+        let rows = self.grouped_work_item_rows(items, list_area, y);
+        for row in &rows {
+            match row {
+                GroupedWorkItemRow::Header { label, geometry } => {
+                    self.render_queue_group_header(frame, geometry.area, label, palette);
                 }
-                if y >= queue.bottom() {
-                    break;
+                GroupedWorkItemRow::Item { index, geometry } => {
+                    if let Some(item) = items.get(*index) {
+                        self.render_quiver_work_item(
+                            frame,
+                            geometry.area,
+                            item,
+                            *index == self.home_selection,
+                            palette,
+                        );
+                    }
                 }
-                self.render_queue_group_header(
-                    frame,
-                    Rect::new(queue.x, y, queue.width.saturating_sub(1), 1),
-                    &item.group,
-                    palette,
-                );
-                y += 1;
-                previous_group = Some(item.group.as_str());
             }
-            if y >= queue.bottom() {
-                break;
-            }
-            self.render_quiver_work_item(
-                frame,
-                Rect::new(queue.x, y, queue.width.saturating_sub(1), 1),
-                item,
-                index == self.home_selection,
-                palette,
-            );
-            y += 1;
+        }
+        if let Some(last) = rows.last() {
+            y = last.area().bottom();
         }
 
         if let Some(notice) = self.github_notice() {
@@ -824,7 +1172,7 @@ impl App {
                 Span::styled(" /", key),
                 Span::styled(" filter  ", muted),
                 Span::styled("tab", key),
-                Span::styled(" commits  ", muted),
+                Span::styled(" pane  ", muted),
                 Span::styled("enter", key),
                 Span::styled(" details  ", muted),
                 Span::styled("d", key),
@@ -1188,7 +1536,7 @@ impl App {
         {
             let y = body.y + visual_index as u16;
             let is_selected = row.comment_index() == selection;
-            let row_rect = Rect::new(body.x, y, body.width, 1);
+            let row_rect = Rect::new(body.x, y, body.width.saturating_sub(1), 1);
 
             // For selected rows, paint the full-width row bg first so any
             // trailing whitespace also picks up the elevation.
@@ -1271,6 +1619,13 @@ impl App {
                 }
             }
         }
+        render_scrollbar(
+            body,
+            frame.buffer_mut(),
+            rows.len(),
+            height,
+            self.surface_scroll_y,
+        );
         self.render_surface_footer(
             frame,
             footer,
@@ -1538,13 +1893,54 @@ impl App {
             return;
         }
         let bg = palette.layer_bg(SurfaceLayer::Surface);
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        draw_box(
+            frame.buffer_mut(),
+            area,
+            Style::new().fg(palette.theme.colors.border).bg(bg),
+        );
+        let viewed = self.viewed_file_count();
+        let total = self.document.files.len();
+        let heading = palette.text(TextRole::Heading).bg(bg);
+        let muted = palette.text(TextRole::Muted).bg(bg);
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(" Description ", heading),
+                Span::styled(
+                    right_aligned_text(
+                        area.width.saturating_sub(2),
+                        " Description ".chars().count(),
+                        &format!(
+                            "{} viewed {viewed}/{total}",
+                            if viewed == total { "✓" } else { " " }
+                        ),
+                    ),
+                    muted,
+                ),
+            ]),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        let content = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        if content.height == 0 || content.width == 0 {
+            return;
+        }
         let text = palette.text(TextRole::Body).bg(bg);
-        let visible_rows = area.height as usize;
+        let visible_rows = content.height as usize;
         if let Some((repository, number, body)) = selected
             .pull_request(self)
             .map(|pr| (pr.repository.clone(), pr.number, pr.body.clone()))
         {
-            let preview_width = area.width.saturating_sub(1).max(16);
+            let preview_width = content.width.saturating_sub(1).max(16);
             let lines = self.cached_pull_request_body_preview(
                 &repository,
                 number,
@@ -1568,12 +1964,12 @@ impl App {
             {
                 frame.render_widget(
                     self.detail_markdown_line(line, bg),
-                    Rect::new(area.x, area.y + index as u16, preview_width, 1),
+                    Rect::new(content.x, content.y + index as u16, preview_width, 1),
                 );
             }
             render_modal_diff_scrollbar(
                 frame.buffer_mut(),
-                area,
+                content,
                 total_rows,
                 visible_rows,
                 scroll_y,
@@ -1588,15 +1984,15 @@ impl App {
             for (index, line) in lines.iter().skip(scroll_y).take(visible_rows).enumerate() {
                 frame.render_widget(
                     Line::from(vec![Span::styled(
-                        truncate(line, area.width.saturating_sub(1) as usize),
+                        truncate(line, content.width.saturating_sub(1) as usize),
                         text,
                     )]),
-                    Rect::new(area.x, area.y + index as u16, area.width, 1),
+                    Rect::new(content.x, content.y + index as u16, content.width, 1),
                 );
             }
             render_modal_diff_scrollbar(
                 frame.buffer_mut(),
-                area,
+                content,
                 total_rows,
                 visible_rows,
                 scroll_y,
@@ -1632,133 +2028,266 @@ impl App {
         let bg = palette.layer_bg(SurfaceLayer::Surface);
         let heading = palette.text(TextRole::Heading).bg(bg);
         let muted = palette.text(TextRole::Muted).bg(bg);
-        let text = palette.text(TextRole::Body).bg(bg);
-        let key = palette.text(TextRole::Key).bg(bg);
-        let add = Style::new().fg(palette.success).bg(bg);
-        let del = Style::new().fg(palette.danger).bg(bg);
+        let tick = Style::new()
+            .fg(palette.success)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
         fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        let border = palette.theme.colors.border;
+        draw_box(frame.buffer_mut(), area, Style::new().fg(border).bg(bg));
         let y = area.y;
         frame.render_widget(
             Line::from(vec![
-                Span::styled("Changes", heading),
+                Span::styled(" Semantic Map ", heading),
                 Span::styled(
                     right_aligned_text(
-                        area.width,
-                        "Changes".chars().count() + 1,
-                        "enter/click opens file",
+                        area.width.saturating_sub(2),
+                        " Semantic Map ".chars().count(),
+                        "↑↓ focus · enter/click opens · space ticks",
                     ),
                     muted,
                 ),
             ]),
-            Rect::new(area.x, y, area.width, 1),
+            Rect::new(area.x.saturating_add(1), y, area.width.saturating_sub(2), 1),
         );
-        let items: Vec<ListItem> = rows
-            .into_iter()
-            .map(|row| {
-                let line = match row {
-                    SemanticTreeRow::Directory {
-                        name,
-                        depth,
-                        collapsed,
-                        ..
-                    } => {
-                        let indent = "  ".repeat(depth);
-                        Line::from(vec![
-                            Span::styled(indent, muted),
-                            Span::styled(if collapsed { "▸ " } else { "▾ " }, key),
-                            Span::styled(
-                                truncate(&name, area.width.saturating_sub(6) as usize),
-                                text.add_modifier(Modifier::BOLD),
-                            ),
-                        ])
-                    }
-                    SemanticTreeRow::File {
-                        name,
-                        depth,
-                        change_count,
-                        collapsed,
-                        ..
-                    } => {
-                        let indent = "  ".repeat(depth);
-                        Line::from(vec![
-                            Span::styled(indent, muted),
-                            Span::styled(if collapsed { "▸ " } else { "▾ " }, key),
-                            Span::styled(
-                                truncate(&name, area.width.saturating_sub(18) as usize),
-                                text.add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(
-                                right_aligned_text(
-                                    area.width,
-                                    depth.saturating_mul(2)
-                                        + name.chars().count().min(area.width as usize),
-                                    &format!("{change_count}"),
-                                ),
-                                muted,
-                            ),
-                        ])
-                    }
-                    SemanticTreeRow::Entity {
-                        depth,
+        let nodes = build_semantic_map_nodes(&rows);
+        if nodes.is_empty() {
+            if let Some(SemanticTreeRow::Status(status)) = rows.first() {
+                frame.render_widget(
+                    Line::from(Span::styled(
+                        truncate(status, body_area.width.saturating_sub(1) as usize),
+                        muted,
+                    )),
+                    body_area,
+                );
+            }
+            return body_area.bottom();
+        }
+
+        let selected_row = viewport.selected.min(total_rows.saturating_sub(1));
+        let selected_node_index = nodes
+            .iter()
+            .position(|node| node.row_index == Some(selected_row))
+            .unwrap_or(1.min(nodes.len().saturating_sub(1)));
+        let selected_node = &nodes[selected_node_index];
+        let positions = semantic_map_screen_positions(
+            &nodes,
+            body_area,
+            self.semantic_map_zoom,
+            self.semantic_map_pan_x,
+            self.semantic_map_pan_y,
+        );
+        let connector_style = Style::new().fg(palette.dim).bg(bg);
+        let tick_style = tick;
+
+        for (node_index, node) in nodes.iter().enumerate() {
+            let Some(parent_index) = node.parent else {
+                continue;
+            };
+            let Some((from_x, from_y)) = positions.get(parent_index).copied() else {
+                continue;
+            };
+            let Some((to_x, to_y)) = positions.get(node_index).copied() else {
+                continue;
+            };
+            draw_semantic_map_line(
+                frame.buffer_mut(),
+                body_area,
+                from_x,
+                from_y.saturating_add(1),
+                to_x,
+                to_y.saturating_sub(1),
+                connector_style,
+            );
+        }
+
+        let root_style = Style::new()
+            .fg(palette.accent)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+        if let Some((root_x, root_y)) = positions.first().copied() {
+            draw_semantic_map_symbol(
+                frame.buffer_mut(),
+                body_area,
+                root_x,
+                root_y,
+                "□",
+                root_style,
+            );
+        }
+
+        for (node_index, node) in nodes.iter().enumerate().skip(1) {
+            let Some(row_index) = node.row_index else {
+                continue;
+            };
+            let Some(row) = rows.get(row_index) else {
+                continue;
+            };
+            let selected = node_index == selected_node_index;
+            let Some((x, y)) = positions.get(node_index).copied() else {
+                continue;
+            };
+            let style = if selected {
+                Style::new()
+                    .fg(palette.selected_text)
+                    .bg(palette.layer_bg(SurfaceLayer::ElevatedSurface))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                semantic_map_node_style(row, palette, bg)
+            };
+            draw_semantic_map_symbol(
+                frame.buffer_mut(),
+                body_area,
+                x,
+                y,
+                semantic_map_node_symbol(row, selected),
+                style,
+            );
+
+            let viewed = match row {
+                SemanticTreeRow::File { path, .. } => self.is_file_viewed(path),
+                SemanticTreeRow::Entity {
+                    path,
+                    entity_type,
+                    entity_name,
+                    change_type,
+                    line,
+                    ..
+                } => {
+                    let entity_key = Self::semantic_entity_key_parts(
+                        path,
                         entity_type,
                         entity_name,
                         change_type,
-                        line,
-                        ..
-                    } => {
-                        let marker = semantic_change_marker(&change_type);
-                        let marker_style = match marker {
-                            "+" => add,
-                            "-" => del,
-                            _ => muted,
-                        };
-                        let prefix = format!(
-                            "{}{} {:<10} ",
-                            "  ".repeat(depth),
-                            marker,
-                            entity_type.to_ascii_uppercase()
-                        );
-                        Line::from(vec![
-                            Span::styled(prefix, marker_style),
-                            Span::styled(
-                                truncate(&entity_name, area.width.saturating_sub(16) as usize),
-                                text,
-                            ),
-                            Span::styled(
-                                line.map(|line| format!(" :{line}")).unwrap_or_default(),
-                                muted,
-                            ),
-                        ])
+                        *line,
+                    );
+                    self.is_entity_viewed(&entity_key)
+                }
+                SemanticTreeRow::Directory { .. } | SemanticTreeRow::Status(_) => false,
+            };
+            if viewed {
+                draw_semantic_map_symbol(
+                    frame.buffer_mut(),
+                    body_area,
+                    x.saturating_add(2),
+                    y,
+                    "✓",
+                    tick_style,
+                );
+            }
+        }
+
+        if let Some(row) = rows.get(selected_row) {
+            let label = semantic_map_node_label(row);
+            let detail = match row {
+                SemanticTreeRow::Directory { collapsed, .. }
+                | SemanticTreeRow::File { collapsed, .. } => {
+                    if *collapsed {
+                        "enter expands branch"
+                    } else {
+                        "enter collapses branch"
                     }
-                    SemanticTreeRow::Status(status) => Line::from(vec![
-                        Span::styled("  ", muted),
-                        Span::styled(
-                            truncate(&status, area.width.saturating_sub(2) as usize),
-                            muted,
-                        ),
-                    ]),
-                };
-                ListItem::new(line).style(Style::new().bg(bg))
-            })
-            .collect();
-        let mut list_state = ListState::default()
-            .with_offset(viewport.scroll_y)
-            .with_selected(Some(viewport.selected));
-        let list = List::new(items).style(Style::new().bg(bg)).highlight_style(
-            Style::new()
-                .bg(palette.layer_bg(SurfaceLayer::ElevatedSurface))
-                .add_modifier(Modifier::BOLD),
-        );
-        frame.render_stateful_widget(
-            list,
-            Rect::new(
-                body_area.x,
-                body_area.y,
-                body_area.width.saturating_sub(1),
-                body_area.height,
-            ),
-            &mut list_state,
-        );
+                }
+                SemanticTreeRow::Entity { path, .. } => path,
+                SemanticTreeRow::Status(_) => "",
+            };
+            let preview_lines = match row {
+                SemanticTreeRow::Entity {
+                    path,
+                    line,
+                    end_line,
+                    ..
+                } => {
+                    let preview_document = self.document_for_route(route);
+                    semantic_entity_preview_lines(
+                        &preview_document,
+                        path,
+                        *line,
+                        *end_line,
+                        60,
+                        7,
+                        palette,
+                        bg,
+                    )
+                }
+                _ => Vec::new(),
+            };
+            let card_width = body_area
+                .width
+                .saturating_sub(4)
+                .min(if preview_lines.is_empty() { 42 } else { 68 });
+            if card_width > 8 && body_area.height > 4 {
+                let card_height = (3 + preview_lines.len() as u16)
+                    .min(body_area.height.saturating_sub(2))
+                    .max(3);
+                let (selected_x, selected_y) = positions
+                    .get(selected_node_index)
+                    .copied()
+                    .unwrap_or((selected_node.x, selected_node.y));
+                let card_x = if selected_x.saturating_add(card_width as i32 + 4)
+                    < body_area.right() as i32
+                {
+                    selected_x.saturating_add(4)
+                } else {
+                    selected_x
+                        .saturating_sub(card_width as i32)
+                        .saturating_sub(4)
+                }
+                .clamp(
+                    body_area.x.saturating_add(1) as i32,
+                    body_area
+                        .right()
+                        .saturating_sub(card_width)
+                        .saturating_sub(1) as i32,
+                ) as u16;
+                let card_y = selected_y.saturating_add(1).clamp(
+                    body_area.y.saturating_add(1) as i32,
+                    body_area.bottom().saturating_sub(card_height) as i32,
+                ) as u16;
+                let card = Rect::new(card_x, card_y, card_width, card_height);
+                let card_bg = bg;
+                fill_rect(frame.buffer_mut(), card, " ", Style::new().bg(card_bg));
+                draw_box(
+                    frame.buffer_mut(),
+                    card,
+                    Style::new().fg(palette.accent).bg(card_bg),
+                );
+                frame.render_widget(
+                    Line::from(Span::styled(
+                        truncate(&label, card.width.saturating_sub(4) as usize),
+                        heading.bg(card_bg),
+                    )),
+                    Rect::new(
+                        card.x.saturating_add(2),
+                        card.y,
+                        card.width.saturating_sub(4),
+                        1,
+                    ),
+                );
+                frame.render_widget(
+                    Line::from(Span::styled(
+                        truncate(detail, card.width.saturating_sub(4) as usize),
+                        muted.bg(card_bg),
+                    )),
+                    Rect::new(
+                        card.x.saturating_add(2),
+                        card.y.saturating_add(1),
+                        card.width.saturating_sub(4),
+                        1,
+                    ),
+                );
+                for (index, preview_line) in preview_lines.into_iter().enumerate() {
+                    let y = card.y.saturating_add(2 + index as u16);
+                    if y >= card.bottom().saturating_sub(1) {
+                        break;
+                    }
+                    frame.render_widget(
+                        preview_line,
+                        Rect::new(card.x.saturating_add(2), y, card.width.saturating_sub(4), 1),
+                    );
+                }
+            }
+        }
         render_modal_diff_scrollbar(
             frame.buffer_mut(),
             body_area,
@@ -1929,6 +2458,64 @@ impl App {
         .render(frame, area);
     }
 
+    pub(super) fn render_diff_pane_slider(
+        &self,
+        frame: &mut Frame,
+        rule: Rect,
+        diff_body: Rect,
+        palette: HomePalette,
+    ) {
+        if rule.height == 0 || diff_body.width < 8 {
+            return;
+        }
+        let bg = palette.bg;
+        let active = Style::new()
+            .fg(palette.theme.colors.border_focused)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+        let inactive = Style::new().fg(palette.rule_dim).bg(bg);
+        let hint = Style::new().fg(palette.muted).bg(bg);
+        if self.state.mode == DiffMode::Split {
+            let half = diff_body.width / 2;
+            let left = Rect::new(diff_body.x, rule.y, half, 1);
+            let right = Rect::new(diff_body.x + half, rule.y, diff_body.width - half, 1);
+            let left_active = self.state.selected_side == DiffSide::Left;
+            frame.render_widget(
+                Line::from("━".repeat(left.width as usize)).style(if left_active {
+                    active
+                } else {
+                    inactive
+                }),
+                left,
+            );
+            frame.render_widget(
+                Line::from("━".repeat(right.width as usize)).style(if left_active {
+                    inactive
+                } else {
+                    active
+                }),
+                right,
+            );
+        }
+        let label = if self.state.scroll_x > 0 {
+            format!(" tab pane · H/L scroll · x{} ", self.state.scroll_x)
+        } else {
+            " tab pane · H/L scroll ".to_string()
+        };
+        let label_width = label.chars().count() as u16;
+        if label_width < diff_body.width {
+            frame.render_widget(
+                Line::from(label).style(hint),
+                Rect::new(
+                    diff_body.right().saturating_sub(label_width + 1),
+                    rule.y,
+                    label_width,
+                    1,
+                ),
+            );
+        }
+    }
+
     pub(super) fn render_sticky_file_overlay(&self, frame: &mut Frame, body: Rect) {
         if body.height < 2 {
             return;
@@ -1955,9 +2542,9 @@ impl App {
         let additions = file.additions();
         let deletions = file.deletions();
         let viewed = if self.is_file_viewed(&file.new_path) {
-            "☑ viewed"
+            "✓ viewed"
         } else {
-            "☐ viewed"
+            "  viewed"
         };
         let mut spans = vec![
             Span::styled(
@@ -2010,7 +2597,7 @@ impl App {
                 Span::styled(" jump", label),
             ])
         } else {
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(" esc", key),
                 Span::styled(" clear  ", label),
                 Span::styled("↑↓", key),
@@ -2021,6 +2608,12 @@ impl App {
                 Span::styled(" instruct  ", label),
                 Span::styled("n", key),
                 Span::styled(" note  ", label),
+            ];
+            if matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
+                spans.push(Span::styled("e", key));
+                spans.push(Span::styled(" vim  ", label));
+            }
+            spans.extend([
                 Span::styled("enter", key),
                 Span::styled(" discuss  ", label),
                 Span::styled(":", key),
@@ -2040,7 +2633,8 @@ impl App {
                 Span::styled("A", key),
                 Span::styled(" attempts", label),
                 Span::styled(current, label),
-            ])
+            ]);
+            Line::from(spans)
         };
         frame.render_widget(line.style(Style::new().bg(bg)), area);
     }
@@ -2067,7 +2661,10 @@ impl App {
             return;
         }
         let line_area = Rect::new(area.x, area.y + 1, area.width, 1);
-        if !matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
+        if !matches!(
+            self.diff_source,
+            DiffSource::LocalWorktree(_) | DiffSource::PullRequest { .. }
+        ) {
             frame.render_widget(
                 Line::from(vec![
                     Span::styled("  external diff  ", muted),
@@ -2093,6 +2690,23 @@ impl App {
             );
             return;
         };
+        if matches!(self.diff_source, DiffSource::PullRequest { .. }) {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled("  ", muted),
+                    Span::styled("n", key),
+                    Span::styled(" comment on PR · ", muted),
+                    Span::styled(
+                        target_line_label(&target),
+                        text.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" · ", muted),
+                    Span::styled(short_path(&target.path).to_string(), muted),
+                ]),
+                line_area,
+            );
+            return;
+        }
         let notes = self.session.notes_for_target(&target);
         if let Some(note) = notes.last() {
             let (symbol, color) = note.kind.gutter_marker();
@@ -2163,55 +2777,49 @@ impl App {
         let half = content_width / 2;
         let overlay_cutoff = body.y.saturating_add(STICKY_FILE_OVERLAY_ROWS as u16);
 
-        for note in &self.session.notes {
-            let Some(start_row) = self.document.line_row(
-                self.state.mode,
-                note.target.start.file_index,
-                note.target.start.hunk_index,
-                note.target.start.line_index,
-            ) else {
-                continue;
-            };
-            let Some(end_row) = self.document.line_row(
-                self.state.mode,
-                note.target.end.file_index,
-                note.target.end.hunk_index,
-                note.target.end.line_index,
-            ) else {
-                continue;
-            };
-            let range_start = start_row.min(end_row);
-            let range_end = start_row.max(end_row);
-            let x = match self.state.mode {
-                DiffMode::Unified => body.x,
-                DiffMode::Split => match note.target.side() {
-                    DiffSide::Left => body.x,
-                    DiffSide::Right => body.x.saturating_add(half),
-                },
-            };
-            if x >= body.right().saturating_sub(1) {
+        for row in viewport_top..=viewport_bottom {
+            let y = body
+                .y
+                .saturating_add(row.saturating_sub(self.state.scroll_y) as u16);
+            if y < overlay_cutoff || y >= body.bottom() {
                 continue;
             }
-            let (symbol, color) = note.kind.gutter_marker();
-            for row in range_start.max(viewport_top)..=range_end.min(viewport_bottom) {
-                let y = body
-                    .y
-                    .saturating_add(row.saturating_sub(self.state.scroll_y) as u16);
-                if y < overlay_cutoff || y >= body.bottom() {
+
+            for side in [DiffSide::Left, DiffSide::Right] {
+                let Some(target) = self.document.line_target(self.state.mode, row, side) else {
+                    continue;
+                };
+                let x = match self.state.mode {
+                    DiffMode::Unified => body.x,
+                    DiffMode::Split => match side {
+                        DiffSide::Left => body.x,
+                        DiffSide::Right => body.x.saturating_add(half),
+                    },
+                };
+                if x >= body.right().saturating_sub(1) {
                     continue;
                 }
-                let marker = if note.target.is_single_line() {
-                    symbol
-                } else if row == range_start {
-                    "╭"
-                } else if row == range_end {
-                    "╰"
-                } else {
-                    "│"
-                };
-                frame.buffer_mut()[(x, y)]
-                    .set_symbol(marker)
-                    .set_style(Style::new().fg(color).bg(Color::Rgb(61, 54, 32)));
+
+                for note in &self.session.notes {
+                    if !note.target.contains(&target) {
+                        continue;
+                    }
+                    let (symbol, color) = note.kind.gutter_marker();
+                    let range_start = note.target.start.line.min(note.target.end.line);
+                    let range_end = note.target.start.line.max(note.target.end.line);
+                    let marker = if note.target.is_single_line() {
+                        symbol
+                    } else if target.line == range_start {
+                        "╭"
+                    } else if target.line == range_end {
+                        "╰"
+                    } else {
+                        "│"
+                    };
+                    frame.buffer_mut()[(x, y)]
+                        .set_symbol(marker)
+                        .set_style(Style::new().fg(color).bg(Color::Rgb(61, 54, 32)));
+                }
             }
         }
     }
@@ -2227,6 +2835,10 @@ impl App {
         }
         if self.finder_kind == FinderKind::Text {
             self.render_text_search(frame);
+            return;
+        }
+        if self.finder_kind == FinderKind::Themes {
+            self.render_theme_picker(frame);
             return;
         }
         let Some((area, list_area, preview_area)) = self.file_picker_areas(frame.area()) else {
@@ -2255,15 +2867,27 @@ impl App {
         let list_height = list_area.height as usize;
         let start = self.file_picker_list_start(list_height, filtered.len());
         let row_width = list_area.width.saturating_sub(1) as usize;
-        for (visual_index, result) in filtered.iter().skip(start).take(list_height).enumerate() {
-            let y = list_area.y + visual_index as u16;
-            let selected = start + visual_index == self.file_picker_selection;
+        let rows = list_item_rows(
+            Rect::new(
+                list_area.x,
+                list_area.y,
+                list_area.width.saturating_sub(1),
+                list_area.height,
+            ),
+            start,
+            filtered.len(),
+        );
+        for geometry in rows {
+            let ListRowKind::Item(index) = geometry.kind else {
+                continue;
+            };
+            let Some(result) = filtered.get(index) else {
+                continue;
+            };
+            let selected = index == self.file_picker_selection;
             let file = &self.document.files[result.index];
-            let row = render_finder_row(file, result, row_width, selected, palette);
-            frame.render_widget(
-                row,
-                Rect::new(list_area.x, y, list_area.width.saturating_sub(1), 1),
-            );
+            let line = render_finder_row(file, result, row_width, selected, palette);
+            frame.render_widget(line, geometry.area);
         }
         if let Some(preview_area) = preview_area {
             if let Some(result) = filtered.get(self.file_picker_selection) {
@@ -2450,6 +3074,22 @@ impl App {
             title: "Command Palette",
             count: "",
             verb: "filter",
+            query: &self.file_picker_query,
+            results: &results,
+            selected: self.file_picker_selection,
+            palette,
+        }
+        .render(frame, area);
+    }
+
+    pub(super) fn render_theme_picker(&self, frame: &mut Frame) {
+        let area = centered_rect(frame.area(), 82, 22);
+        let palette = self.finder_palette();
+        let results = self.filtered_theme_results();
+        CommandPalette {
+            title: "Theme Picker",
+            count: self.theme_variant.label(),
+            verb: "filter themes",
             query: &self.file_picker_query,
             results: &results,
             selected: self.file_picker_selection,

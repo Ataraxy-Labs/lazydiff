@@ -13,7 +13,10 @@ const MAX_INLINE_DIFF_TOKENS: usize = 512;
 /// returns changed byte ranges for each side. Like Pierre, it joins changed
 /// runs across a single whitespace gap so tiny neutral spaces do not leave
 /// distracting holes in the highlight.
-pub fn compute_inline_diff_spans(delete_text: &str, add_text: &str) -> Option<(Vec<InlineDiffSpan>, Vec<InlineDiffSpan>)> {
+pub fn compute_inline_diff_spans(
+    delete_text: &str,
+    add_text: &str,
+) -> Option<(Vec<InlineDiffSpan>, Vec<InlineDiffSpan>)> {
     if delete_text == add_text
         || delete_text.len() > MAX_INLINE_DIFF_LINE_BYTES
         || add_text.len() > MAX_INLINE_DIFF_LINE_BYTES
@@ -61,7 +64,11 @@ fn diff_tokens(text: &str) -> Vec<DiffToken<'_>> {
         let kind = TokenKind::for_char(ch);
         if let Some(current_kind) = current_kind {
             if current_kind != kind || kind == TokenKind::Punctuation {
-                tokens.push(DiffToken { text: &text[start..byte_index], start, end: byte_index });
+                tokens.push(DiffToken {
+                    text: &text[start..byte_index],
+                    start,
+                    end: byte_index,
+                });
                 start = byte_index;
             }
         }
@@ -69,7 +76,11 @@ fn diff_tokens(text: &str) -> Vec<DiffToken<'_>> {
     }
 
     if start < text.len() {
-        tokens.push(DiffToken { text: &text[start..], start, end: text.len() });
+        tokens.push(DiffToken {
+            text: &text[start..],
+            start,
+            end: text.len(),
+        });
     }
 
     tokens
@@ -125,7 +136,11 @@ fn lcs_pairs(left: &[DiffToken<'_>], right: &[DiffToken<'_>]) -> Vec<(usize, usi
     pairs
 }
 
-fn changed_token_spans(text: &str, tokens: &[DiffToken<'_>], changed: &[bool]) -> Vec<InlineDiffSpan> {
+fn changed_token_spans(
+    text: &str,
+    tokens: &[DiffToken<'_>],
+    changed: &[bool],
+) -> Vec<InlineDiffSpan> {
     let mut spans: Vec<InlineDiffSpan> = Vec::new();
     for (token, changed) in tokens.iter().zip(changed) {
         if !*changed || token.start >= token.end {
@@ -138,7 +153,10 @@ fn changed_token_spans(text: &str, tokens: &[DiffToken<'_>], changed: &[bool]) -
                 continue;
             }
         }
-        spans.push(InlineDiffSpan { start: token.start, end: token.end });
+        spans.push(InlineDiffSpan {
+            start: token.start,
+            end: token.end,
+        });
     }
     spans
 }

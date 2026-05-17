@@ -35,9 +35,13 @@ pub(crate) fn split_gutter_segments(
     let gutter_bg = gutter_bg(kind, theme);
     let selected_bg = if selected { theme.selected } else { gutter_bg };
     let rail_fg = rail_color(kind, theme, selected);
+    let rail = match kind {
+        RowKind::Add | RowKind::Delete => "▎",
+        RowKind::Context | RowKind::Empty => " ",
+    };
     let rail_style = Style::new()
         .fg(rail_fg)
-        .bg(if selected { theme.selected } else { theme.panel });
+        .bg(if selected { theme.selected } else { gutter_bg });
     let number_fg = match kind {
         RowKind::Add => theme.add_fg,
         RowKind::Delete => theme.del_fg,
@@ -47,17 +51,12 @@ pub(crate) fn split_gutter_segments(
         .fg(if selected { Color::White } else { number_fg })
         .bg(selected_bg);
     let sign_style = line_number_style;
-    let sign = match cell.sign {
-        Some(LineSign::Add) => " +",
-        Some(LineSign::Delete) => " -",
-        None if cell.reserve_sign => "  ",
-        None => "",
-    };
+    let sign = "";
 
     SplitGutterSegments {
-        rail: "▌",
+        rail,
         rail_style,
-        line_number: format!("{:>4}", line_num(cell.line)),
+        line_number: exact_line_num(cell.line),
         sign,
         trailing: " ",
         line_number_style,
@@ -65,8 +64,11 @@ pub(crate) fn split_gutter_segments(
     }
 }
 
-pub(crate) fn line_num(value: Option<u32>) -> String {
-    value.map(|line| line.to_string()).unwrap_or_default()
+pub(crate) fn exact_line_num(value: Option<u32>) -> String {
+    match value {
+        None => "    ".to_string(),
+        Some(line) => format!("{line:>4}"),
+    }
 }
 
 pub(crate) fn rail_color(kind: RowKind, theme: DiffTheme, selected: bool) -> Color {
@@ -83,8 +85,25 @@ pub(crate) fn rail_color(kind: RowKind, theme: DiffTheme, selected: bool) -> Col
 }
 
 fn blend(color: Color, toward: Color, amount: f32) -> Color {
-    let Color::Rgb(r, g, b) = color else { return color };
-    let Color::Rgb(tr, tg, tb) = toward else { return color };
-    let mix = |front: u8, back: u8| (back as f32 + (front as f32 - back as f32) * amount).round() as u8;
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let Color::Rgb(tr, tg, tb) = toward else {
+        return color;
+    };
+    let mix =
+        |front: u8, back: u8| (back as f32 + (front as f32 - back as f32) * amount).round() as u8;
     Color::Rgb(mix(r, tr), mix(g, tg), mix(b, tb))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_line_num_does_not_abbreviate_thousands() {
+        assert_eq!(exact_line_num(Some(999)), " 999");
+        assert_eq!(exact_line_num(Some(1000)), "1000");
+        assert_eq!(exact_line_num(Some(12_345)), "12345");
+    }
 }

@@ -3,7 +3,10 @@ use super::*;
 
 impl App {
     pub(super) fn open_review_composer(&mut self, kind: ReviewItemKind) {
-        if !matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
+        if !matches!(
+            self.diff_source,
+            DiffSource::LocalWorktree(_) | DiffSource::PullRequest { .. }
+        ) {
             return;
         }
         let Some(target) = self.active_review_target() else {
@@ -12,6 +15,11 @@ impl App {
         self.state.clear_mouse_selection();
         self.file_picker_open = false;
         self.thread_modal = None;
+        let kind = if matches!(self.diff_source, DiffSource::PullRequest { .. }) {
+            ReviewItemKind::Note
+        } else {
+            kind
+        };
         self.comment_modal = Some(CommentModal::new(target, kind, None));
     }
 
@@ -84,13 +92,31 @@ impl App {
             }
             KeyCode::Enter => {
                 if !modal.body.trim().is_empty() {
-                    self.session.add_note(
-                        &self.store,
-                        modal.target,
-                        modal.kind,
-                        modal.parent_id,
-                        modal.body,
-                    );
+                    if let DiffSource::PullRequest { repository, number } = &self.diff_source {
+                        let repository = repository.clone();
+                        let number = *number;
+                        let target = modal.target;
+                        let body = modal.body;
+                        self.branch_operation_status = Some("posting PR comment…".to_string());
+                        let sender = self.query_tx.clone();
+                        thread::spawn(move || {
+                            let result =
+                                post_pull_request_comment(&repository, number, &target, &body);
+                            let _ = sender.send(QueryEvent::PostedComment {
+                                repository,
+                                number,
+                                result,
+                            });
+                        });
+                    } else {
+                        self.session.add_note(
+                            &self.store,
+                            modal.target,
+                            modal.kind,
+                            modal.parent_id,
+                            modal.body,
+                        );
+                    }
                 }
             }
             KeyCode::Char(ch) if !ch.is_control() => {
@@ -123,7 +149,12 @@ impl App {
             .fg(palette.key)
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD);
-        let composer_title = modal.kind.composer_title();
+        let is_pr_comment = matches!(self.diff_source, DiffSource::PullRequest { .. });
+        let composer_title = if is_pr_comment {
+            "Add PR comment"
+        } else {
+            modal.kind.composer_title()
+        };
         let (symbol, _) = modal.kind.gutter_marker();
         frame.render_widget(
             Line::from(vec![
@@ -141,7 +172,11 @@ impl App {
         frame.render_widget(
             Line::from(Span::styled(
                 truncate(
-                    modal.kind.composer_help(),
+                    if is_pr_comment {
+                        "Posts this comment to the GitHub pull request on the selected diff line."
+                    } else {
+                        modal.kind.composer_help()
+                    },
                     area.width.saturating_sub(6) as usize,
                 ),
                 muted,
@@ -180,7 +215,17 @@ impl App {
         frame.render_widget(
             Line::from(vec![
                 Span::styled("enter", key),
-                Span::styled(format!(" {}   ", modal.kind.submit_label()), muted),
+                Span::styled(
+                    format!(
+                        " {}   ",
+                        if is_pr_comment {
+                            "post to GitHub"
+                        } else {
+                            modal.kind.submit_label()
+                        }
+                    ),
+                    muted,
+                ),
                 Span::styled("esc", key),
                 Span::styled(" cancel", muted),
             ]),

@@ -9,7 +9,6 @@ use sem_core::{
 };
 
 const SEMANTIC_CHANGE_LIMIT: usize = 240;
-const SEMANTIC_DEFAULT_OPEN_FILE_COUNT: usize = 1;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SemanticDiff {
@@ -29,6 +28,8 @@ pub(crate) struct SemanticChange {
     pub(crate) entity_name: String,
     pub(crate) change_type: String,
     pub(crate) line: Option<usize>,
+    #[serde(default)]
+    pub(crate) end_line: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -77,8 +78,123 @@ pub(crate) enum SemanticTreeRow {
         entity_name: String,
         change_type: String,
         line: Option<usize>,
+        end_line: Option<usize>,
     },
     Status(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SemanticMapNode {
+    pub(crate) row_index: Option<usize>,
+    pub(crate) parent: Option<usize>,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+}
+
+pub(crate) fn build_semantic_map_nodes(rows: &[SemanticTreeRow]) -> Vec<SemanticMapNode> {
+    let mut nodes = vec![SemanticMapNode {
+        row_index: None,
+        parent: None,
+        x: 0,
+        y: 0,
+    }];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut depth_stack: Vec<Option<usize>> = Vec::new();
+    for (row_index, row) in rows.iter().enumerate() {
+        let depth = match row {
+            SemanticTreeRow::Directory { depth, .. }
+            | SemanticTreeRow::File { depth, .. }
+            | SemanticTreeRow::Entity { depth, .. } => *depth,
+            SemanticTreeRow::Status(_) => continue,
+        };
+        if depth_stack.len() <= depth {
+            depth_stack.resize(depth.saturating_add(1), None);
+        }
+        depth_stack.truncate(depth.saturating_add(1));
+        let parent = depth
+            .checked_sub(1)
+            .and_then(|parent_depth| depth_stack.get(parent_depth).copied().flatten());
+        let node_index = nodes.len();
+        let parent = parent.or(Some(0));
+        nodes.push(SemanticMapNode {
+            row_index: Some(row_index),
+            parent,
+            x: 0,
+            y: ((depth as i32).saturating_add(1)).saturating_mul(4),
+        });
+        children.push(Vec::new());
+        if let Some(parent) = parent {
+            children[parent].push(node_index);
+        }
+        depth_stack[depth] = Some(node_index);
+    }
+    if nodes.len() == 1 {
+        return Vec::new();
+    }
+
+    fn assign_tree_x(
+        node_index: usize,
+        nodes: &mut [SemanticMapNode],
+        children: &[Vec<usize>],
+        next_leaf: &mut i32,
+    ) -> i32 {
+        if children[node_index].is_empty() {
+            let x = *next_leaf;
+            *next_leaf = next_leaf.saturating_add(8);
+            nodes[node_index].x = x;
+            return x;
+        }
+        let mut first = None;
+        let mut last = None;
+        for child_index in &children[node_index] {
+            let child_x = assign_tree_x(*child_index, nodes, children, next_leaf);
+            first.get_or_insert(child_x);
+            last = Some(child_x);
+        }
+        let x = (first.unwrap_or(0) + last.unwrap_or(0)) / 2;
+        nodes[node_index].x = x;
+        x
+    }
+
+    let mut next_leaf = 0;
+    assign_tree_x(0, &mut nodes, &children, &mut next_leaf);
+    nodes
+}
+
+pub(crate) fn semantic_map_screen_positions(
+    nodes: &[SemanticMapNode],
+    area: Rect,
+    zoom: f32,
+    pan_x: i32,
+    pan_y: i32,
+) -> Vec<(i32, i32)> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let min_x = nodes.iter().map(|node| node.x).min().unwrap_or(0);
+    let max_x = nodes.iter().map(|node| node.x).max().unwrap_or(min_x);
+    let min_y = nodes.iter().map(|node| node.y).min().unwrap_or(0);
+    let max_y = nodes.iter().map(|node| node.y).max().unwrap_or(min_y);
+    let x_range = (max_x - min_x).max(1) as f32;
+    let y_range = (max_y - min_y).max(1) as f32;
+    let left = area.x.saturating_add(2) as i32;
+    let top = area.y.saturating_add(1) as i32;
+    let width = area.width.saturating_sub(5).max(1) as f32;
+    let height = area.height.saturating_sub(5).max(1) as f32;
+    let center_x = area.x as f32 + area.width as f32 / 2.0;
+    let center_y = area.y as f32 + area.height as f32 / 2.0;
+    let zoom = zoom.clamp(0.5, 4.0);
+
+    nodes
+        .iter()
+        .map(|node| {
+            let base_x = left as f32 + ((node.x - min_x) as f32 / x_range) * width;
+            let base_y = top as f32 + ((node.y - min_y) as f32 / y_range) * height;
+            let x = center_x + (base_x - center_x) * zoom + pan_x as f32;
+            let y = center_y + (base_y - center_y) * zoom + pan_y as f32;
+            (x.round() as i32, y.round() as i32)
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,19 +255,14 @@ impl SemanticViewport {
             .min(viewport.total_rows.saturating_sub(viewport.visible_rows));
         viewport
     }
-
-    fn row_at(self, viewport_row: usize) -> Option<usize> {
-        let row = self.scroll_y.saturating_add(viewport_row);
-        (viewport_row < self.visible_rows && row < self.total_rows).then_some(row)
-    }
 }
 
 pub(crate) fn semantic_tree_body_area(area: Rect) -> Rect {
     Rect::new(
-        area.x,
+        area.x.saturating_add(1),
         area.y.saturating_add(1),
-        area.width,
-        area.height.saturating_sub(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
     )
 }
 
@@ -336,6 +447,7 @@ impl App {
                 entity_name: change.entity_name.clone(),
                 change_type: change.change_type.clone(),
                 line: change.line,
+                end_line: change.end_line,
             }));
         }
         if diff.truncated {
@@ -458,14 +570,13 @@ impl App {
         route: &DiffSource,
         diff: &SemanticDiff,
     ) -> Vec<SemanticNodeKey> {
-        // Keep path scaffolding open so every changed file remains visible,
-        // but only open the first file's entities by default. Enter/`]` can
-        // still explode the focused branch on demand.
+        // Keep the map useful as a semantic graph: path scaffolding and all
+        // changed files are open by default so entity nodes are immediately
+        // reachable by mouse/keyboard.
         let mut keys = Self::semantic_directory_keys(route, diff);
         keys.extend(
             diff.files
                 .iter()
-                .take(SEMANTIC_DEFAULT_OPEN_FILE_COUNT)
                 .map(|file| SemanticNodeKey::file(route, &file.path)),
         );
         keys
@@ -550,6 +661,7 @@ impl App {
         route: DiffSource,
         path: String,
         line: Option<usize>,
+        end_line: Option<usize>,
         change_type: Option<String>,
     ) {
         match &route {
@@ -557,7 +669,7 @@ impl App {
                 self.document = self.document_for_route(&route);
                 self.push_route(AppRoute::Diff(route.clone()));
                 self.state = DiffViewState::default();
-                self.focus_path_if_present(&path, line, change_type.as_deref());
+                self.focus_path_if_present(&path, line, end_line, change_type.as_deref());
                 self.revalidate_local_diff();
             }
             DiffSource::PullRequest { repository, number } => {
@@ -565,6 +677,7 @@ impl App {
                     route: route.clone(),
                     path: path.clone(),
                     line,
+                    end_line,
                     change_type: change_type.clone(),
                 });
                 self.push_route(AppRoute::Diff(route.clone()));
@@ -612,7 +725,41 @@ impl App {
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
         self.set_semantic_viewport(viewport);
-        let Some(row_index) = viewport.row_at(row.saturating_sub(body.y) as usize) else {
+        let nodes = build_semantic_map_nodes(&rows);
+        let positions = semantic_map_screen_positions(
+            &nodes,
+            body,
+            self.semantic_map_zoom,
+            self.semantic_map_pan_x,
+            self.semantic_map_pan_y,
+        );
+        let selected_node_index = nodes
+            .iter()
+            .position(|node| node.row_index == Some(viewport.selected))
+            .unwrap_or(1.min(nodes.len().saturating_sub(1)));
+        if nodes.get(selected_node_index).is_none() {
+            return false;
+        }
+        let click_x = column as i32;
+        let click_y = row as i32;
+        let Some(row_index) = nodes
+            .iter()
+            .zip(positions.iter())
+            .filter_map(|(node, (x, y))| {
+                if *x < body.left() as i32
+                    || *x >= body.right() as i32
+                    || *y < body.top() as i32
+                    || *y >= body.bottom() as i32
+                {
+                    return None;
+                }
+                let row_index = node.row_index?;
+                let distance = x.abs_diff(click_x).saturating_add(y.abs_diff(click_y));
+                (distance <= 3).then_some((distance, row_index))
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, row_index)| row_index)
+        else {
             return false;
         };
         let Some(tree_row) = rows.get(row_index).cloned() else {
@@ -625,11 +772,58 @@ impl App {
             SemanticTreeRow::Entity {
                 path,
                 line,
+                end_line,
                 change_type,
                 ..
-            } => self.open_semantic_path(route, path, line, Some(change_type)),
+            } => self.open_semantic_path(route, path, line, end_line, Some(change_type)),
             SemanticTreeRow::Status(_) => return false,
         }
+        true
+    }
+
+    pub(super) fn select_semantic_node_at(
+        &mut self,
+        route: &DiffSource,
+        area: Rect,
+        column: u16,
+        row: u16,
+    ) -> bool {
+        let body = semantic_tree_body_area(area);
+        if area.width == 0
+            || area.height == 0
+            || column < area.x
+            || column >= area.right()
+            || !contains_point(body, column, row)
+        {
+            return false;
+        }
+        let rows = self.semantic_tree_rows(route);
+        let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
+        self.set_semantic_viewport(viewport);
+        let nodes = build_semantic_map_nodes(&rows);
+        let positions = semantic_map_screen_positions(
+            &nodes,
+            body,
+            self.semantic_map_zoom,
+            self.semantic_map_pan_x,
+            self.semantic_map_pan_y,
+        );
+        let click_x = column as i32;
+        let click_y = row as i32;
+        let Some(row_index) = nodes
+            .iter()
+            .zip(positions.iter())
+            .filter_map(|(node, (x, y))| {
+                let row_index = node.row_index?;
+                let distance = x.abs_diff(click_x).saturating_add(y.abs_diff(click_y));
+                (distance <= 3).then_some((distance, row_index))
+            })
+            .min_by_key(|(distance, _)| *distance)
+            .map(|(_, row_index)| row_index)
+        else {
+            return false;
+        };
+        self.semantic_selection = row_index.min(rows.len().saturating_sub(1));
         true
     }
 
@@ -654,8 +848,115 @@ impl App {
         self.set_semantic_viewport(viewport);
     }
 
+    pub(super) fn move_semantic_selection_structural(&mut self, code: KeyCode) -> bool {
+        let Some(route) = self.current_semantic_route() else {
+            return false;
+        };
+        let rows = self.semantic_tree_rows(&route);
+        if rows.is_empty() {
+            return false;
+        }
+        let nodes = build_semantic_map_nodes(&rows);
+        let Some(current_index) = nodes
+            .iter()
+            .position(|node| node.row_index == Some(self.semantic_selection.min(rows.len() - 1)))
+        else {
+            return false;
+        };
+        let current_x = nodes[current_index].x;
+        let current_y = nodes[current_index].y;
+        let nearest_on_level = |target_y: i32, direction: isize| {
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|(index, node)| {
+                    *index != current_index
+                        && node.row_index.is_some()
+                        && node.y == target_y
+                        && if direction.is_negative() {
+                            node.x < current_x
+                        } else if direction.is_positive() {
+                            node.x > current_x
+                        } else {
+                            true
+                        }
+                })
+                .min_by_key(|(_, node)| node.x.abs_diff(current_x))
+                .map(|(index, _)| index)
+        };
+        let nearest_vertical = |target_y: i32| {
+            nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, node)| node.row_index.is_some() && node.y == target_y)
+                .min_by_key(|(_, node)| node.x.abs_diff(current_x))
+                .map(|(index, _)| index)
+        };
+        let target_index = match code {
+            KeyCode::Char('h') | KeyCode::Left => nearest_on_level(current_y, -1),
+            KeyCode::Char('l') | KeyCode::Right => nearest_on_level(current_y, 1),
+            KeyCode::Char('k') | KeyCode::Up => nearest_vertical(current_y.saturating_sub(4)),
+            KeyCode::Char('j') | KeyCode::Down => nearest_vertical(current_y.saturating_add(4)),
+            _ => None,
+        };
+        let Some(target_row) = target_index
+            .and_then(|index| nodes.get(index))
+            .and_then(|node| node.row_index)
+        else {
+            return false;
+        };
+        self.semantic_selection = target_row.min(rows.len().saturating_sub(1));
+        let viewport = SemanticViewport::centered(
+            rows.len(),
+            self.semantic_visible_rows.max(1),
+            self.semantic_selection,
+        );
+        self.set_semantic_viewport(viewport);
+        true
+    }
+
     pub(super) fn scroll_semantic_tree(&mut self, delta: isize) {
         self.move_semantic_selection(delta);
+    }
+
+    pub(super) fn zoom_semantic_map_at(&mut self, area: Rect, column: u16, row: u16, delta: isize) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let old_zoom = self.semantic_map_zoom.clamp(0.5, 4.0);
+        let factor = if delta.is_positive() {
+            1.18
+        } else {
+            1.0 / 1.18
+        };
+        let new_zoom = (old_zoom * factor).clamp(0.5, 4.0);
+        if (new_zoom - old_zoom).abs() < f32::EPSILON {
+            self.semantic_map_zoom = new_zoom;
+            return;
+        }
+        let center_x = area.x as f32 + area.width as f32 / 2.0;
+        let center_y = area.y as f32 + area.height as f32 / 2.0;
+        let cursor_x = column as f32;
+        let cursor_y = row as f32;
+        let ratio = new_zoom / old_zoom;
+        let new_pan_x =
+            cursor_x - center_x - (cursor_x - center_x - self.semantic_map_pan_x as f32) * ratio;
+        let new_pan_y =
+            cursor_y - center_y - (cursor_y - center_y - self.semantic_map_pan_y as f32) * ratio;
+        self.semantic_map_zoom = new_zoom;
+        self.semantic_map_pan_x = new_pan_x.round() as i32;
+        self.semantic_map_pan_y = new_pan_y.round() as i32;
+    }
+
+    pub(super) fn pan_semantic_map(&mut self, dx: i32, dy: i32) {
+        self.semantic_map_pan_x = self.semantic_map_pan_x.saturating_add(dx);
+        self.semantic_map_pan_y = self.semantic_map_pan_y.saturating_add(dy);
+    }
+
+    pub(super) fn reset_semantic_map_view(&mut self) {
+        self.semantic_map_zoom = 1.0;
+        self.semantic_map_pan_x = 0;
+        self.semantic_map_pan_y = 0;
     }
 
     pub(super) fn scroll_semantic_viewport_to(&mut self, row: u16, area: Rect) -> bool {
@@ -668,28 +969,17 @@ impl App {
         }
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
-        let slider = SliderState {
-            value: viewport.scroll_y,
-            min: 0,
-            max: viewport.total_rows.saturating_sub(viewport.visible_rows),
-            viewport_size: viewport.visible_rows,
-        };
-        if slider.max == 0 {
+        let scrollbar = VerticalScrollbar::new(
+            body,
+            viewport.total_rows,
+            viewport.visible_rows,
+            viewport.scroll_y,
+        );
+        if scrollbar.slider().max == 0 {
             self.set_semantic_viewport(viewport);
             return true;
         }
-        let geometry = slider.geometry(viewport.visible_rows);
-        let max_thumb_start = geometry
-            .virtual_track_size
-            .saturating_sub(geometry.virtual_thumb_size);
-        let body_row = row.saturating_sub(body.y) as usize;
-        let virtual_mouse = body_row.min(viewport.visible_rows) * 2;
-        let desired_thumb_start = virtual_mouse
-            .saturating_sub(self.semantic_scrollbar_drag_offset_virtual)
-            .min(max_thumb_start);
-        let scroll_y = slider
-            .value_from_virtual_thumb_start(viewport.visible_rows, desired_thumb_start)
-            .min(slider.max);
+        let scroll_y = scrollbar.value_from_drag(row, self.semantic_scrollbar_drag_offset_virtual);
         let selected = scroll_y
             .saturating_add(viewport.selected.saturating_sub(viewport.scroll_y))
             .min(viewport.total_rows.saturating_sub(1));
@@ -709,15 +999,13 @@ impl App {
         let body = semantic_tree_body_area(area);
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
-        let slider = SliderState {
-            value: viewport.scroll_y,
-            min: 0,
-            max: viewport.total_rows.saturating_sub(viewport.visible_rows),
-            viewport_size: viewport.visible_rows,
-        };
-        let thumb_start = slider.geometry(viewport.visible_rows).virtual_thumb_start;
-        let virtual_mouse = row.saturating_sub(body.y) as usize * 2;
-        virtual_mouse.saturating_sub(thumb_start)
+        VerticalScrollbar::new(
+            body,
+            viewport.total_rows,
+            viewport.visible_rows,
+            viewport.scroll_y,
+        )
+        .drag_offset_virtual(row)
     }
 
     pub(super) fn apply_pending_semantic_focus(&mut self, route: &DiffSource) {
@@ -729,7 +1017,12 @@ impl App {
         }
         self.pending_semantic_focus = None;
         self.state = DiffViewState::default();
-        self.focus_path_if_present(&target.path, target.line, target.change_type.as_deref());
+        self.focus_path_if_present(
+            &target.path,
+            target.line,
+            target.end_line,
+            target.change_type.as_deref(),
+        );
     }
 
     pub(super) fn focus_semantic_path(
@@ -738,7 +1031,7 @@ impl App {
         line: Option<usize>,
         change_type: Option<&str>,
     ) {
-        self.focus_path_if_present(path, line, change_type);
+        self.focus_path_if_present(path, line, None, change_type);
     }
 
     pub(super) fn open_selected_semantic_row(&mut self) -> bool {
@@ -774,10 +1067,11 @@ impl App {
             SemanticTreeRow::Entity {
                 path,
                 line,
+                end_line,
                 change_type,
                 ..
             } => {
-                self.open_semantic_path(route, path, line, Some(change_type));
+                self.open_semantic_path(route, path, line, end_line, Some(change_type));
                 true
             }
             SemanticTreeRow::Status(_) => false,
@@ -805,6 +1099,7 @@ impl App {
         &mut self,
         path: &str,
         line: Option<usize>,
+        end_line: Option<usize>,
         change_type: Option<&str>,
     ) {
         let Some(index) = self.document.files.iter().position(|file| {
@@ -816,16 +1111,20 @@ impl App {
             return;
         };
         let rows = row_count_for_mode(&self.document, self.state.mode);
-        // sem-core reports entity_line on the after side for added/modified/
-        // renamed/moved/reordered changes and on the before side for deleted.
+        // sem-core reports primary entity spans on the after side for added/
+        // modified/renamed/moved/reordered changes and on the before side for
+        // deleted changes.
         let use_old_side = matches!(change_type, Some("deleted"));
         if let Some(line) = line.and_then(|line| u32::try_from(line).ok()) {
-            let target = best_line_match(&self.document.files[index], line, use_old_side).and_then(
-                |(hunk_index, line_index)| {
+            let end_line = end_line
+                .and_then(|line| u32::try_from(line).ok())
+                .unwrap_or(line)
+                .max(line);
+            let target = best_line_match(&self.document.files[index], line, end_line, use_old_side)
+                .and_then(|(hunk_index, line_index)| {
                     self.document
                         .line_row(self.state.mode, index, hunk_index, line_index)
-                },
-            );
+                });
             if let Some(row) = target {
                 self.focus_row(row, rows);
                 self.trigger_transient_focus(path.to_string(), row);
@@ -837,52 +1136,68 @@ impl App {
     }
 }
 
-/// Pick the closest hunk-line whose target-side line number matches
-/// `entity_line`. Prefer an exact match; otherwise the smallest line
-/// `>=` entity_line on the chosen side; otherwise fall back to the last
-/// line `<=` entity_line. Returns `(hunk_index, line_index)`.
+/// Pick the hunk line that best represents a semantic entity span. Prefer a
+/// changed line whose target-side line number intersects the semantic span;
+/// otherwise use the entity start line and nearest target-side hunk line.
+/// Returns `(hunk_index, line_index)`.
 fn best_line_match(
     file: &FileDiff,
-    entity_line: u32,
+    entity_start_line: u32,
+    entity_end_line: u32,
     use_old_side: bool,
 ) -> Option<(usize, usize)> {
+    let entity_end_line = entity_end_line.max(entity_start_line);
+    let mut changed_in_span: Option<(usize, usize)> = None;
     let mut exact: Option<(usize, usize)> = None;
     let mut after: Option<(u32, (usize, usize))> = None;
     let mut before: Option<(u32, (usize, usize))> = None;
     for (hunk_index, hunk) in file.hunks.iter().enumerate() {
         for (line_index, diff_line) in hunk.lines.iter().enumerate() {
-            let line_no: Option<u32> = match diff_line {
-                DiffLine::Context {
-                    old_line, new_line, ..
-                } => Some(if use_old_side { *old_line } else { *new_line }),
-                DiffLine::Add { new_line, .. } if !use_old_side => Some(*new_line),
-                DiffLine::Delete { old_line, .. } if use_old_side => Some(*old_line),
-                _ => None,
+            let Some((line_no, is_changed)) = diff_line_side_line(diff_line, use_old_side) else {
+                continue;
             };
-            let Some(line_no) = line_no else { continue };
-            if line_no == entity_line {
+            if is_changed && (entity_start_line..=entity_end_line).contains(&line_no) {
+                changed_in_span = Some((hunk_index, line_index));
+                break;
+            }
+            if line_no == entity_start_line {
                 if exact.is_none() {
                     exact = Some((hunk_index, line_index));
                 }
-            } else if line_no > entity_line {
-                let delta = line_no - entity_line;
+            } else if line_no > entity_start_line {
+                let delta = line_no - entity_start_line;
                 if after.is_none_or(|(d, _)| delta < d) {
                     after = Some((delta, (hunk_index, line_index)));
                 }
             } else {
-                let delta = entity_line - line_no;
+                let delta = entity_start_line - line_no;
                 if before.is_none_or(|(d, _)| delta < d) {
                     before = Some((delta, (hunk_index, line_index)));
                 }
             }
         }
+        if changed_in_span.is_some() {
+            return changed_in_span;
+        }
         if exact.is_some() {
             return exact;
         }
     }
-    exact
+    changed_in_span
+        .or(exact)
         .or_else(|| after.map(|(_, pos)| pos))
         .or_else(|| before.map(|(_, pos)| pos))
+}
+
+fn diff_line_side_line(diff_line: &DiffLine, use_old_side: bool) -> Option<(u32, bool)> {
+    match diff_line {
+        DiffLine::Context {
+            old_line, new_line, ..
+        } => Some((if use_old_side { *old_line } else { *new_line }, false)),
+        DiffLine::Add { new_line, .. } if !use_old_side => Some((*new_line, true)),
+        DiffLine::Delete { old_line, .. } if use_old_side => Some((*old_line, true)),
+        _ => None,
+    }
 }
 
 impl SemanticDiff {
@@ -894,6 +1209,7 @@ impl SemanticDiff {
             if change.entity_type.eq_ignore_ascii_case("chunk") {
                 continue;
             }
+            let (line, end_line) = semantic_line_span(&change);
             let path = if change.file_path.trim().is_empty() {
                 "unknown".to_string()
             } else {
@@ -906,7 +1222,8 @@ impl SemanticDiff {
                 entity_type: normalize_semantic_label(&change.entity_type, "ENTITY"),
                 entity_name: normalize_semantic_label(&change.entity_name, "module"),
                 change_type: semantic_change_label(change.change_type).to_string(),
-                line: (change.entity_line > 0).then_some(change.entity_line),
+                line,
+                end_line,
             });
         }
         Self {
@@ -920,6 +1237,28 @@ impl SemanticDiff {
             truncated,
         }
     }
+}
+
+fn semantic_line_span(
+    change: &sem_core::model::change::SemanticChange,
+) -> (Option<usize>, Option<usize>) {
+    let start = (change.entity_line > 0).then_some(change.entity_line);
+    let content = if matches!(change.change_type, ChangeType::Deleted) {
+        change
+            .before_content
+            .as_deref()
+            .or(change.after_content.as_deref())
+    } else {
+        change
+            .after_content
+            .as_deref()
+            .or(change.before_content.as_deref())
+    };
+    let end = start.map(|line| {
+        let line_count = content.map_or(1, |content| content.lines().count().max(1));
+        line.saturating_add(line_count.saturating_sub(1))
+    });
+    (start, end)
 }
 
 fn semantic_change_label(change_type: ChangeType) -> &'static str {
@@ -1084,7 +1423,7 @@ mod tests {
     fn best_line_match_prefers_exact_new_line_for_added_entity() {
         // Lines 1..3 context, line 4 added entity, line 5 context.
         let f = file(vec![ctx(1, 1), ctx(2, 2), ctx(3, 3), add(4), ctx(4, 5)]);
-        let pos = best_line_match(&f, 4, false).unwrap();
+        let pos = best_line_match(&f, 4, 4, false).unwrap();
         // Index 3 is the Add at new_line=4.
         assert_eq!(pos, (0, 3));
     }
@@ -1094,7 +1433,7 @@ mod tests {
         // Lines 1..2 context, line 3 deleted entity, then a context line
         // whose old side advanced to 4 because the delete shifted it.
         let f = file(vec![ctx(1, 1), ctx(2, 2), del(3), ctx(4, 3)]);
-        let pos = best_line_match(&f, 3, true).unwrap();
+        let pos = best_line_match(&f, 3, 3, true).unwrap();
         // Index 2 is the Delete at old_line=3.
         assert_eq!(pos, (0, 2));
     }
@@ -1104,7 +1443,7 @@ mod tests {
         // The old-side line numbers happen to match `line`, but the entity
         // is on the after side; we must not anchor on them.
         let f = file(vec![ctx(10, 1), ctx(11, 2), ctx(12, 3)]);
-        let pos = best_line_match(&f, 10, false);
+        let pos = best_line_match(&f, 10, 10, false);
         // None of new_line values reach 10; nearest below is new_line=3
         // at index 2.
         assert_eq!(pos, Some((0, 2)));
@@ -1113,7 +1452,20 @@ mod tests {
     #[test]
     fn best_line_match_returns_none_for_empty_file() {
         let f = file(Vec::new());
-        assert_eq!(best_line_match(&f, 1, false), None);
-        assert_eq!(best_line_match(&f, 1, true), None);
+        assert_eq!(best_line_match(&f, 1, 1, false), None);
+        assert_eq!(best_line_match(&f, 1, 1, true), None);
+    }
+
+    #[test]
+    fn best_line_match_prefers_changed_line_inside_entity_span_over_declaration() {
+        let f = file(vec![
+            ctx(10, 10),
+            ctx(11, 11),
+            ctx(12, 12),
+            add(13),
+            ctx(13, 14),
+        ]);
+
+        assert_eq!(best_line_match(&f, 10, 14, false), Some((0, 3)));
     }
 }

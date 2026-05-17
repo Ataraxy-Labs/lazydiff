@@ -57,14 +57,22 @@ impl HunkContent {
     pub fn split_line_count(&self) -> usize {
         match self {
             Self::Context { lines, .. } => *lines as usize,
-            Self::Change { deletions, additions, .. } => (*deletions).max(*additions) as usize,
+            Self::Change {
+                deletions,
+                additions,
+                ..
+            } => (*deletions).max(*additions) as usize,
         }
     }
 
     pub fn unified_line_count(&self) -> usize {
         match self {
             Self::Context { lines, .. } => *lines as usize,
-            Self::Change { deletions, additions, .. } => (*deletions + *additions) as usize,
+            Self::Change {
+                deletions,
+                additions,
+                ..
+            } => (*deletions + *additions) as usize,
         }
     }
 }
@@ -81,7 +89,11 @@ pub fn build_file_metadata(file: &FileDiff) -> FileDiffMetadata {
 
     for hunk in &file.hunks {
         let collapsed_before = hunk.old_start.saturating_sub(previous_old_end + 1);
-        let content = build_hunk_content(hunk.lines.as_slice(), deletion_line_index, addition_line_index);
+        let content = build_hunk_content(
+            hunk.lines.as_slice(),
+            deletion_line_index,
+            addition_line_index,
+        );
         let hunk_split_lines = content.iter().map(HunkContent::split_line_count).sum();
         let hunk_unified_lines = content.iter().map(HunkContent::unified_line_count).sum();
         let old_count = hunk
@@ -115,8 +127,16 @@ pub fn build_file_metadata(file: &FileDiff) -> FileDiffMetadata {
         unified_line_count += collapsed_before as usize + hunk_unified_lines;
         deletion_line_index += old_count as usize;
         addition_line_index += new_count as usize;
-        deletion_lines += hunk.lines.iter().filter(|line| matches!(line, DiffLine::Delete { .. })).count();
-        addition_lines += hunk.lines.iter().filter(|line| matches!(line, DiffLine::Add { .. })).count();
+        deletion_lines += hunk
+            .lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Delete { .. }))
+            .count();
+        addition_lines += hunk
+            .lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Add { .. }))
+            .count();
         previous_old_end = hunk.old_start + old_count.saturating_sub(1);
     }
 
@@ -132,7 +152,11 @@ pub fn build_file_metadata(file: &FileDiff) -> FileDiffMetadata {
     }
 }
 
-fn build_hunk_content(lines: &[DiffLine], mut deletion_line_index: usize, mut addition_line_index: usize) -> Vec<HunkContent> {
+fn build_hunk_content(
+    lines: &[DiffLine],
+    mut deletion_line_index: usize,
+    mut addition_line_index: usize,
+) -> Vec<HunkContent> {
     let mut content = Vec::new();
     let mut line_index = 0;
 
@@ -142,7 +166,9 @@ fn build_hunk_content(lines: &[DiffLine], mut deletion_line_index: usize, mut ad
                 let start_deletion = deletion_line_index;
                 let start_addition = addition_line_index;
                 let mut count = 0;
-                while line_index < lines.len() && matches!(lines[line_index], DiffLine::Context { .. }) {
+                while line_index < lines.len()
+                    && matches!(lines[line_index], DiffLine::Context { .. })
+                {
                     count += 1;
                     deletion_line_index += 1;
                     addition_line_index += 1;
@@ -159,7 +185,12 @@ fn build_hunk_content(lines: &[DiffLine], mut deletion_line_index: usize, mut ad
                 let start_addition = addition_line_index;
                 let mut deletions = 0;
                 let mut additions = 0;
-                while line_index < lines.len() && matches!(lines[line_index], DiffLine::Delete { .. } | DiffLine::Add { .. }) {
+                while line_index < lines.len()
+                    && matches!(
+                        lines[line_index],
+                        DiffLine::Delete { .. } | DiffLine::Add { .. }
+                    )
+                {
                     match lines[line_index] {
                         DiffLine::Delete { .. } => {
                             deletions += 1;
@@ -187,9 +218,20 @@ fn build_hunk_content(lines: &[DiffLine], mut deletion_line_index: usize, mut ad
 }
 
 fn file_kind(file: &FileDiff) -> FileDiffKind {
-    let has_additions = file.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| matches!(line, DiffLine::Add { .. }));
-    let has_deletions = file.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| matches!(line, DiffLine::Delete { .. }));
-    let renamed = file.old_path.as_ref().is_some_and(|old_path| old_path != &file.new_path);
+    let has_additions = file
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .any(|line| matches!(line, DiffLine::Add { .. }));
+    let has_deletions = file
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .any(|line| matches!(line, DiffLine::Delete { .. }));
+    let renamed = file
+        .old_path
+        .as_ref()
+        .is_some_and(|old_path| old_path != &file.new_path);
 
     match (renamed, has_additions, has_deletions) {
         (true, false, false) => FileDiffKind::RenamePure,

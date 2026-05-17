@@ -44,6 +44,7 @@ pub struct DiffTheme {
     pub del_gutter_bg: Color,
     pub add_fg: Color,
     pub del_fg: Color,
+    pub empty_placeholder_fg: Color,
     pub selected: Color,
     pub syntax: SyntaxTheme,
 }
@@ -85,6 +86,7 @@ impl DiffTheme {
             del_gutter_bg: Color::Rgb(67, 43, 45),
             add_fg: Color::Rgb(136, 211, 155),
             del_fg: Color::Rgb(240, 160, 160),
+            empty_placeholder_fg: Color::Rgb(55, 60, 70),
             selected: Color::Rgb(59, 67, 75),
             syntax: SyntaxTheme {
                 default: Color::Rgb(242, 244, 246),
@@ -121,6 +123,7 @@ impl DiffTheme {
             del_gutter_bg: Color::Rgb(71, 38, 42),
             add_fg: Color::Rgb(105, 214, 154),
             del_fg: Color::Rgb(255, 142, 142),
+            empty_placeholder_fg: Color::Rgb(86, 115, 154),
             selected: Color::Rgb(32, 70, 106),
             syntax: SyntaxTheme {
                 default: Color::Rgb(232, 241, 255),
@@ -157,6 +160,7 @@ impl DiffTheme {
             del_gutter_bg: Color::Rgb(246, 221, 222),
             add_fg: Color::Rgb(63, 141, 88),
             del_fg: Color::Rgb(180, 84, 91),
+            empty_placeholder_fg: Color::Rgb(155, 131, 103),
             selected: Color::Rgb(234, 220, 197),
             syntax: SyntaxTheme {
                 default: Color::Rgb(47, 36, 23),
@@ -193,6 +197,7 @@ impl DiffTheme {
             del_gutter_bg: Color::Rgb(74, 31, 31),
             add_fg: Color::Rgb(131, 217, 157),
             del_fg: Color::Rgb(255, 157, 143),
+            empty_placeholder_fg: Color::Rgb(154, 115, 95),
             selected: Color::Rgb(106, 56, 41),
             syntax: SyntaxTheme {
                 default: Color::Rgb(255, 240, 230),
@@ -217,7 +222,9 @@ pub(crate) fn row_style(kind: RowKind, selected: bool, theme: DiffTheme) -> Styl
         RowKind::Add => Style::new().fg(theme.text).bg(theme.add_bg),
         RowKind::Delete => Style::new().fg(theme.text).bg(theme.del_bg),
         RowKind::Context => Style::new().fg(theme.text).bg(theme.context_content_bg),
-        RowKind::Empty => Style::new().fg(theme.muted).bg(theme.panel_alt),
+        RowKind::Empty => Style::new()
+            .fg(theme.empty_placeholder_fg)
+            .bg(theme.panel_alt),
     }
 }
 
