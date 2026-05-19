@@ -12,8 +12,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use lazydiff_diffs::{
-    add_pierre_highlights, parse_unified_diff, row_count_for_mode, DiffDocument, DiffMode,
-    DiffViewState, DiffWidget,
+    add_pierre_highlights, add_pierre_highlights_with_sources, parse_unified_diff,
+    row_count_for_mode, DiffDocument, DiffMode, DiffSide, DiffViewerState, DiffWidget,
 };
 use ratatui::{
     backend::{CrosstermBackend, TestBackend},
@@ -89,7 +89,7 @@ fn main() -> Result<()> {
     };
     let mut document = parse_unified_diff(&patch);
     let highlight_start = Instant::now();
-    let highlight_stats = add_pierre_highlights(&mut document);
+    let highlight_stats = add_highlights_for_launch(&mut document, &launch);
     eprintln!(
         "[lazydiff] pierre highlighted files={} sides={} spans={} in {:.3}ms",
         highlight_stats.files_highlighted,
@@ -616,6 +616,47 @@ impl GitMetadata {
     }
 }
 
+fn add_highlights_for_launch(
+    document: &mut DiffDocument,
+    launch: &LaunchInput,
+) -> lazydiff_diffs::HighlightStats {
+    match launch {
+        LaunchInput::LocalDiff { base_ref, .. } => {
+            let Ok(metadata) = GitMetadata::detect() else {
+                return add_pierre_highlights(document);
+            };
+            let repo_path = PathBuf::from(metadata.repo_path);
+            add_pierre_highlights_with_sources(document, |file, side| match side {
+                DiffSide::Left => file
+                    .old_path
+                    .as_deref()
+                    .and_then(|path| git_blob_at(&repo_path, local_diff_old_ref(base_ref), path)),
+                DiffSide::Right if base_ref == "--cached" => {
+                    git_index_blob_at(&repo_path, &file.new_path)
+                }
+                DiffSide::Right => fs::read_to_string(repo_path.join(&file.new_path)).ok(),
+            })
+        }
+        LaunchInput::Commit { ref_name } => {
+            let Ok(metadata) = GitMetadata::detect() else {
+                return add_pierre_highlights(document);
+            };
+            let repo_path = PathBuf::from(metadata.repo_path);
+            let parent = format!("{ref_name}^");
+            add_pierre_highlights_with_sources(document, |file, side| match side {
+                DiffSide::Left => file
+                    .old_path
+                    .as_deref()
+                    .and_then(|path| git_blob_at(&repo_path, &parent, path)),
+                DiffSide::Right => git_blob_at(&repo_path, ref_name, &file.new_path),
+            })
+        }
+        LaunchInput::Home | LaunchInput::Patch { .. } | LaunchInput::Difftool { .. } => {
+            add_pierre_highlights(document)
+        }
+    }
+}
+
 fn append_pathspecs(args: &mut Vec<String>, pathspecs: Vec<String>) {
     if pathspecs.is_empty() {
         return;
@@ -652,6 +693,22 @@ fn git_success<const N: usize>(args: [&str; N]) -> bool {
 fn git_stdout<const N: usize>(args: [&str; N]) -> Result<String> {
     let args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
     run_git_dynamic(Path::new("."), &args).map(|value| value.trim().to_string())
+}
+
+fn git_blob_at(repo_path: &Path, rev: &str, path: &str) -> Option<String> {
+    run_git_dynamic(repo_path, &["show".to_string(), format!("{rev}:{path}")]).ok()
+}
+
+fn git_index_blob_at(repo_path: &Path, path: &str) -> Option<String> {
+    run_git_dynamic(repo_path, &["show".to_string(), format!(":{path}")]).ok()
+}
+
+fn local_diff_old_ref(base_ref: &str) -> &str {
+    if base_ref == "--cached" {
+        "HEAD"
+    } else {
+        base_ref
+    }
 }
 
 fn run_git_dynamic(cwd: &Path, args: &[String]) -> Result<String> {
@@ -901,7 +958,8 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
 
 fn bench_scroll_render(path: String, bytes: usize, document: DiffDocument) -> Result<()> {
     let rows = row_count_for_mode(&document, DiffMode::Split);
-    let mut state = DiffViewState::default();
+    let mut state = DiffViewerState::default();
+    state.viewport.mode = DiffMode::Split;
     let backend = TestBackend::new(180, 50);
     let mut terminal = Terminal::new(backend)?;
     let mut total = Duration::ZERO;
@@ -910,7 +968,8 @@ fn bench_scroll_render(path: String, bytes: usize, document: DiffDocument) -> Re
 
     let start_all = Instant::now();
     for _ in 0..iterations {
-        state.scroll_y = state
+        state.viewport.scroll_y = state
+            .viewport
             .scroll_y
             .saturating_add(1)
             .min(rows.saturating_sub(49));
@@ -941,8 +1000,8 @@ fn bench_scroll_render(path: String, bytes: usize, document: DiffDocument) -> Re
         (total / iterations as u32).as_secs_f64() * 1000.0,
         max.as_secs_f64() * 1000.0,
         elapsed_all.as_secs_f64() * 1000.0,
-        state.selected_row,
-        state.scroll_y,
+        state.cursor.row,
+        state.viewport.scroll_y,
     );
     Ok(())
 }

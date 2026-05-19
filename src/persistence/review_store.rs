@@ -166,6 +166,14 @@ impl ReviewSession {
         self.notes.push(note);
     }
 
+    pub(crate) fn update_note_body(&mut self, store: &ReviewStore, note_id: u64, body: String) {
+        let Some(note) = self.notes.iter_mut().find(|note| note.id == note_id) else {
+            return;
+        };
+        note.body = body.trim().to_string();
+        store.insert_note(note);
+    }
+
     pub(crate) fn notes_for_target(&self, target: &DiffLineTarget) -> Vec<&ReviewNote> {
         self.notes
             .iter()
@@ -248,10 +256,32 @@ impl ReviewNote {
 
 #[derive(Clone)]
 pub(crate) struct CommentModal {
+    pub(crate) edit_note_id: Option<u64>,
     pub(crate) target: DiffLineRangeTarget,
     pub(crate) kind: ReviewItemKind,
     pub(crate) parent_id: Option<u64>,
     pub(crate) body: String,
+    pub(crate) lines: Vec<String>,
+    pub(crate) row: usize,
+    pub(crate) col: usize,
+    pub(crate) mode: CommentEditorMode,
+    pub(crate) selection_anchor: Option<CommentTextPoint>,
+    pub(crate) selection_cursor: Option<CommentTextPoint>,
+    pub(crate) pending_delete: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommentEditorMode {
+    Normal,
+    Insert,
+    Visual,
+    VisualLine,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommentTextPoint {
+    pub(crate) row: usize,
+    pub(crate) col: usize,
 }
 
 impl CommentModal {
@@ -261,11 +291,456 @@ impl CommentModal {
         parent_id: Option<u64>,
     ) -> Self {
         Self {
+            edit_note_id: None,
             target,
             kind,
             parent_id,
             body: String::new(),
+            lines: vec![String::new()],
+            row: 0,
+            col: 0,
+            mode: CommentEditorMode::Insert,
+            selection_anchor: None,
+            selection_cursor: None,
+            pending_delete: false,
         }
+    }
+
+    pub(crate) fn existing(note: &ReviewNote) -> Self {
+        let lines = comment_lines(&note.body);
+        Self {
+            edit_note_id: Some(note.id),
+            target: note.target.clone(),
+            kind: note.kind,
+            parent_id: note.parent_id,
+            body: note.body.clone(),
+            lines,
+            row: 0,
+            col: 0,
+            mode: CommentEditorMode::Normal,
+            selection_anchor: None,
+            selection_cursor: None,
+            pending_delete: false,
+        }
+    }
+
+    pub(crate) fn sync_body(&mut self) {
+        self.body = self.lines.join("\n");
+    }
+
+    pub(crate) fn line_len(&self) -> usize {
+        self.lines
+            .get(self.row)
+            .map(|line| line.chars().count())
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn visual_cursor_row(&self, width: usize) -> usize {
+        let width = width.max(1);
+        let col = self.cursor_display_col();
+        let previous_rows = self
+            .lines
+            .iter()
+            .take(self.row)
+            .map(|line| visual_line_count_for_text(line, width))
+            .sum::<usize>();
+        previous_rows + col / width
+    }
+
+    pub(crate) fn visual_cursor_col(&self, width: usize) -> usize {
+        self.cursor_display_col() % width.max(1)
+    }
+
+    fn cursor_display_col(&self) -> usize {
+        let line_len = self.line_len();
+        if self.mode == CommentEditorMode::Insert || line_len == 0 {
+            self.col.min(line_len)
+        } else {
+            self.col.min(line_len.saturating_sub(1))
+        }
+    }
+
+    pub(crate) fn move_col(&mut self, delta: isize) {
+        let next = self.col.saturating_add_signed(delta);
+        if delta < 0 && self.col == 0 && self.row > 0 {
+            self.row -= 1;
+            self.col = self.line_len();
+            return;
+        }
+        let line_len = self.line_len();
+        if delta > 0 && self.col >= line_len && self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.col = 0;
+            return;
+        }
+        self.col = next.min(line_len);
+        self.update_selection_cursor();
+    }
+
+    pub(crate) fn move_word_forward(&mut self) {
+        let points = self.text_points();
+        let current = self.cursor_text_point();
+        let Some(current_index) = points
+            .iter()
+            .position(|point| point.row == current.row && point.col == current.col)
+        else {
+            return;
+        };
+        let mut index = current_index;
+        while index < points.len()
+            && point_is_word(self.lines.get(points[index].row), points[index].col)
+        {
+            index += 1;
+        }
+        while index < points.len()
+            && !point_is_word(self.lines.get(points[index].row), points[index].col)
+        {
+            index += 1;
+        }
+        if let Some(point) = points
+            .get(index)
+            .copied()
+            .or_else(|| points.last().copied())
+        {
+            self.row = point.row;
+            self.col = point.col.min(self.line_len());
+            self.update_selection_cursor();
+        }
+    }
+
+    pub(crate) fn move_word_backward(&mut self) {
+        let points = self.text_points();
+        let current = self.cursor_text_point();
+        let Some(mut index) = points
+            .iter()
+            .position(|point| point.row == current.row && point.col == current.col)
+        else {
+            return;
+        };
+        if index == 0 {
+            return;
+        }
+        index -= 1;
+        while index > 0 && !point_is_word(self.lines.get(points[index].row), points[index].col) {
+            index -= 1;
+        }
+        while index > 0
+            && point_is_word(self.lines.get(points[index - 1].row), points[index - 1].col)
+        {
+            index -= 1;
+        }
+        let point = points[index];
+        self.row = point.row;
+        self.col = point.col.min(self.line_len());
+        self.update_selection_cursor();
+    }
+
+    fn text_points(&self) -> Vec<CommentTextPoint> {
+        let mut points = Vec::new();
+        for (row, line) in self.lines.iter().enumerate() {
+            let line_len = line.chars().count();
+            for col in 0..line_len {
+                points.push(CommentTextPoint { row, col });
+            }
+            if line_len == 0 {
+                points.push(CommentTextPoint { row, col: 0 });
+            }
+        }
+        if points.is_empty() {
+            points.push(CommentTextPoint { row: 0, col: 0 });
+        }
+        points
+    }
+
+    fn cursor_text_point(&self) -> CommentTextPoint {
+        let line_len = self.line_len();
+        CommentTextPoint {
+            row: self.row.min(self.lines.len().saturating_sub(1)),
+            col: if line_len == 0 {
+                0
+            } else {
+                self.col.min(line_len.saturating_sub(1))
+            },
+        }
+    }
+
+    pub(crate) fn move_row(&mut self, delta: isize) {
+        self.row = self
+            .row
+            .saturating_add_signed(delta)
+            .min(self.lines.len().saturating_sub(1));
+        self.col = self.col.min(self.line_len());
+        self.update_selection_cursor();
+    }
+
+    pub(crate) fn insert_char(&mut self, ch: char) {
+        if ch == '\n' {
+            self.insert_line_below_split();
+            return;
+        }
+        let Some(line) = self.lines.get_mut(self.row) else {
+            return;
+        };
+        let byte = line
+            .char_indices()
+            .nth(self.col)
+            .map(|(index, _)| index)
+            .unwrap_or_else(|| line.len());
+        line.insert(byte, ch);
+        self.col += 1;
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn insert_line_below_split(&mut self) {
+        let Some(line) = self.lines.get_mut(self.row) else {
+            return;
+        };
+        let byte = line
+            .char_indices()
+            .nth(self.col)
+            .map(|(index, _)| index)
+            .unwrap_or_else(|| line.len());
+        let right = line.split_off(byte);
+        self.lines.insert(self.row + 1, right);
+        self.row += 1;
+        self.col = 0;
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn open_line_below(&mut self) {
+        self.row = self.row.saturating_add(1).min(self.lines.len());
+        self.lines.insert(self.row, String::new());
+        self.col = 0;
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn open_line_above(&mut self) {
+        self.lines.insert(self.row, String::new());
+        self.col = 0;
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn backspace(&mut self) {
+        if self.col > 0 {
+            let Some(line) = self.lines.get_mut(self.row) else {
+                return;
+            };
+            let start = line
+                .char_indices()
+                .nth(self.col - 1)
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            let end = line
+                .char_indices()
+                .nth(self.col)
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| line.len());
+            line.replace_range(start..end, "");
+            self.col -= 1;
+            self.clear_selection();
+            self.sync_body();
+            return;
+        }
+        if self.row == 0 {
+            return;
+        }
+        let current = self.lines.remove(self.row);
+        self.row -= 1;
+        self.col = self.line_len();
+        self.lines[self.row].push_str(&current);
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn delete_forward(&mut self) {
+        let line_len = self.line_len();
+        if self.col < line_len {
+            let Some(line) = self.lines.get_mut(self.row) else {
+                return;
+            };
+            let start = line
+                .char_indices()
+                .nth(self.col)
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| line.len());
+            let end = line
+                .char_indices()
+                .nth(self.col + 1)
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| line.len());
+            line.replace_range(start..end, "");
+        } else if self.row + 1 < self.lines.len() {
+            let next = self.lines.remove(self.row + 1);
+            self.lines[self.row].push_str(&next);
+        }
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn delete_line(&mut self) {
+        if self.lines.len() <= 1 {
+            self.lines = vec![String::new()];
+            self.row = 0;
+            self.col = 0;
+        } else {
+            self.lines.remove(self.row);
+            self.row = self.row.min(self.lines.len().saturating_sub(1));
+            self.col = self.col.min(self.line_len());
+        }
+        self.clear_selection();
+        self.sync_body();
+    }
+
+    pub(crate) fn cursor_point(&self) -> CommentTextPoint {
+        CommentTextPoint {
+            row: self.row,
+            col: self.col,
+        }
+    }
+
+    pub(crate) fn start_visual(&mut self, linewise: bool) {
+        let point = if linewise {
+            CommentTextPoint {
+                row: self.row,
+                col: 0,
+            }
+        } else {
+            self.cursor_point()
+        };
+        self.selection_anchor = Some(point);
+        self.selection_cursor = Some(point);
+        self.mode = if linewise {
+            CommentEditorMode::VisualLine
+        } else {
+            CommentEditorMode::Visual
+        };
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+        self.selection_cursor = None;
+    }
+
+    pub(crate) fn update_selection_cursor(&mut self) {
+        if matches!(
+            self.mode,
+            CommentEditorMode::Visual | CommentEditorMode::VisualLine
+        ) && self.selection_anchor.is_some()
+        {
+            self.selection_cursor = Some(self.cursor_point());
+        }
+    }
+
+    pub(crate) fn selection_range(&self) -> Option<(CommentTextPoint, CommentTextPoint)> {
+        let mut start = self.selection_anchor?;
+        let mut end = self.selection_cursor?;
+        if (end.row, end.col) < (start.row, start.col) {
+            std::mem::swap(&mut start, &mut end);
+        }
+        Some((start, end))
+    }
+
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        let mut out = String::new();
+        for row in start.row..=end.row.min(self.lines.len().saturating_sub(1)) {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let line = self.lines.get(row).map(String::as_str).unwrap_or_default();
+            if self.mode == CommentEditorMode::VisualLine {
+                out.push_str(line);
+                continue;
+            }
+            let line_len = line.chars().count();
+            let start_col = if row == start.row { start.col } else { 0 }.min(line_len);
+            let end_col = if row == end.row {
+                end.col.saturating_add(1)
+            } else {
+                line_len
+            }
+            .min(line_len);
+            out.push_str(
+                &line
+                    .chars()
+                    .skip(start_col)
+                    .take(end_col.saturating_sub(start_col))
+                    .collect::<String>(),
+            );
+        }
+        Some(out)
+    }
+
+    pub(crate) fn delete_selection(&mut self) -> bool {
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
+        if self.mode == CommentEditorMode::VisualLine {
+            let end_row = end.row.min(self.lines.len().saturating_sub(1));
+            self.lines.drain(start.row..=end_row);
+            if self.lines.is_empty() {
+                self.lines.push(String::new());
+            }
+            self.row = start.row.min(self.lines.len().saturating_sub(1));
+            self.col = 0;
+        } else if start.row == end.row {
+            let line = self.lines.get_mut(start.row).unwrap();
+            let start_byte = line
+                .char_indices()
+                .nth(start.col)
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| line.len());
+            let end_byte = line
+                .char_indices()
+                .nth(end.col.saturating_add(1))
+                .map(|(index, _)| index)
+                .unwrap_or_else(|| line.len());
+            line.replace_range(start_byte..end_byte, "");
+            self.row = start.row;
+            self.col = start.col;
+        } else {
+            let first_prefix = self.lines[start.row]
+                .chars()
+                .take(start.col)
+                .collect::<String>();
+            let last_suffix = self.lines[end.row]
+                .chars()
+                .skip(end.col.saturating_add(1))
+                .collect::<String>();
+            self.lines.splice(
+                start.row..=end.row,
+                [format!("{first_prefix}{last_suffix}")],
+            );
+            self.row = start.row;
+            self.col = start.col;
+        }
+        self.mode = CommentEditorMode::Normal;
+        self.clear_selection();
+        self.sync_body();
+        true
+    }
+}
+
+fn visual_line_count_for_text(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    text.chars().count().div_ceil(width).max(1)
+}
+
+fn point_is_word(line: Option<&String>, col: usize) -> bool {
+    line.and_then(|line| line.chars().nth(col))
+        .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+fn comment_lines(body: &str) -> Vec<String> {
+    let lines = body.lines().map(ToString::to_string).collect::<Vec<_>>();
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
     }
 }
 
@@ -284,42 +759,6 @@ impl ReviewItemKind {
             Self::Instruction => "instruction",
             Self::Note => "note",
             Self::AgentCheck => "agent",
-        }
-    }
-
-    pub(crate) fn composer_title(self) -> &'static str {
-        match self {
-            Self::Question => "Ask agent",
-            Self::Instruction => "Request change",
-            Self::Note => "Add note",
-            Self::AgentCheck => "Agent check",
-        }
-    }
-
-    pub(crate) fn composer_help(self) -> &'static str {
-        match self {
-            Self::Question => "Question for the agent. It should answer without editing code.",
-            Self::Instruction => "Instruction for the agent. It may edit the working tree.",
-            Self::Note => "Private human note. It will not be sent to the agent.",
-            Self::AgentCheck => "Agent-authored observation for this attempt.",
-        }
-    }
-
-    pub(crate) fn placeholder(self) -> &'static str {
-        match self {
-            Self::Question => "Why did you make this change?",
-            Self::Instruction => "Change this so it handles the edge case.",
-            Self::Note => "remember what to verify here…",
-            Self::AgentCheck => "agent observation…",
-        }
-    }
-
-    pub(crate) fn submit_label(self) -> &'static str {
-        match self {
-            Self::Question => "send question",
-            Self::Instruction => "send to agent",
-            Self::Note => "save note",
-            Self::AgentCheck => "save check",
         }
     }
 
@@ -792,6 +1231,16 @@ impl ReviewStore {
             ],
         );
     }
+
+    pub(crate) fn delete_note(&self, session_id: &str, note_id: u64) {
+        let Some(conn) = self.connection() else {
+            return;
+        };
+        let _ = conn.execute(
+            "DELETE FROM review_items WHERE session_id = ?1 AND id = ?2",
+            params![session_id, note_id],
+        );
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1094,5 +1543,36 @@ mod tests {
         assert!(store.restore_viewed_state("session-b").files.is_empty());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn comment_editor_word_motion_uses_vim_word_starts() {
+        let target = DiffLineTarget {
+            file_index: 0,
+            hunk_index: 0,
+            line_index: 0,
+            path: "a.txt".to_string(),
+            side: DiffSide::Right,
+            old_line: None,
+            new_line: Some(1),
+            line: 1,
+            kind: DiffLineKind::Add,
+        };
+        let mut modal = CommentModal::new(
+            DiffLineRangeTarget::single(target),
+            ReviewItemKind::Note,
+            None,
+        );
+        modal.lines = vec!["alpha beta gamma".to_string()];
+        modal.row = 0;
+        modal.col = modal.line_len();
+        modal.mode = CommentEditorMode::Normal;
+
+        modal.move_word_backward();
+        assert_eq!(modal.col, 11);
+        modal.move_word_backward();
+        assert_eq!(modal.col, 6);
+        modal.move_word_forward();
+        assert_eq!(modal.col, 11);
     }
 }

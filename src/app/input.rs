@@ -10,7 +10,7 @@ impl App {
         terminal_width: u16,
         terminal_height: u16,
     ) {
-        let rows = row_count_for_mode(&self.document, self.state.mode);
+        let rows = row_count_for_mode(&self.document, self.diff_buffer.viewer().viewport.mode);
         if self.comment_modal.is_some() || self.thread_modal.is_some() {
             return;
         }
@@ -44,15 +44,36 @@ impl App {
                 _ => {}
             }
         }
-        let over_main_scrollbar =
-            self.is_on_main_scrollbar(mouse.column, mouse.row, terminal_width, terminal_height);
-        let scrollbar_target =
-            self.scrollbar_target_at(mouse.column, mouse.row, terminal_width, terminal_height);
         if self.file_picker_open
             && self.handle_file_picker_mouse(mouse, terminal_width, terminal_height)
         {
             return;
         }
+        if self.surface == AppSurface::Diff {
+            match mouse.kind {
+                MouseEventKind::ScrollLeft => {
+                    self.scroll_active_pane_horizontally(-8);
+                    return;
+                }
+                MouseEventKind::ScrollRight => {
+                    self.scroll_active_pane_horizontally(8);
+                    return;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_relative(1, rows);
+                    return;
+                }
+                MouseEventKind::ScrollUp => {
+                    self.scroll_relative(-1, rows);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        let over_main_scrollbar =
+            self.is_on_main_scrollbar(mouse.column, mouse.row, terminal_width, terminal_height);
+        let scrollbar_target =
+            self.scrollbar_target_at(mouse.column, mouse.row, terminal_width, terminal_height);
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             self.focus_pane_at_mouse(mouse.column, mouse.row, terminal_width, terminal_height);
         }
@@ -125,7 +146,7 @@ impl App {
                     .home_detail_area(terminal_width, terminal_height)
                     .is_some_and(|area| contains_point(area, mouse.column, mouse.row))
                 {
-                    if self.detail_tab == DetailTab::Semantic {
+                    if self.semantic_panel_active() {
                         self.scroll_semantic_tree(1);
                     } else {
                         self.surface_scroll_y = self.surface_scroll_y.saturating_add(1);
@@ -140,7 +161,7 @@ impl App {
                     .home_detail_area(terminal_width, terminal_height)
                     .is_some_and(|area| contains_point(area, mouse.column, mouse.row))
                 {
-                    if self.detail_tab == DetailTab::Semantic {
+                    if self.semantic_panel_active() {
                         self.scroll_semantic_tree(-1);
                     } else {
                         self.surface_scroll_y = self.surface_scroll_y.saturating_sub(1);
@@ -151,7 +172,7 @@ impl App {
                 return;
             }
             (AppSurface::DetailFull, MouseEventKind::ScrollDown) => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.scroll_semantic_tree(1);
                 } else {
                     self.surface_scroll_y = self.surface_scroll_y.saturating_add(1);
@@ -159,7 +180,7 @@ impl App {
                 return;
             }
             (AppSurface::DetailFull, MouseEventKind::ScrollUp) => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.scroll_semantic_tree(-1);
                 } else {
                     self.surface_scroll_y = self.surface_scroll_y.saturating_sub(1);
@@ -210,6 +231,14 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left)
+                if self.surface == AppSurface::Diff
+                    && self.diff_buffer.viewer().selection.is_some() =>
+            {
+                if self.extend_diff_mouse_selection(mouse, terminal_width, terminal_height) {
+                    return;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left)
                 if self.selecting_text || self.pending_screen_selection.is_some() =>
             {
                 if !self.selecting_text {
@@ -219,7 +248,20 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.dragging_scrollbar = false;
+                if self.start_diff_mouse_selection(mouse, terminal_width, terminal_height) {
+                    return;
+                }
                 self.prepare_screen_text_selection(mouse, terminal_width, terminal_height);
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self.surface == AppSurface::Diff
+                    && self.diff_buffer.viewer().selection.is_some() =>
+            {
+                self.finish_diff_mouse_selection();
+                self.dragging_scrollbar = false;
+                self.selecting_text = false;
+                self.text_selection_dragged = false;
+                self.pending_screen_selection = None;
             }
             MouseEventKind::Up(MouseButton::Left) if self.selecting_text => {
                 if self.text_selection_dragged {
@@ -240,6 +282,82 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn diff_body_area_for_terminal(&self, terminal_width: u16, terminal_height: u16) -> Rect {
+        let full = Rect::new(0, 0, terminal_width, terminal_height);
+        let area = app_content_area(full);
+        let [_header, _divider, body, _footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+        let (_sidebar, _sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
+        diff_body
+    }
+
+    fn start_diff_mouse_selection(
+        &mut self,
+        mouse: MouseEvent,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> bool {
+        if self.surface != AppSurface::Diff || self.review_sidebar_focus {
+            return false;
+        }
+        let area = self.diff_body_area_for_terminal(terminal_width, terminal_height);
+        if !contains_point(area, mouse.column, mouse.row) {
+            return false;
+        }
+        let inline_blocks = self.diff_inline_blocks();
+        let started = self
+            .diff_buffer
+            .viewer_mut()
+            .start_mouse_selection_with_inline_blocks(
+                &self.document,
+                &inline_blocks,
+                area,
+                mouse.column,
+                mouse.row,
+            );
+        if started {
+            self.selecting_text = false;
+            self.pending_screen_selection = None;
+            self.screen_selection = None;
+            self.screen_selection_bounds = None;
+            self.diff_buffer.clear_transient();
+        }
+        started
+    }
+
+    fn extend_diff_mouse_selection(
+        &mut self,
+        mouse: MouseEvent,
+        terminal_width: u16,
+        terminal_height: u16,
+    ) -> bool {
+        let area = self.diff_body_area_for_terminal(terminal_width, terminal_height);
+        if !contains_point(area, mouse.column, mouse.row) {
+            return false;
+        }
+        let inline_blocks = self.diff_inline_blocks();
+        let extended = self
+            .diff_buffer
+            .viewer_mut()
+            .extend_mouse_selection_with_inline_blocks(
+                &self.document,
+                &inline_blocks,
+                area,
+                mouse.column,
+                mouse.row,
+            );
+        extended
+    }
+
+    fn finish_diff_mouse_selection(&mut self) {
+        self.diff_buffer.viewer_mut().finish_mouse_selection();
     }
 
     fn handle_home_queue_click(
@@ -413,14 +531,16 @@ impl App {
                 );
                 let tab_y = self.home_semantic_tree_start_y(content, selected);
                 if mouse.row == tab_y {
-                    if mouse.column >= content.x.saturating_add(12) {
+                    if mouse.column >= content.x.saturating_add(25) {
+                        self.set_detail_tab(DetailTab::Graph);
+                    } else if mouse.column >= content.x.saturating_add(11) {
                         self.set_detail_tab(DetailTab::Description);
                     } else {
                         self.set_detail_tab(DetailTab::Semantic);
                     }
                     return true;
                 }
-                if self.detail_tab != DetailTab::Semantic {
+                if !self.semantic_panel_active() {
                     return false;
                 }
                 let route = selected.route(self);
@@ -465,14 +585,16 @@ impl App {
                 );
                 let tab_y = self.home_semantic_tree_start_y(content, selected);
                 if mouse.row == tab_y {
-                    if mouse.column >= content.x.saturating_add(12) {
+                    if mouse.column >= content.x.saturating_add(25) {
+                        self.set_detail_tab(DetailTab::Graph);
+                    } else if mouse.column >= content.x.saturating_add(11) {
                         self.set_detail_tab(DetailTab::Description);
                     } else {
                         self.set_detail_tab(DetailTab::Semantic);
                     }
                     return true;
                 }
-                if self.detail_tab != DetailTab::Semantic {
+                if !self.semantic_panel_active() {
                     return false;
                 }
                 let route = selected.route(self);
@@ -543,7 +665,7 @@ impl App {
                 let details = self.home_detail_area(terminal_width, terminal_height)?;
                 let items = self.home_work_items();
                 let selected = items.get(self.home_selection.min(items.len().saturating_sub(1)))?;
-                if self.detail_tab != DetailTab::Semantic {
+                if !self.semantic_panel_active() {
                     return None;
                 }
                 let content = Rect::new(
@@ -564,7 +686,7 @@ impl App {
                 ))
             }
             AppSurface::DetailFull => {
-                if self.detail_tab != DetailTab::Semantic {
+                if !self.semantic_panel_active() {
                     return None;
                 }
                 let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
@@ -708,20 +830,18 @@ impl App {
             }
             AppSurface::Diff => {
                 let area = app_content_area(Rect::new(0, 0, terminal_width, terminal_height));
-                let [_header, _divider, body, _comment_preview, _footer] = Layout::vertical([
+                let [_header, _divider, body, _footer] = Layout::vertical([
                     Constraint::Length(1),
                     Constraint::Length(1),
                     Constraint::Fill(1),
-                    Constraint::Length(2),
                     Constraint::Length(1),
                 ])
                 .areas(area);
                 let (sidebar, _sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
                 if sidebar.is_some_and(|area| contains_point(area, column, row)) {
-                    self.review_sidebar_focus = true;
-                    self.sync_review_sidebar_selection_to_current_file();
+                    self.set_diff_focus(DiffFocusPane::Sidebar);
                 } else if contains_point(diff_body, column, row) {
-                    self.review_sidebar_focus = false;
+                    self.set_diff_focus(self.current_diff_focus().non_sidebar());
                 }
             }
             AppSurface::CommitList => {
@@ -757,7 +877,7 @@ impl App {
         self.dragging_scrollbar = false;
         self.selecting_text = true;
         self.text_selection_dragged = false;
-        self.state.clear_mouse_selection();
+        self.diff_buffer.viewer_mut().clear_selection();
         self.screen_selection_bounds = bounds;
         self.screen_selection = Some(ScreenTextSelection::new(anchor));
     }
@@ -819,11 +939,10 @@ impl App {
             }
             AppSurface::Diff => {
                 let area = app_content_area(full);
-                let [_header, _divider, body, _comment_preview, _footer] = Layout::vertical([
+                let [_header, _divider, body, _footer] = Layout::vertical([
                     Constraint::Length(1),
                     Constraint::Length(1),
                     Constraint::Fill(1),
-                    Constraint::Length(2),
                     Constraint::Length(1),
                 ])
                 .areas(area);
@@ -1155,14 +1274,14 @@ impl App {
         } else {
             body_row.min(height.saturating_sub(1)) * max_scroll / height.saturating_sub(1).max(1)
         };
-        self.state.scroll_y = scroll;
+        self.diff_buffer.viewer_mut().viewport.scroll_y = scroll;
     }
 
     pub(super) fn drag_scrollbar_to(&mut self, row: u16, rows: usize) {
         let height = self.viewport_height.max(1);
         let slider = self.scrollbar_slider_state(rows);
         if slider.max == 0 {
-            self.state.scroll_y = 0;
+            self.diff_buffer.viewer_mut().viewport.scroll_y = 0;
             return;
         }
 
@@ -1175,7 +1294,7 @@ impl App {
         let desired_thumb_start = virtual_mouse
             .saturating_sub(self.scrollbar_drag_offset_virtual)
             .min(max_thumb_start);
-        self.state.scroll_y = slider
+        self.diff_buffer.viewer_mut().viewport.scroll_y = slider
             .value_from_virtual_thumb_start(height, desired_thumb_start)
             .min(slider.max);
     }
@@ -1213,7 +1332,7 @@ impl App {
         let height = self.viewport_height.max(1);
         let max_scroll = rows.saturating_sub(height);
         SliderState {
-            value: self.state.scroll_y.min(max_scroll),
+            value: self.diff_buffer.viewer().viewport.scroll_y.min(max_scroll),
             min: 0,
             max: max_scroll,
             viewport_size: height,

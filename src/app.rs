@@ -12,7 +12,7 @@ use std::{
 
 use color_eyre::Result;
 use crossterm::{
-    cursor::{MoveTo, Show},
+    cursor::{MoveTo, SetCursorStyle, Show},
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
         MouseButton, MouseEvent, MouseEventKind,
@@ -24,10 +24,11 @@ use crossterm::{
     },
 };
 use lazydiff_diffs::{
-    add_pierre_highlights, parse_unified_diff, render_scrollbar, row_count_for_mode, DiffDocument,
-    DiffLine, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
-    DiffViewState, DiffWidget, FileDiff, FileDiffKind, InlineDiffSpan, SliderState,
-    SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar,
+    add_pierre_highlights, add_pierre_highlights_with_sources, parse_unified_diff,
+    render_scrollbar, row_count_for_mode, DiffDocument, DiffInlineBlock, DiffInlineBlockAccent,
+    DiffInlineBlockKind, DiffLine, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode,
+    DiffSide, DiffTheme, DiffVisualRow, DiffWidget, DiffWordMotion, FileDiff, FileDiffKind,
+    InlineDiffSpan, SliderState, SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar,
 };
 use nucleo_matcher::{
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -52,6 +53,38 @@ const QUERY_CACHE_MAX_AGE_SECS: i64 = 60 * 60;
 const SPINNER_REDRAW_INTERVAL: Duration = Duration::from_millis(80);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const INLINE_COMMENT_TEXT_WIDTH: usize = 34;
+
+fn inline_block_text_width(pane: Rect) -> usize {
+    pane.width
+        .saturating_sub(4)
+        .min(76)
+        .saturating_sub(5)
+        .max(1) as usize
+}
+
+fn inline_comment_visual_line_count(body: &str, width: usize) -> usize {
+    let width = width.max(1);
+    let mut count = 0usize;
+    for line in body.lines() {
+        count = count.saturating_add(line.chars().count().div_ceil(width).max(1));
+    }
+    count.max(1)
+}
+
+fn diff_content_area(area: Rect) -> Rect {
+    Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+}
+
+fn diff_viewport_area(area: Rect) -> Rect {
+    let sticky_rows = (STICKY_FILE_OVERLAY_ROWS as u16).min(area.height.saturating_sub(1));
+    Rect::new(
+        area.x,
+        area.y.saturating_add(sticky_rows),
+        area.width,
+        area.height.saturating_sub(sticky_rows),
+    )
+}
 use crate::commands::{command_for_layer, Command, Layer};
 use crate::components::{app_chrome::AppHeader, command_palette::CommandPalette};
 use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
@@ -62,26 +95,26 @@ use crate::github::{
     GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
 };
 use crate::persistence::{
-    CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient, PersistedPullRequestComments,
-    PersistedPullRequestDiff, PersistedSemanticDiff, PersistedViewedState, ReviewItemKind,
-    ReviewNote, ReviewSession, ReviewStore, ReviewUiState,
+    CommentEditorMode, CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient,
+    PersistedPullRequestComments, PersistedPullRequestDiff, PersistedSemanticDiff,
+    PersistedViewedState, ReviewItemKind, ReviewNote, ReviewSession, ReviewStore, ReviewUiState,
 };
 use crate::server_query::{
     LocalDiffResult, PullRequestDiffResult, QueryClient, QueryEvent, QueryKey, QueryResult,
     QueryStatus,
 };
-use crate::text::{
-    body_preview_lines, markdown_preview_lines, relative_age, relative_unix_age, wrap_plain_text,
-};
+use crate::text::{body_preview_lines, markdown_preview_lines, relative_age, relative_unix_age};
 use crate::ui::{
     centered_rect, contains_point, draw_box, draw_horizontal_rule, draw_vertical_rule, fill_rect,
-    list_item_rows, list_row_at, render_home_rule, right_aligned_text, set_symbol, short_path,
-    truncate, truncate_middle, ListGeometryBuilder, ListRowGeometry, ListRowKind,
+    list_item_rows, list_row_at, render_home_rule, right_aligned_text, short_path, truncate,
+    truncate_middle, ListGeometryBuilder, ListRowGeometry, ListRowKind,
 };
 
 mod finder;
 pub(crate) use finder::CommandResult;
 use finder::*;
+mod diff_buffer;
+use diff_buffer::{DiffBufferAction, DiffBufferMode, DiffBufferState, TextObjectKind};
 mod input;
 mod modals;
 mod queries;
@@ -111,7 +144,6 @@ pub(crate) struct App {
     project_label: Option<String>,
     document: DiffDocument,
     local_document: DiffDocument,
-    state: DiffViewState,
     surface: AppSurface,
     history: NavHistory,
     diff_source: DiffSource,
@@ -125,6 +157,7 @@ pub(crate) struct App {
     detail_tab: DetailTab,
     queue_focus: QueuePane,
     commit_focus: CommitPane,
+    diff_buffer: DiffBufferState,
     /// Index of the currently selected comment in the Comments reader.
     /// j/k step between comments (not lines); selected comment renders
     /// with elevated bg + amber rail.
@@ -176,11 +209,13 @@ pub(crate) struct App {
     semantic_map_pan_y: i32,
     pending_semantic_focus: Option<SemanticFocusTarget>,
     review_sidebar_visible: bool,
+    diff_focus: DiffFocusPane,
     review_sidebar_focus: bool,
     review_sidebar_selection: usize,
     review_sidebar_scroll_y: usize,
     review_sidebar_expanded: HashSet<ReviewTreeKey>,
     review_sidebar_seeded_routes: HashSet<String>,
+    expanded_review_threads: HashSet<u64>,
     viewed_files: HashSet<String>,
     viewed_entities: HashSet<String>,
     viewed_session_id: String,
@@ -190,10 +225,21 @@ pub(crate) struct App {
     query_client: QueryClient,
     last_query_gc_at: Instant,
     comment_modal: Option<CommentModal>,
+    inline_focus: Option<InlineFocus>,
     thread_modal: Option<DiffLineTarget>,
-    thread_selection: usize,
-    thread_scroll_y: usize,
     transient_focus: Option<TransientFocus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InlineFocus {
+    block_id: String,
+    line: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffScrollPolicy {
+    EnsureVisible,
+    Center,
 }
 
 /// A bright row-flash that fades out shortly after a semantic
@@ -392,7 +438,6 @@ impl App {
             project_label,
             local_document: document.clone(),
             document,
-            state: DiffViewState::default(),
             surface: AppSurface::Queue,
             history: NavHistory::new(initial_route.clone()),
             diff_source: initial_source,
@@ -406,6 +451,7 @@ impl App {
             detail_tab: DetailTab::Semantic,
             queue_focus: QueuePane::List,
             commit_focus: CommitPane::List,
+            diff_buffer: DiffBufferState::default(),
             comments_selection: 0,
             dragging_scrollbar: false,
             active_scrollbar_drag: None,
@@ -454,11 +500,13 @@ impl App {
             semantic_map_pan_y: 0,
             pending_semantic_focus: None,
             review_sidebar_visible: true,
+            diff_focus: DiffFocusPane::Right,
             review_sidebar_focus: false,
             review_sidebar_selection: 0,
             review_sidebar_scroll_y: 0,
             review_sidebar_expanded: HashSet::new(),
             review_sidebar_seeded_routes: HashSet::new(),
+            expanded_review_threads: HashSet::new(),
             viewed_files: HashSet::new(),
             viewed_entities: HashSet::new(),
             viewed_session_id: String::new(),
@@ -468,9 +516,8 @@ impl App {
             query_client,
             last_query_gc_at: Instant::now(),
             comment_modal: None,
+            inline_focus: None,
             thread_modal: None,
-            thread_selection: 0,
-            thread_scroll_y: 0,
             transient_focus: None,
         };
         if let Some(persisted_queries) = persisted_queries {
@@ -508,6 +555,7 @@ impl App {
             if needs_redraw {
                 let start = Instant::now();
                 terminal.draw(|frame| self.render(frame))?;
+                self.apply_cursor_style(terminal)?;
                 let elapsed = start.elapsed();
                 self.record_draw(elapsed);
                 needs_redraw = false;
@@ -532,6 +580,8 @@ impl App {
                 // takes one full draw cycle to be reflected and the
                 // queue keeps moving the view after the user stops.
                 let mut processed = 0usize;
+                let mut coalesced_diff_scroll_rows = 0isize;
+                let mut coalesced_diff_scroll_cols = 0isize;
                 loop {
                     match event::read()? {
                         Event::Key(key) => {
@@ -544,6 +594,54 @@ impl App {
                         }
                         Event::Mouse(mouse) => {
                             let size = terminal.size()?;
+                            if self.surface == AppSurface::Diff
+                                && !self.file_picker_open
+                                && self.thread_modal.is_none()
+                            {
+                                match mouse.kind {
+                                    MouseEventKind::ScrollDown => {
+                                        coalesced_diff_scroll_rows =
+                                            coalesced_diff_scroll_rows.saturating_add(1);
+                                        needs_redraw = true;
+                                        processed += 1;
+                                        if processed >= 256 || !event::poll(Duration::ZERO)? {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    MouseEventKind::ScrollUp => {
+                                        coalesced_diff_scroll_rows =
+                                            coalesced_diff_scroll_rows.saturating_sub(1);
+                                        needs_redraw = true;
+                                        processed += 1;
+                                        if processed >= 256 || !event::poll(Duration::ZERO)? {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    MouseEventKind::ScrollRight => {
+                                        coalesced_diff_scroll_cols =
+                                            coalesced_diff_scroll_cols.saturating_add(1);
+                                        needs_redraw = true;
+                                        processed += 1;
+                                        if processed >= 256 || !event::poll(Duration::ZERO)? {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    MouseEventKind::ScrollLeft => {
+                                        coalesced_diff_scroll_cols =
+                                            coalesced_diff_scroll_cols.saturating_sub(1);
+                                        needs_redraw = true;
+                                        processed += 1;
+                                        if processed >= 256 || !event::poll(Duration::ZERO)? {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                            }
                             // Plain cursor movement (no button held)
                             // would otherwise force a redraw on every
                             // pixel of motion — the app has no handler
@@ -572,6 +670,14 @@ impl App {
                     if processed >= 256 || !event::poll(Duration::ZERO)? {
                         break;
                     }
+                }
+                if coalesced_diff_scroll_cols != 0 {
+                    self.scroll_active_pane_horizontally(coalesced_diff_scroll_cols * 8);
+                }
+                if coalesced_diff_scroll_rows != 0 {
+                    let rows =
+                        row_count_for_mode(&self.document, self.diff_buffer.viewer().viewport.mode);
+                    self.scroll_relative(coalesced_diff_scroll_rows, rows);
                 }
             }
         }
@@ -654,22 +760,24 @@ impl App {
             return;
         };
         let rows = row_count_for_mode(&self.document, saved.diff_mode);
-        self.state.mode = saved.diff_mode;
-        self.state.selected_row = saved.selected_row.min(rows.saturating_sub(1));
-        self.state.scroll_y = saved
+        let viewer = self.diff_buffer.viewer_mut();
+        viewer.viewport.mode = saved.diff_mode;
+        viewer.viewport.scroll_y = saved
             .scroll_y
             .min(rows.saturating_sub(self.viewport_height));
-        self.state.selected_side = saved.selected_side;
+        viewer.cursor.row = saved.selected_row.min(rows.saturating_sub(1));
+        viewer.cursor.side = saved.selected_side;
     }
 
     fn persist_view_state_for_current_route(&self) {
+        let viewer = self.diff_buffer.viewer();
         self.store.persist_ui_state(
             &self.diff_source.session_id(),
             ReviewUiState {
-                selected_row: self.state.selected_row,
-                scroll_y: self.state.scroll_y,
-                selected_side: self.state.selected_side,
-                diff_mode: self.state.mode,
+                selected_row: viewer.cursor.row,
+                scroll_y: viewer.viewport.scroll_y,
+                selected_side: viewer.cursor.side,
+                diff_mode: viewer.viewport.mode,
             },
         );
     }
@@ -710,16 +818,16 @@ impl App {
         }
         let frame_area = frame.area();
         let area = app_content_area(frame_area);
-        let [header, divider, body, comment_preview, footer] = Layout::vertical([
+        let [header, divider, body, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Fill(1),
-            Constraint::Length(2),
             Constraint::Length(1),
         ])
         .areas(area);
         let (sidebar, sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
-        self.viewport_height = diff_body.height as usize;
+        let diff_viewport = diff_viewport_area(diff_body);
+        self.viewport_height = diff_viewport.height as usize;
         let palette = self.home_palette();
         fill_rect(
             frame.buffer_mut(),
@@ -737,11 +845,23 @@ impl App {
             palette.bg,
         );
         self.render_diff_pane_slider(frame, divider, diff_body, palette);
+        self.diff_buffer.sync_viewport(
+            diff_viewport.width,
+            diff_viewport.height,
+            self.active_top_margin(),
+        );
+        let search_matches = self.diff_buffer.search_matches().to_vec();
+        let content_area = diff_content_area(diff_viewport);
+        let inline_blocks = self.diff_inline_blocks_for_area(Some(content_area));
         StatefulWidget::render(
-            DiffWidget::new(&self.document).theme(palette.theme.diff_theme()),
-            diff_body,
+            DiffWidget::new(&self.document)
+                .theme(palette.theme.diff_theme())
+                .search_matches(&search_matches)
+                .inline_blocks(&inline_blocks)
+                .show_diff_cursor(self.comment_modal.is_none() && self.inline_focus.is_none()),
+            diff_viewport,
             frame.buffer_mut(),
-            &mut self.state,
+            self.diff_buffer.viewer_mut(),
         );
         if let Some(sidebar) = sidebar {
             self.render_review_sidebar(frame, sidebar, palette);
@@ -757,14 +877,120 @@ impl App {
             );
         }
         self.render_sticky_file_overlay(frame, diff_body);
-        self.render_note_gutter_markers(frame, diff_body);
-        // Drawn last so it stays visible on top of the sticky file
-        // overlay and gutter markers.
-        self.render_transient_focus(frame, diff_body, palette);
-        self.render_comment_preview(frame, comment_preview);
+        self.render_note_gutter_markers(frame, diff_viewport);
+        // Drawn last so it stays visible on top of gutter markers.
+        self.render_transient_focus(frame, diff_viewport, palette);
         self.render_footer(frame, footer);
         self.render_global_overlays(frame);
+        self.place_terminal_diff_cursor(frame, diff_viewport, content_area, &inline_blocks);
         self.finish_render(frame);
+    }
+
+    fn place_terminal_diff_cursor(
+        &self,
+        frame: &mut Frame,
+        diff_body: Rect,
+        content_area: Rect,
+        inline_blocks: &[DiffInlineBlock],
+    ) {
+        if self.surface != AppSurface::Diff
+            || self.file_picker_open
+            || self.attempt_modal_open
+            || diff_body.is_empty()
+        {
+            return;
+        }
+
+        if let Some((x, y)) =
+            self.inline_comment_editor_cursor_position(content_area, inline_blocks)
+        {
+            frame.set_cursor_position((x, y));
+            return;
+        }
+        if let Some((x, y)) = self.inline_focus_cursor_position(content_area, inline_blocks) {
+            frame.set_cursor_position((x, y));
+            return;
+        }
+        let Some(position) = self.diff_buffer.viewer().cursor_screen_position(
+            &self.document,
+            inline_blocks,
+            diff_body,
+        ) else {
+            return;
+        };
+        frame.set_cursor_position((position.x, position.y));
+    }
+
+    fn inline_comment_editor_cursor_position(
+        &self,
+        diff_body: Rect,
+        inline_blocks: &[DiffInlineBlock],
+    ) -> Option<(u16, u16)> {
+        let modal = self.comment_modal.as_ref()?;
+        let viewer = self.diff_buffer.viewer();
+        let visual_rows = viewer.visual_rows_with_inline_blocks(&self.document, inline_blocks);
+        let editor_block_index = inline_blocks
+            .iter()
+            .position(|block| block.kind == DiffInlineBlockKind::Editor)?;
+        let block = inline_blocks.get(editor_block_index)?;
+        let pane = viewer.viewport.pane_rect(diff_body, block.side);
+        let text_width = inline_block_text_width(pane);
+        let editor_line = modal.visual_cursor_row(text_width).saturating_add(1);
+        let visual_index = visual_rows.iter().position(|row| {
+            matches!(
+                row,
+                DiffVisualRow::InlineBlock { index, line, .. }
+                    if *index == editor_block_index && *line == editor_line
+            )
+        })?;
+        if visual_index < viewer.viewport.scroll_y {
+            return None;
+        }
+        let local_y = visual_index - viewer.viewport.scroll_y;
+        if local_y >= diff_body.height as usize {
+            return None;
+        }
+        let cursor_col = modal.visual_cursor_col(text_width);
+        let x = pane
+            .x
+            .saturating_add(4)
+            .saturating_add(cursor_col as u16)
+            .min(pane.right().saturating_sub(1));
+        let y = diff_body.y.saturating_add(local_y as u16);
+        Some((x, y))
+    }
+
+    fn inline_focus_cursor_position(
+        &self,
+        diff_body: Rect,
+        inline_blocks: &[DiffInlineBlock],
+    ) -> Option<(u16, u16)> {
+        let focus = self.inline_focus.as_ref()?;
+        let viewer = self.diff_buffer.viewer();
+        let block_index = inline_blocks
+            .iter()
+            .position(|block| block.id == focus.block_id)?;
+        let visual_rows = viewer.visual_rows_with_inline_blocks(&self.document, inline_blocks);
+        let visual_index = visual_rows.iter().position(|row| {
+            matches!(
+                row,
+                DiffVisualRow::InlineBlock { index, line, .. }
+                    if *index == block_index && *line == focus.line
+            )
+        })?;
+        if visual_index < viewer.viewport.scroll_y {
+            return None;
+        }
+        let local_y = visual_index - viewer.viewport.scroll_y;
+        if local_y >= diff_body.height as usize {
+            return None;
+        }
+        let block = inline_blocks.get(block_index)?;
+        let pane = viewer.viewport.pane_rect(diff_body, block.side);
+        Some((
+            pane.x.saturating_add(4).min(pane.right().saturating_sub(1)),
+            diff_body.y.saturating_add(local_y as u16),
+        ))
     }
 
     fn finish_render(&mut self, frame: &mut Frame) {
@@ -836,17 +1062,192 @@ impl App {
     }
 
     fn render_global_overlays(&mut self, frame: &mut Frame) {
-        if let Some(target) = self.thread_modal.clone() {
-            self.render_thread_modal(frame, &target);
-        }
-        if let Some(modal) = &self.comment_modal {
-            self.render_comment_modal(frame, modal);
-        }
         if self.attempt_modal_open {
             self.render_attempts_modal(frame);
         }
         if self.file_picker_open {
             self.render_file_picker(frame);
+        }
+        if self.surface == AppSurface::Diff && self.diff_buffer.help_visible() {
+            self.render_diff_help_overlay(frame);
+        }
+    }
+
+    fn diff_inline_blocks(&self) -> Vec<DiffInlineBlock> {
+        self.diff_inline_blocks_for_area(None)
+    }
+
+    fn diff_inline_blocks_for_area(&self, diff_body: Option<Rect>) -> Vec<DiffInlineBlock> {
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let mut blocks = self
+            .session
+            .notes
+            .iter()
+            .filter(|note| {
+                self.comment_modal
+                    .as_ref()
+                    .and_then(|modal| modal.edit_note_id)
+                    != Some(note.id)
+            })
+            .filter(|note| note.parent_id.is_none())
+            .filter_map(|note| self.note_inline_block(note, mode, diff_body))
+            .collect::<Vec<_>>();
+        if let Some(block) = self.editor_inline_block(mode, diff_body) {
+            blocks.push(block);
+        }
+        blocks
+    }
+
+    fn note_inline_block(
+        &self,
+        note: &ReviewNote,
+        mode: DiffMode,
+        diff_body: Option<Rect>,
+    ) -> Option<DiffInlineBlock> {
+        let after_row = self.document.line_row(
+            mode,
+            note.target.end.file_index,
+            note.target.end.hunk_index,
+            note.target.end.line_index,
+        )?;
+        let body = self.note_inline_body(note);
+        let text_width = self.inline_text_width(diff_body, note.target.side());
+        let expanded = self.expanded_review_threads.contains(&note.id);
+        Some(DiffInlineBlock {
+            id: format!("note:{}", note.id),
+            after_row,
+            side: note.target.side(),
+            height: inline_comment_visual_line_count(&body, text_width)
+                .saturating_add(2)
+                .min(if expanded { 14 } else { 8 }),
+            kind: DiffInlineBlockKind::Comment,
+            accent: inline_block_accent_for_review_kind(note.kind),
+            title: format!("{} · {}", note.kind.label(), note.author),
+            body,
+        })
+    }
+
+    fn note_inline_body(&self, note: &ReviewNote) -> String {
+        let replies = self
+            .session
+            .notes
+            .iter()
+            .filter(|reply| reply.parent_id == Some(note.id))
+            .collect::<Vec<_>>();
+        if replies.is_empty() {
+            return note.body.clone();
+        }
+        if !self.expanded_review_threads.contains(&note.id) {
+            return format!(
+                "{}\n{} {} · enter expand · r reply",
+                note.body,
+                replies.len(),
+                if replies.len() == 1 {
+                    "reply"
+                } else {
+                    "replies"
+                }
+            );
+        }
+
+        let mut lines = vec![note.body.clone()];
+        for reply in replies {
+            lines.push(format!("── reply · {}", reply.author));
+            lines.push(reply.body.clone());
+        }
+        lines.join("\n")
+    }
+
+    fn editor_inline_block(
+        &self,
+        mode: DiffMode,
+        diff_body: Option<Rect>,
+    ) -> Option<DiffInlineBlock> {
+        let modal = self.comment_modal.as_ref()?;
+        let after_row = self.document.line_row(
+            mode,
+            modal.target.end.file_index,
+            modal.target.end.hunk_index,
+            modal.target.end.line_index,
+        )?;
+        let body = modal.lines.join("\n");
+        let text_width = self.inline_text_width(diff_body, modal.target.side());
+        Some(DiffInlineBlock {
+            id: "draft".to_string(),
+            after_row,
+            side: modal.target.side(),
+            height: inline_comment_visual_line_count(&body, text_width).saturating_add(2),
+            kind: DiffInlineBlockKind::Editor,
+            accent: DiffInlineBlockAccent::Draft,
+            title: if modal.edit_note_id.is_some() {
+                format!("{} · {}", modal.kind.label(), modal.kind.default_author())
+            } else {
+                format!("{} draft", modal.kind.label())
+            },
+            body,
+        })
+    }
+
+    fn inline_text_width(&self, diff_body: Option<Rect>, side: DiffSide) -> usize {
+        diff_body
+            .map(|area| {
+                inline_block_text_width(self.diff_buffer.viewer().viewport.pane_rect(area, side))
+            })
+            .unwrap_or(INLINE_COMMENT_TEXT_WIDTH)
+    }
+
+    fn render_diff_help_overlay(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let width = 52u16.min(area.width.saturating_sub(4)).max(20);
+        let height = 20u16.min(area.height.saturating_sub(4)).max(8);
+        if width < 20 || height < 8 {
+            return;
+        }
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        let rect = Rect::new(x, y, width, height);
+        let palette = self.home_palette();
+        let style = Style::new().fg(palette.fg).bg(palette.bg);
+        fill_rect(frame.buffer_mut(), rect, " ", style);
+        draw_box(
+            frame.buffer_mut(),
+            rect,
+            Style::new().fg(palette.rule).bg(palette.bg),
+        );
+        let lines = [
+            "lazydiff diff keys",
+            "",
+            "j/k, arrows    move cursor",
+            "h/l            move horizontally within active side",
+            "Tab            switch split side on same row",
+            "gg / G         top / bottom",
+            "0 / $          line start / end",
+            "Ctrl-d/u       half-page",
+            "Ctrl-p         command palette",
+            "[ / ]          previous / next file",
+            "v / V          visual / visual-line",
+            "i/a + object   text objects (iw, aw, brackets)",
+            "/, n, N        search",
+            "s              toggle split/unified",
+            "enter          open thread",
+            "i              comment",
+            "x / dd         delete note",
+            ":w, :q, :q!    save / quit",
+            "? / q / esc    close help",
+        ];
+        for (index, line) in lines.iter().enumerate() {
+            let row = rect.y + 1 + index as u16;
+            if row >= rect.bottom().saturating_sub(1) {
+                break;
+            }
+            let line_style = if index == 0 {
+                Style::new().fg(palette.accent).bg(palette.bg)
+            } else {
+                style
+            };
+            frame
+                .buffer_mut()
+                .set_string(rect.x + 2, row, *line, line_style);
         }
     }
 
@@ -866,7 +1267,7 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        let rows = row_count_for_mode(&self.document, self.state.mode);
+        let rows = row_count_for_mode(&self.document, self.diff_buffer.viewer().viewport.mode);
         if self.handle_modal_key(key.code) {
             return;
         }
@@ -880,7 +1281,7 @@ impl App {
             return;
         }
         if self.file_picker_open {
-            self.handle_file_picker_key(key.code, rows);
+            self.handle_file_picker_key(key, rows);
             return;
         }
         if self.handle_pane_navigation_key(key) {
@@ -905,20 +1306,19 @@ impl App {
                     self.scroll_active_pane_horizontally(8);
                     return;
                 }
-                KeyCode::Char('s') => {
-                    self.review_sidebar_visible = !self.review_sidebar_visible;
-                    self.review_sidebar_focus = self.review_sidebar_visible;
-                    return;
-                }
-                KeyCode::Tab if self.review_sidebar_visible => {
-                    self.review_sidebar_focus = !self.review_sidebar_focus;
-                    self.sync_review_sidebar_selection_to_current_file();
-                    return;
-                }
                 _ => {}
             }
             if self.review_sidebar_focus && self.review_sidebar_visible {
                 self.handle_review_sidebar_key(key.code, rows);
+                return;
+            }
+            if self.handle_inline_note_edit_key(key.code) {
+                return;
+            }
+            if self.handle_inline_focus_key(key.code, rows) {
+                return;
+            }
+            if self.handle_diff_buffer_key(key, rows) {
                 return;
             }
         }
@@ -927,20 +1327,19 @@ impl App {
                 KeyCode::Enter
                     if self.surface == AppSurface::Queue
                         && self.queue_focus == QueuePane::Detail
-                        && self.detail_tab == DetailTab::Semantic =>
+                        && self.semantic_panel_active() =>
                 {
                     if self.open_selected_semantic_row() {
                         return;
                     }
                 }
-                KeyCode::Char(' ') if self.detail_tab == DetailTab::Semantic => {
+                KeyCode::Char(' ') if self.semantic_panel_active() => {
                     if self.toggle_selected_semantic_viewed() {
                         return;
                     }
                 }
                 KeyCode::Enter
-                    if self.surface == AppSurface::DetailFull
-                        && self.detail_tab == DetailTab::Semantic =>
+                    if self.surface == AppSurface::DetailFull && self.semantic_panel_active() =>
                 {
                     if self.open_selected_semantic_row() {
                         return;
@@ -954,20 +1353,24 @@ impl App {
                     self.set_detail_tab(DetailTab::Description);
                     return;
                 }
+                KeyCode::Char('3') if self.detail_shortcuts_active() => {
+                    self.set_detail_tab(DetailTab::Graph);
+                    return;
+                }
                 KeyCode::Char('0')
-                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Graph =>
                 {
                     self.reset_semantic_map_view();
                     return;
                 }
                 KeyCode::Char('[')
-                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                    if self.detail_shortcuts_active() && self.semantic_panel_active() =>
                 {
                     self.collapse_focused_semantic_branch();
                     return;
                 }
                 KeyCode::Char(']')
-                    if self.detail_shortcuts_active() && self.detail_tab == DetailTab::Semantic =>
+                    if self.detail_shortcuts_active() && self.semantic_panel_active() =>
                 {
                     self.expand_focused_semantic_branch();
                     return;
@@ -1017,6 +1420,19 @@ impl App {
         }
     }
 
+    fn apply_cursor_style(&self, terminal: &mut Tui) -> Result<()> {
+        let style = match self.comment_modal.as_ref().map(|modal| modal.mode) {
+            Some(CommentEditorMode::Insert) => SetCursorStyle::SteadyBar,
+            Some(CommentEditorMode::Normal) => SetCursorStyle::SteadyBlock,
+            Some(CommentEditorMode::Visual | CommentEditorMode::VisualLine) => {
+                SetCursorStyle::SteadyUnderScore
+            }
+            None => SetCursorStyle::DefaultUserShape,
+        };
+        execute!(terminal.backend_mut(), style)?;
+        Ok(())
+    }
+
     fn debug_key_event(key: KeyEvent) {
         Self::debug_input_event(format_args!(
             "key code={:?} modifiers={:?} kind={:?} state={:?}",
@@ -1053,20 +1469,257 @@ impl App {
         }
     }
 
+    fn handle_diff_buffer_key(&mut self, key: KeyEvent, rows: usize) -> bool {
+        let action = self.diff_buffer.handle_key(key, Instant::now());
+        self.apply_diff_buffer_action(action, rows);
+        true
+    }
+
+    fn apply_diff_buffer_action(&mut self, action: DiffBufferAction, rows: usize) {
+        match action {
+            DiffBufferAction::None => {}
+            DiffBufferAction::Cancel => {
+                if self.diff_buffer.viewer().selection.is_some() {
+                    self.diff_buffer.viewer_mut().clear_selection();
+                } else if !self.diff_buffer.search_query().is_empty() {
+                    self.diff_buffer.clear_search_matches();
+                    self.diff_buffer.clear_transient();
+                } else {
+                    self.go_back();
+                }
+            }
+            DiffBufferAction::MoveRows(delta) => self.move_diff_cursor_rows(delta, rows),
+            DiffBufferAction::MoveCols(delta) => self.move_diff_cursor_cols(delta, rows),
+            DiffBufferAction::WordForward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::NextStart { big: false });
+            }
+            DiffBufferAction::BigWordForward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::NextStart { big: true });
+            }
+            DiffBufferAction::WordEndForward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::NextEnd { big: false });
+            }
+            DiffBufferAction::BigWordEndForward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::NextEnd { big: true });
+            }
+            DiffBufferAction::WordBackward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::PreviousStart { big: false });
+            }
+            DiffBufferAction::BigWordBackward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::PreviousStart { big: true });
+            }
+            DiffBufferAction::WordEndBackward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::PreviousEnd { big: false });
+            }
+            DiffBufferAction::BigWordEndBackward => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .move_word(&self.document, DiffWordMotion::PreviousEnd { big: true });
+            }
+            DiffBufferAction::Page(direction) => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .page(&self.document, direction);
+            }
+            DiffBufferAction::HalfPage(direction) => self.move_active_half_page(direction, rows),
+            DiffBufferAction::Top => {
+                self.diff_buffer.viewer_mut().top(&self.document);
+            }
+            DiffBufferAction::Bottom => {
+                self.diff_buffer.viewer_mut().bottom(&self.document);
+            }
+            DiffBufferAction::LineStart => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .cursor_line_start(&self.document);
+            }
+            DiffBufferAction::LineEnd => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .cursor_line_end(&self.document);
+            }
+            DiffBufferAction::PreviousFile => self.jump_relative_file(-1, rows),
+            DiffBufferAction::NextFile => self.jump_relative_file(1, rows),
+            DiffBufferAction::NextCommit => self.open_commit_list(),
+            DiffBufferAction::PreviousCommit => self.open_commit_list(),
+            DiffBufferAction::NextChange => self.jump_relative_hunk(1, rows),
+            DiffBufferAction::PreviousChange => self.jump_relative_hunk(-1, rows),
+            DiffBufferAction::NextNote => self.jump_relative_note(1, rows),
+            DiffBufferAction::PreviousNote => self.jump_relative_note(-1, rows),
+            DiffBufferAction::ToggleSideBySide => {
+                self.diff_buffer.viewer_mut().toggle_mode(&self.document);
+            }
+            DiffBufferAction::SwitchSide => {
+                if !self.diff_buffer.viewer_mut().switch_side(&self.document) {
+                    self.branch_operation_status =
+                        Some("no matching line on other side".to_string());
+                }
+            }
+            DiffBufferAction::OpenCommandPalette => self.open_root_palette(),
+            DiffBufferAction::OpenFileFinder => self.open_file_search(),
+            DiffBufferAction::SearchChanged => self.recompute_diff_buffer_search(),
+            DiffBufferAction::SearchAccept => self.accept_diff_buffer_search(rows),
+            DiffBufferAction::SearchNext => self.move_diff_buffer_search(1, rows),
+            DiffBufferAction::SearchPrevious => self.move_diff_buffer_search(-1, rows),
+            DiffBufferAction::OpenThread => self.open_thread_modal(),
+            DiffBufferAction::OpenEditor => self.open_current_file_in_editor(),
+            DiffBufferAction::ToggleVisual => self.toggle_visual_selection(rows, false),
+            DiffBufferAction::ToggleVisualLine => self.toggle_visual_selection(rows, true),
+            DiffBufferAction::SelectTextObject(kind, object) => {
+                let selected = self.diff_buffer.viewer_mut().select_text_object(
+                    &self.document,
+                    matches!(kind, TextObjectKind::Around),
+                    object,
+                );
+                if !selected {
+                    self.branch_operation_status = Some(match kind {
+                        TextObjectKind::Inner => format!("inner {object} text object not found"),
+                        TextObjectKind::Around => format!("around {object} text object not found"),
+                    });
+                }
+            }
+            DiffBufferAction::YankSelection => self.yank_diff_selection(),
+            DiffBufferAction::OpenComment => self.open_review_composer(ReviewItemKind::Note),
+            DiffBufferAction::DeleteNote => self.delete_note_under_cursor(),
+            DiffBufferAction::SaveComments => self.persist_review_session(),
+            DiffBufferAction::Quit { force } => {
+                self.quit_or_go_back(force);
+            }
+            DiffBufferAction::ShowHelp => self.diff_buffer.toggle_help(),
+        }
+    }
+
+    fn recompute_diff_buffer_search(&mut self) {
+        self.diff_buffer
+            .viewer_mut()
+            .recompute_search(&self.document);
+    }
+
+    fn accept_diff_buffer_search(&mut self, rows: usize) {
+        self.recompute_diff_buffer_search();
+        if self.diff_buffer.search_matches().is_empty() {
+            self.branch_operation_status = Some("pattern not found".to_string());
+            return;
+        }
+        self.move_diff_buffer_search(1, rows);
+    }
+
+    fn move_diff_buffer_search(&mut self, delta: isize, rows: usize) {
+        let _ = rows;
+        self.diff_buffer
+            .viewer_mut()
+            .move_search_match(&self.document, delta);
+    }
+
+    fn jump_relative_note(&mut self, delta: isize, rows: usize) {
+        let mut note_rows = self
+            .session
+            .notes
+            .iter()
+            .filter_map(|note| {
+                self.document
+                    .line_row(
+                        self.diff_buffer.viewer().viewport.mode,
+                        note.target.start.file_index,
+                        note.target.start.hunk_index,
+                        note.target.start.line_index,
+                    )
+                    .map(|row| (row, note.target.side()))
+            })
+            .collect::<Vec<_>>();
+        note_rows.sort_unstable_by_key(|(row, side)| (*row, side_sort_key(*side)));
+        note_rows.dedup();
+        if note_rows.is_empty() {
+            return;
+        }
+        let index = if delta < 0 {
+            note_rows
+                .iter()
+                .rposition(|(row, _)| *row < self.diff_buffer.viewer().cursor.row)
+                .unwrap_or(note_rows.len() - 1)
+        } else {
+            note_rows
+                .iter()
+                .position(|(row, _)| *row > self.diff_buffer.viewer().cursor.row)
+                .unwrap_or(0)
+        };
+        let (row, side) = note_rows[index];
+        self.diff_buffer.viewer_mut().cursor.side = side;
+        self.focus_row(row, rows);
+    }
+
+    fn yank_diff_selection(&mut self) {
+        let Some(selection) = self.diff_buffer.viewer().selection else {
+            self.branch_operation_status = Some("no visual selection".to_string());
+            return;
+        };
+        let text = self
+            .document
+            .selection_text(self.diff_buffer.viewer().viewport.mode, selection);
+        if text.is_empty() {
+            self.branch_operation_status = Some("no visual selection".to_string());
+        } else {
+            self.diff_buffer.viewer_mut().flash_yank_selection();
+            self.diff_buffer.clear_transient();
+            self.branch_operation_status = Some("selection ready to copy".to_string());
+        }
+    }
+
+    fn delete_note_under_cursor(&mut self) {
+        let Some(target) = self.active_line_target() else {
+            return;
+        };
+        let Some(index) = self
+            .session
+            .notes
+            .iter()
+            .position(|note| note.target.contains(&target))
+        else {
+            self.branch_operation_status = Some("no note".to_string());
+            return;
+        };
+        let note = self.session.notes.remove(index);
+        self.store.delete_note(&self.session.id, note.id);
+        self.branch_operation_status = Some("note deleted".to_string());
+    }
+
+    fn persist_review_session(&mut self) {
+        self.store.upsert_session(&self.session);
+        self.branch_operation_status = Some("comments saved".to_string());
+    }
+
     fn detail_shortcuts_active(&self) -> bool {
         self.surface == AppSurface::DetailFull
             || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
     }
 
+    fn semantic_panel_active(&self) -> bool {
+        matches!(self.detail_tab, DetailTab::Semantic | DetailTab::Graph)
+    }
+
     fn semantic_map_keyboard_active(&self) -> bool {
-        self.detail_tab == DetailTab::Semantic
+        self.detail_tab == DetailTab::Graph
             && (self.surface == AppSurface::DetailFull
                 || (self.surface == AppSurface::Queue && self.queue_focus == QueuePane::Detail)
                 || (self.surface == AppSurface::CommitList
                     && self.commit_focus == CommitPane::Detail))
     }
 
-    fn move_pane_focus(&mut self, _direction: isize) -> bool {
+    fn move_pane_focus(&mut self, direction: isize) -> bool {
         match self.surface {
             AppSurface::Queue => {
                 self.queue_focus = match self.queue_focus {
@@ -1075,11 +1728,8 @@ impl App {
                 };
                 true
             }
-            AppSurface::Diff if self.review_sidebar_visible => {
-                self.review_sidebar_focus = !self.review_sidebar_focus;
-                if self.review_sidebar_focus {
-                    self.sync_review_sidebar_selection_to_current_file();
-                }
+            AppSurface::Diff => {
+                self.move_diff_pane_focus(direction);
                 true
             }
             AppSurface::CommitList => {
@@ -1089,7 +1739,65 @@ impl App {
                 };
                 true
             }
-            AppSurface::Comments | AppSurface::DetailFull | AppSurface::Diff => false,
+            AppSurface::Comments | AppSurface::DetailFull => false,
+        }
+    }
+
+    fn move_diff_pane_focus(&mut self, direction: isize) {
+        if self.diff_buffer.viewer().viewport.mode != DiffMode::Split {
+            if self.review_sidebar_visible {
+                let next = if self.current_diff_focus() == DiffFocusPane::Sidebar {
+                    DiffFocusPane::Right
+                } else {
+                    DiffFocusPane::Sidebar
+                };
+                self.set_diff_focus(next);
+            }
+            return;
+        }
+
+        let pane_count = if self.review_sidebar_visible { 3 } else { 2 };
+        let current = match self.current_diff_focus() {
+            DiffFocusPane::Sidebar if self.review_sidebar_visible => 0,
+            DiffFocusPane::Left => usize::from(self.review_sidebar_visible),
+            DiffFocusPane::Right => usize::from(self.review_sidebar_visible).saturating_add(1),
+            DiffFocusPane::Sidebar => 0,
+        };
+        let next = (current as isize + direction).rem_euclid(pane_count as isize) as usize;
+
+        let focus = if self.review_sidebar_visible && next == 0 {
+            DiffFocusPane::Sidebar
+        } else {
+            match next.saturating_sub(usize::from(self.review_sidebar_visible)) {
+                0 => DiffFocusPane::Left,
+                _ => DiffFocusPane::Right,
+            }
+        };
+        self.set_diff_focus(focus);
+    }
+
+    fn current_diff_focus(&self) -> DiffFocusPane {
+        self.diff_focus
+    }
+
+    fn set_diff_focus(&mut self, focus: DiffFocusPane) {
+        match focus {
+            DiffFocusPane::Sidebar if self.review_sidebar_visible => {
+                self.diff_focus = DiffFocusPane::Sidebar;
+                self.review_sidebar_focus = true;
+                self.sync_review_sidebar_selection_to_current_file();
+            }
+            DiffFocusPane::Sidebar => {}
+            DiffFocusPane::Left => {
+                self.diff_focus = DiffFocusPane::Left;
+                self.review_sidebar_focus = false;
+                self.diff_buffer.viewer_mut().cursor.side = DiffSide::Left;
+            }
+            DiffFocusPane::Right => {
+                self.diff_focus = DiffFocusPane::Right;
+                self.review_sidebar_focus = false;
+                self.diff_buffer.viewer_mut().cursor.side = DiffSide::Right;
+            }
         }
     }
 
@@ -1109,7 +1817,7 @@ impl App {
                 self.move_comments_selection(direction.saturating_mul(half));
             }
             AppSurface::DetailFull => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     let half = (self.semantic_visible_rows.max(2) / 2).max(1) as isize;
                     self.move_semantic_selection(direction.saturating_mul(half));
                 } else {
@@ -1123,11 +1831,198 @@ impl App {
         }
     }
 
+    fn diff_mode(&self) -> DiffMode {
+        self.diff_buffer.viewer().viewport.mode
+    }
+
+    fn focus_first_inline_block_after_row(&mut self, row: usize) -> bool {
+        let mut blocks = self.diff_inline_blocks();
+        blocks.sort_unstable_by_key(|block| (block.after_row, block.id.clone()));
+        let Some(block) = blocks
+            .into_iter()
+            .find(|block| block.after_row == row && inline_block_body_line_range(block).is_some())
+        else {
+            return false;
+        };
+        let (first_body_line, _) = inline_block_body_line_range(&block).unwrap_or((0, 0));
+        self.inline_focus = Some(InlineFocus {
+            block_id: block.id,
+            line: first_body_line,
+        });
+        true
+    }
+
+    fn focused_inline_block(&self) -> Option<DiffInlineBlock> {
+        let focus = self.inline_focus.as_ref()?;
+        self.diff_inline_blocks()
+            .into_iter()
+            .find(|block| block.id == focus.block_id)
+    }
+
+    fn handle_inline_note_edit_key(&mut self, code: KeyCode) -> bool {
+        if self.comment_modal.is_some() {
+            return false;
+        }
+        if !matches!(
+            code,
+            KeyCode::Char('i')
+                | KeyCode::Char('a')
+                | KeyCode::Char('A')
+                | KeyCode::Char('o')
+                | KeyCode::Char('O')
+        ) {
+            return false;
+        }
+        if let Some(note) = self.focused_inline_note() {
+            self.open_existing_note_editor(note, code);
+            return true;
+        }
+        false
+    }
+
+    fn focused_inline_note(&self) -> Option<ReviewNote> {
+        let focus = self.inline_focus.as_ref()?;
+        let note_id = focus
+            .block_id
+            .strip_prefix("note:")
+            .and_then(|id| id.parse::<u64>().ok())?;
+        self.session
+            .notes
+            .iter()
+            .find(|note| note.id == note_id)
+            .cloned()
+    }
+
+    fn open_existing_note_editor(&mut self, note: ReviewNote, code: KeyCode) {
+        let mut modal = CommentModal::existing(&note);
+        modal.row = modal.lines.len().saturating_sub(1);
+        modal.col = modal.line_len();
+        match code {
+            KeyCode::Char('a') => modal.move_col(1),
+            KeyCode::Char('A') => modal.col = modal.line_len(),
+            KeyCode::Char('o') => modal.open_line_below(),
+            KeyCode::Char('O') => modal.open_line_above(),
+            _ => {}
+        }
+        modal.mode = CommentEditorMode::Insert;
+        self.inline_focus = None;
+        self.diff_buffer.viewer_mut().clear_selection();
+        self.diff_buffer.viewer_mut().yank_selection = None;
+        self.diff_buffer.viewer_mut().yank_until = None;
+        self.comment_modal = Some(modal);
+    }
+
+    fn handle_inline_focus_key(&mut self, code: KeyCode, _rows: usize) -> bool {
+        let Some(mut focus) = self.inline_focus.clone() else {
+            return false;
+        };
+        let Some(block) = self.focused_inline_block() else {
+            self.inline_focus = None;
+            return false;
+        };
+        let Some((first_body_line, last_body_line)) = inline_block_body_line_range(&block) else {
+            self.inline_focus = None;
+            return false;
+        };
+        focus.line = focus.line.clamp(first_body_line, last_body_line);
+        match code {
+            KeyCode::Esc => {
+                self.inline_focus = None;
+                true
+            }
+            KeyCode::Enter => {
+                if let Some(thread_id) = focus
+                    .block_id
+                    .strip_prefix("note:")
+                    .and_then(|id| id.parse::<u64>().ok())
+                {
+                    if !self.expanded_review_threads.insert(thread_id) {
+                        self.expanded_review_threads.remove(&thread_id);
+                    }
+                    let (first_body_line, last_body_line) = self
+                        .focused_inline_block()
+                        .as_ref()
+                        .and_then(inline_block_body_line_range)
+                        .unwrap_or((1, 1));
+                    focus.line = focus.line.clamp(first_body_line, last_body_line);
+                    self.inline_focus = Some(focus);
+                } else {
+                    self.inline_focus = None;
+                    self.open_thread_modal();
+                }
+                true
+            }
+            KeyCode::Char('r') => {
+                self.inline_focus = None;
+                self.open_review_composer(ReviewItemKind::Note);
+                true
+            }
+            KeyCode::Char('i')
+            | KeyCode::Char('a')
+            | KeyCode::Char('A')
+            | KeyCode::Char('o')
+            | KeyCode::Char('O') => {
+                if let Some(note_id) = focus
+                    .block_id
+                    .strip_prefix("note:")
+                    .and_then(|id| id.parse::<u64>().ok())
+                {
+                    if let Some(note) = self
+                        .session
+                        .notes
+                        .iter()
+                        .find(|note| note.id == note_id)
+                        .cloned()
+                    {
+                        self.open_existing_note_editor(note, code);
+                    }
+                }
+                true
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if focus.line < last_body_line {
+                    focus.line += 1;
+                    self.inline_focus = Some(focus);
+                    self.ensure_focused_diff_visual_row_visible();
+                } else {
+                    let block_id = focus.block_id.clone();
+                    if !self.focus_adjacent_inline_block_row(&block_id, 1) {
+                        self.inline_focus = None;
+                    }
+                }
+                true
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if focus.line > first_body_line {
+                    focus.line -= 1;
+                    self.inline_focus = Some(focus);
+                    self.ensure_focused_diff_visual_row_visible();
+                } else {
+                    let block_id = focus.block_id.clone();
+                    if !self.focus_adjacent_inline_block_row(&block_id, -1) {
+                        self.inline_focus = None;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn diff_cursor_row(&self) -> usize {
+        self.diff_buffer.viewer().cursor.row
+    }
+
+    fn diff_scroll_y(&self) -> usize {
+        self.diff_buffer.viewer().viewport.scroll_y
+    }
+
     fn handle_plain_key(&mut self, code: KeyCode, rows: usize) {
         match code {
             KeyCode::Esc => {
-                if self.state.selection.is_some() {
-                    self.state.clear_mouse_selection();
+                if self.diff_buffer.viewer().selection.is_some() && self.surface == AppSurface::Diff
+                {
+                    self.diff_buffer.viewer_mut().clear_selection();
                 } else {
                     self.go_back();
                 }
@@ -1164,26 +2059,37 @@ impl App {
             KeyCode::PageDown => self.scroll_relative(self.viewport_height as isize, rows),
             KeyCode::PageUp => self.scroll_relative(-(self.viewport_height as isize), rows),
             KeyCode::Char('g') => {
-                self.state.scroll_y = 0;
+                if self.surface == AppSurface::Diff {
+                    self.diff_buffer.viewer_mut().viewport.scroll_y = 0;
+                }
             }
             KeyCode::Char('G') => {
-                self.state.scroll_y = rows.saturating_sub(self.viewport_height);
+                if self.surface == AppSurface::Diff {
+                    let inline_blocks = self.diff_inline_blocks();
+                    let visual_row_count = self
+                        .diff_buffer
+                        .viewer()
+                        .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+                    self.diff_buffer.viewer_mut().viewport.scroll_y =
+                        visual_row_count.saturating_sub(self.viewport_height);
+                }
             }
-            KeyCode::Char('v') => self.toggle_visual_selection(rows),
+            KeyCode::Char('v') => self.toggle_visual_selection(rows, false),
             KeyCode::Char(' ') => self.toggle_current_file_viewed(),
             KeyCode::Char('m') => {
-                self.state.mode = self.state.mode.toggle();
-                self.state.scroll_y = 0;
-                self.state.selected_row = 0;
-                self.state.clear_mouse_selection();
+                self.diff_buffer.viewer_mut().toggle_mode(&self.document);
             }
             KeyCode::Char(']') => self.jump_relative_file(1, rows),
             KeyCode::Char('[') => self.jump_relative_file(-1, rows),
             KeyCode::Char('N') => self.jump_relative_hunk(1, rows),
             KeyCode::Char('p') => self.jump_relative_hunk(-1, rows),
             KeyCode::Char('A') => self.attempt_modal_open = true,
-            KeyCode::Left => self.state.selected_side = DiffSide::Left,
-            KeyCode::Right => self.state.selected_side = DiffSide::Right,
+            KeyCode::Left => {
+                self.diff_buffer.viewer_mut().cursor.side = DiffSide::Left;
+            }
+            KeyCode::Right => {
+                self.diff_buffer.viewer_mut().cursor.side = DiffSide::Right;
+            }
             _ => {}
         }
     }
@@ -1210,7 +2116,7 @@ impl App {
 
     fn execute_command(&mut self, command: Command, rows: usize) {
         match command {
-            Command::Quit => self.should_quit = true,
+            Command::Quit => self.quit_or_go_back(false),
             Command::Back => self.go_back(),
             Command::MoveDown => self.move_surface_down(rows),
             Command::MoveUp => self.move_surface_up(rows),
@@ -1257,10 +2163,7 @@ impl App {
             Command::NewInstruction => self.open_review_composer(ReviewItemKind::Instruction),
             Command::NewNote => self.open_review_composer(ReviewItemKind::Note),
             Command::ToggleDiffMode => {
-                self.state.mode = self.state.mode.toggle();
-                self.state.scroll_y = 0;
-                self.state.selected_row = 0;
-                self.state.clear_mouse_selection();
+                self.diff_buffer.viewer_mut().toggle_mode(&self.document);
             }
             Command::JumpFirst => self.jump_focused_boundary(false, rows),
             Command::JumpLast => self.jump_focused_boundary(true, rows),
@@ -1269,8 +2172,12 @@ impl App {
             Command::PreviousHunk => self.jump_relative_hunk(-1, rows),
             Command::NextHunk => self.jump_relative_hunk(1, rows),
             Command::ShowAttempts => self.attempt_modal_open = true,
-            Command::SelectLeft => self.state.selected_side = DiffSide::Left,
-            Command::SelectRight => self.state.selected_side = DiffSide::Right,
+            Command::SelectLeft => {
+                self.diff_buffer.viewer_mut().cursor.side = DiffSide::Left;
+            }
+            Command::SelectRight => {
+                self.diff_buffer.viewer_mut().cursor.side = DiffSide::Right;
+            }
             Command::ScrollLeft => self.scroll_active_pane_horizontally(-8),
             Command::ScrollRight => self.scroll_active_pane_horizontally(8),
             Command::OpenThemePicker => self.open_theme_picker(),
@@ -1279,9 +2186,13 @@ impl App {
     }
 
     fn scroll_active_pane_horizontally(&mut self, delta: isize) {
-        let before = self.state.scroll_x;
+        let before = self.diff_buffer.viewer().active_horizontal_scroll();
         match self.surface {
-            AppSurface::Diff => self.state.scroll_horizontal(delta),
+            AppSurface::Diff => {
+                self.diff_buffer
+                    .viewer_mut()
+                    .scroll_active_side_horizontally(delta);
+            }
             AppSurface::Queue
             | AppSurface::DetailFull
             | AppSurface::CommitList
@@ -1289,11 +2200,13 @@ impl App {
         }
         Self::debug_input_event(format_args!(
             "scroll_x delta={delta} before={before} after={} surface={:?} sidebar_focus={}",
-            self.state.scroll_x, self.surface, self.review_sidebar_focus
+            self.diff_buffer.viewer().active_horizontal_scroll(),
+            self.surface,
+            self.review_sidebar_focus
         ));
     }
 
-    fn jump_focused_boundary(&mut self, last: bool, rows: usize) {
+    fn jump_focused_boundary(&mut self, last: bool, _rows: usize) {
         match self.surface {
             AppSurface::Queue => match self.queue_focus {
                 QueuePane::List => {
@@ -1309,7 +2222,7 @@ impl App {
                     self.revalidate_selected_semantic_diff();
                 }
                 QueuePane::Detail => {
-                    if self.detail_tab == DetailTab::Semantic {
+                    if self.semantic_panel_active() {
                         self.semantic_selection = if last {
                             self.semantic_tree_rows(&self.current_semantic_route().unwrap_or_else(
                                 || {
@@ -1350,7 +2263,7 @@ impl App {
                 };
             }
             AppSurface::DetailFull => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.semantic_selection = if last { usize::MAX / 2 } else { 0 };
                     self.semantic_scroll_y = self.semantic_selection;
                 } else {
@@ -1358,18 +2271,23 @@ impl App {
                 }
             }
             AppSurface::Diff => {
-                self.state.scroll_y = if last {
-                    rows.saturating_sub(self.viewport_height)
+                let inline_blocks = self.diff_inline_blocks();
+                let visual_row_count = self
+                    .diff_buffer
+                    .viewer()
+                    .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+                self.diff_buffer.viewer_mut().viewport.scroll_y = if last {
+                    visual_row_count.saturating_sub(self.viewport_height)
                 } else {
                     0
-                }
+                };
             }
         }
     }
 
     fn go_back(&mut self) {
-        if self.state.selection.is_some() && self.surface == AppSurface::Diff {
-            self.state.clear_mouse_selection();
+        if self.diff_buffer.viewer().selection.is_some() && self.surface == AppSurface::Diff {
+            self.diff_buffer.viewer_mut().clear_selection();
             return;
         }
         if !self.history.can_go_back() {
@@ -1378,6 +2296,15 @@ impl App {
         }
         let route = self.history.go(-1).clone();
         self.apply_route(route);
+    }
+
+    fn quit_or_go_back(&mut self, force: bool) {
+        if !force && self.history.can_go_back() {
+            let route = self.history.go(-1).clone();
+            self.apply_route(route);
+            return;
+        }
+        self.should_quit = true;
     }
 
     fn push_route(&mut self, route: AppRoute) {
@@ -1428,7 +2355,7 @@ impl App {
             AppSurface::CommitList => self.move_commit_focused(1),
             AppSurface::Comments => self.move_comments_selection(1),
             AppSurface::DetailFull => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.move_semantic_selection(1);
                 } else {
                     self.surface_scroll_y = self.surface_scroll_y.saturating_add(1)
@@ -1444,7 +2371,7 @@ impl App {
             AppSurface::CommitList => self.move_commit_focused(-1),
             AppSurface::Comments => self.move_comments_selection(-1),
             AppSurface::DetailFull => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.move_semantic_selection(-1);
                 } else {
                     self.surface_scroll_y = self.surface_scroll_y.saturating_sub(1)
@@ -1458,7 +2385,7 @@ impl App {
         match self.queue_focus {
             QueuePane::List => self.move_home_selection(delta),
             QueuePane::Detail => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.move_semantic_selection(delta);
                 } else {
                     self.surface_scroll_y = self.surface_scroll_y.saturating_add_signed(delta);
@@ -1518,7 +2445,7 @@ impl App {
                 self.move_comments_selection(direction * self.viewport_height.max(1) as isize)
             }
             AppSurface::DetailFull => {
-                if self.detail_tab == DetailTab::Semantic {
+                if self.semantic_panel_active() {
                     self.move_semantic_selection(
                         direction * self.semantic_visible_rows.max(1) as isize,
                     );
@@ -1791,7 +2718,8 @@ impl App {
             &cwd,
             ["diff", "--no-ext-diff", "--binary", base_ref.as_str()],
         )?;
-        let document = Self::materialize_diff_document(&patch);
+        let document =
+            Self::materialize_local_diff_document(&patch, Path::new(&repo_path), &base_ref);
         Ok(LocalDiffResult {
             repo_path,
             branch,
@@ -1823,7 +2751,11 @@ impl App {
                 sha,
             ],
         )?;
-        Ok(Self::materialize_diff_document(&patch))
+        Ok(Self::materialize_commit_diff_document(
+            &patch,
+            Path::new(repo_path),
+            sha,
+        ))
     }
 
     fn load_pull_request_diff(
@@ -1841,15 +2773,49 @@ impl App {
         document
     }
 
+    fn materialize_local_diff_document(
+        patch: &str,
+        repo_path: &Path,
+        base_ref: &str,
+    ) -> DiffDocument {
+        let mut document = parse_unified_diff(patch);
+        add_pierre_highlights_with_sources(&mut document, |file, side| match side {
+            DiffSide::Left => file
+                .old_path
+                .as_deref()
+                .and_then(|path| git_blob_at(repo_path, local_diff_old_ref(base_ref), path)),
+            DiffSide::Right if base_ref == "--cached" => {
+                git_index_blob_at(repo_path, &file.new_path)
+            }
+            DiffSide::Right => std::fs::read_to_string(repo_path.join(&file.new_path)).ok(),
+        });
+        document
+    }
+
+    fn materialize_commit_diff_document(patch: &str, repo_path: &Path, sha: &str) -> DiffDocument {
+        let mut document = parse_unified_diff(patch);
+        let parent = format!("{sha}^");
+        add_pierre_highlights_with_sources(&mut document, |file, side| match side {
+            DiffSide::Left => file
+                .old_path
+                .as_deref()
+                .and_then(|path| git_blob_at(repo_path, &parent, path)),
+            DiffSide::Right => git_blob_at(repo_path, sha, &file.new_path),
+        });
+        document
+    }
+
     fn replace_document_preserving_view(&mut self, document: DiffDocument) {
         self.document = document;
-        let rows = row_count_for_mode(&self.document, self.state.mode);
-        self.state.selected_row = self.state.selected_row.min(rows.saturating_sub(1));
-        self.state.scroll_y = self
-            .state
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let rows = row_count_for_mode(&self.document, mode);
+        let viewer = self.diff_buffer.viewer_mut();
+        viewer.cursor.row = viewer.cursor.row.min(rows.saturating_sub(1));
+        viewer.viewport.scroll_y = viewer
+            .viewport
             .scroll_y
             .min(rows.saturating_sub(self.viewport_height));
-        self.state.clear_mouse_selection();
+        viewer.clear_selection();
     }
 
     fn home_work_items(&self) -> Vec<WorkItem> {
@@ -1859,23 +2825,20 @@ impl App {
             None => "your work".to_string(),
         };
         let worktrees = self.worktrees_for_queue();
-        let github_items = if self.github_auth.can_load_github() {
-            self.github.items.as_slice()
-        } else {
-            &[]
-        };
+        let github_indices = self.github_indices_for_queue();
+        let github_items = github_indices
+            .iter()
+            .map(|index| self.github.items[*index].clone())
+            .collect::<Vec<_>>();
+        let github_items = github_items.as_slice();
         let linked_pr_ids = project
             .as_ref()
             .map(|project| link_worktree_pr(&worktrees, github_items, project))
             .unwrap_or_default();
-        let pr_index_by_id: HashMap<PrId, usize> = self
-            .github_auth
-            .can_load_github()
-            .then_some(github_items)
-            .unwrap_or_default()
+        let pr_index_by_id: HashMap<PrId, usize> = github_items
             .iter()
-            .enumerate()
-            .map(|(index, pr)| {
+            .zip(github_indices.iter().copied())
+            .map(|(pr, index)| {
                 (
                     PrId {
                         repository: pr.repository.clone(),
@@ -1933,7 +2896,8 @@ impl App {
         // Bucket every remaining PR by concrete repository. This keeps
         // current-project PRs first while avoiding a vague "other repos"
         // catch-all that hides ownership context.
-        for (index, pr) in github_items.iter().enumerate() {
+        for (filtered_index, pr) in github_items.iter().enumerate() {
+            let index = github_indices[filtered_index];
             if linked_pr_indices.contains(&index) {
                 continue;
             }
@@ -1957,7 +2921,8 @@ impl App {
 
         let mut repo_order: Vec<String> = Vec::new();
         let mut repo_indices: HashMap<String, Vec<usize>> = HashMap::new();
-        for (index, pr) in github_items.iter().enumerate() {
+        for (filtered_index, pr) in github_items.iter().enumerate() {
+            let index = github_indices[filtered_index];
             if linked_pr_indices.contains(&index) {
                 continue;
             }
@@ -2015,6 +2980,18 @@ impl App {
             files_changed: self.local_document.files.len(),
             is_current: true,
         }]
+    }
+
+    fn github_indices_for_queue(&self) -> Vec<usize> {
+        if !self.github_auth.can_load_github() {
+            return Vec::new();
+        }
+        self.github
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, _)| index)
+            .collect()
     }
 
     fn route_for_worktree(&self, worktree: &Worktree) -> LocalWorktreeRoute {
@@ -2146,7 +3123,7 @@ impl App {
         let source = DiffSource::LocalWorktree(route.unwrap_or_else(|| self.local_route.clone()));
         self.document = self.local_document.clone();
         self.push_route(AppRoute::Diff(source));
-        self.state = DiffViewState::default();
+        *self.diff_buffer.viewer_mut() = Default::default();
         self.surface_scroll_y = 0;
         self.revalidate_local_diff();
         self.revalidate_selected_semantic_diff();
@@ -2164,11 +3141,11 @@ impl App {
         self.push_route(AppRoute::Diff(route.clone()));
         if let Some(document) = self.pr_diff_cache.get(&key).cloned() {
             self.document = document;
-            self.state = DiffViewState::default();
+            *self.diff_buffer.viewer_mut() = Default::default();
             self.session = Self::load_session_for_route(&self.store, &route, &self.document);
         } else {
             self.document = parse_unified_diff("");
-            self.state = DiffViewState::default();
+            *self.diff_buffer.viewer_mut() = Default::default();
             if let Some(patch) = self.pr_patch_cache.get(&key).cloned() {
                 self.materialize_cached_pull_request_diff(
                     pull_request.repository.clone(),
@@ -2211,7 +3188,7 @@ impl App {
             return;
         }
 
-        let line_target = self.line_target_at(self.state.selected_row);
+        let line_target = self.line_target_at(self.diff_cursor_row());
         let file_index = line_target
             .as_ref()
             .map(|target| target.file_index)
@@ -2368,7 +3345,7 @@ impl App {
             sha: commit.sha.clone(),
         };
         self.document = parse_unified_diff("");
-        self.state = DiffViewState::default();
+        *self.diff_buffer.viewer_mut() = Default::default();
         self.push_route(AppRoute::Diff(source));
         self.revalidate_semantic_diff(self.diff_source.clone());
         let sender = self.query_tx.clone();
@@ -2437,29 +3414,27 @@ impl App {
     }
 
     fn current_file_index(&self) -> Option<usize> {
-        let rows = row_count_for_mode(&self.document, self.state.mode);
-        if self
-            .document
-            .is_file_header_row(self.state.mode, self.state.scroll_y)
-        {
-            return self
-                .document
-                .row_file_index(self.state.mode, self.state.scroll_y);
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let scroll_y = self.diff_buffer.viewer().viewport.scroll_y;
+        let rows = row_count_for_mode(&self.document, mode);
+        if self.document.is_file_header_row(mode, scroll_y) {
+            return self.document.row_file_index(mode, scroll_y);
         }
         self.document
-            .row_file_index(self.state.mode, self.first_unobscured_visible_row(rows))
+            .row_file_index(mode, self.first_unobscured_visible_row(rows))
     }
 
     fn focus_row(&mut self, row: usize, rows: usize) {
-        self.state.clear_mouse_selection();
-        self.state.selected_row = row.min(rows.saturating_sub(1));
-        // Pull scroll back by the sticky-file overlay height so the
-        // landed row isn't hidden under it, and so the user can see a
-        // few lines of context above the entity.
-        let top_margin = self.active_top_margin();
-        let context_margin = top_margin.saturating_add(2);
-        let target_scroll = self.state.selected_row.saturating_sub(context_margin);
-        self.state.scroll_y = target_scroll.min(rows.saturating_sub(self.viewport_height.max(1)));
+        let _ = rows;
+        self.diff_buffer.viewer_mut().focus_row(&self.document, row);
+        self.center_focused_diff_visual_row();
+    }
+
+    fn focus_semantic_document_row(&mut self, row: usize) {
+        self.diff_buffer
+            .viewer_mut()
+            .focus_row_ensure_visible(&self.document, row);
+        self.ensure_focused_diff_visual_row_visible();
     }
 
     pub(super) fn trigger_transient_focus(&mut self, path: String, row: usize) {
@@ -2486,7 +3461,7 @@ impl App {
         }
     }
 
-    fn render_transient_focus(&self, frame: &mut Frame, body: Rect, _palette: HomePalette) {
+    fn render_transient_focus(&self, frame: &mut Frame, body: Rect, palette: HomePalette) {
         let Some(focus) = self.transient_focus.as_ref() else {
             return;
         };
@@ -2494,28 +3469,50 @@ impl App {
         if elapsed >= TRANSIENT_FOCUS_DURATION {
             return;
         }
-        if focus.row < self.state.scroll_y {
+        let content_area = diff_content_area(body);
+        let inline_blocks = self.diff_inline_blocks_for_area(Some(content_area));
+        let viewer = self.diff_buffer.viewer();
+        let visual_rows = viewer.visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        let side = viewer.cursor.side;
+        let Some(visual_index) = visual_rows.iter().position(|visual_row| {
+            visual_row.row_for_side(side) == Some(focus.row)
+                || visual_row.document_row() == Some(focus.row)
+        }) else {
+            return;
+        };
+        let scroll_y = viewer.viewport.scroll_y;
+        if visual_index < scroll_y {
             return;
         }
-        let offset = focus.row - self.state.scroll_y;
-        if offset >= body.height as usize {
+        let local_y = visual_index - scroll_y;
+        if local_y >= body.height as usize {
             return;
         }
-        let y = body.y + offset as u16;
-        // Two-phase pulse: an intense flash at first, then a calm amber
-        // wash that lingers so the eye can settle on the target line.
+        let y = body.y + local_y as u16;
+        // Use the same selected-line highlight family as the diff
+        // viewer overlays instead of a separate semantic-only amber.
         // We only mutate the background of existing cells so we don't
         // stomp double-width glyphs or the gutter's line numbers.
         let progress = elapsed.as_secs_f32() / TRANSIENT_FOCUS_DURATION.as_secs_f32();
-        let highlight_bg = if progress < 0.35 {
-            Color::Rgb(150, 100, 30)
-        } else if progress < 0.7 {
-            Color::Rgb(90, 60, 18)
+        let diff_theme = palette.theme.diff_theme();
+        let highlight_bg = if progress < 0.7 {
+            diff_theme.selected
         } else {
-            Color::Rgb(58, 40, 12)
+            diff_theme.panel_alt
+        };
+        let cursor_x = if self.comment_modal.is_none() && self.inline_focus.is_none() {
+            viewer
+                .cursor_screen_position(&self.document, &inline_blocks, body)
+                .filter(|position| position.y == y)
+                .map(|position| position.x)
+        } else {
+            None
         };
         let buffer = frame.buffer_mut();
         for x in body.x..body.right() {
+            if cursor_x == Some(x) {
+                continue;
+            }
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_bg(highlight_bg);
             }
@@ -2523,90 +3520,411 @@ impl App {
     }
 
     fn scroll_relative(&mut self, delta: isize, rows: usize) {
-        self.state.scroll_y = self
-            .state
+        if self.surface == AppSurface::Diff {
+            let inline_blocks = self.diff_inline_blocks();
+            let visual_row_count = self
+                .diff_buffer
+                .viewer()
+                .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+            let max_scroll = visual_row_count.saturating_sub(self.viewport_height);
+            self.diff_buffer.viewer_mut().viewport.scroll_y = self
+                .diff_buffer
+                .viewer()
+                .viewport
+                .scroll_y
+                .saturating_add_signed(delta)
+                .min(max_scroll);
+            return;
+        }
+        self.diff_buffer.viewer_mut().viewport.scroll_y = self
+            .diff_buffer
+            .viewer()
+            .viewport
             .scroll_y
             .saturating_add_signed(delta)
             .min(rows.saturating_sub(self.viewport_height));
     }
 
+    fn move_diff_cursor_rows(&mut self, delta: isize, rows: usize) {
+        let _ = rows;
+        if self.comment_modal.is_none() && self.move_diff_visual_row(delta) {
+            return;
+        }
+        self.diff_buffer
+            .viewer_mut()
+            .move_cursor_rows(&self.document, delta);
+        self.inline_focus = None;
+        self.ensure_focused_diff_visual_row_visible();
+    }
+
+    fn move_diff_visual_row(&mut self, delta: isize) -> bool {
+        let inline_blocks = self.diff_inline_blocks();
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        let Some(current_index) = self.current_diff_visual_index(&visual_rows, &inline_blocks)
+        else {
+            return false;
+        };
+        let next_index = current_index.saturating_add_signed(delta);
+        if next_index >= visual_rows.len() {
+            return false;
+        };
+        self.focus_diff_visual_index(
+            &visual_rows,
+            &inline_blocks,
+            next_index,
+            DiffScrollPolicy::EnsureVisible,
+        )
+    }
+
+    fn focus_adjacent_inline_block_row(&mut self, block_id: &str, delta: isize) -> bool {
+        let inline_blocks = self.diff_inline_blocks();
+        let Some(block_index) = inline_blocks.iter().position(|block| block.id == block_id) else {
+            return false;
+        };
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        let block_indices = visual_rows.iter().enumerate().filter_map(|(index, row)| {
+            matches!(row, DiffVisualRow::InlineBlock { index: inline_index, .. } if *inline_index == block_index)
+                .then_some(index)
+        });
+        let target_index = if delta > 0 {
+            let Some(last_block_index) = block_indices.last() else {
+                return false;
+            };
+            last_block_index.saturating_add(1)
+        } else {
+            let Some(first_block_index) = block_indices.into_iter().next() else {
+                return false;
+            };
+            let Some(target_index) = first_block_index.checked_sub(1) else {
+                return false;
+            };
+            target_index
+        };
+        if target_index >= visual_rows.len() {
+            return false;
+        }
+        self.focus_diff_visual_index(
+            &visual_rows,
+            &inline_blocks,
+            target_index,
+            DiffScrollPolicy::EnsureVisible,
+        )
+    }
+
+    fn current_diff_visual_index(
+        &self,
+        visual_rows: &[DiffVisualRow],
+        inline_blocks: &[DiffInlineBlock],
+    ) -> Option<usize> {
+        if let Some(focus) = &self.inline_focus {
+            if let Some(block_index) = inline_blocks
+                .iter()
+                .position(|block| block.id == focus.block_id)
+            {
+                return visual_rows.iter().position(|visual_row| {
+                    matches!(
+                        visual_row,
+                        DiffVisualRow::InlineBlock { index, line, .. }
+                            if *index == block_index && *line == focus.line
+                    )
+                });
+            }
+        }
+
+        let cursor = self.diff_buffer.viewer().cursor;
+        visual_rows
+            .iter()
+            .position(|visual_row| visual_row.row_for_side(cursor.side) == Some(cursor.row))
+            .or_else(|| {
+                visual_rows
+                    .iter()
+                    .position(|visual_row| visual_row.document_row() == Some(cursor.row))
+            })
+    }
+
+    fn focus_diff_visual_index(
+        &mut self,
+        visual_rows: &[DiffVisualRow],
+        inline_blocks: &[DiffInlineBlock],
+        visual_index: usize,
+        scroll_policy: DiffScrollPolicy,
+    ) -> bool {
+        let Some(next_visual_row) = visual_rows.get(visual_index).copied() else {
+            return false;
+        };
+        match next_visual_row {
+            DiffVisualRow::Document { row, .. } => {
+                self.inline_focus = None;
+                self.focus_document_row_preserving_view(row);
+                self.apply_diff_scroll_policy(scroll_policy, visual_index, visual_rows.len());
+                true
+            }
+            DiffVisualRow::InlineBlock { index, line, .. } => {
+                let Some(block) = inline_blocks.get(index) else {
+                    return false;
+                };
+                let Some((first_body_line, last_body_line)) = inline_block_body_line_range(block)
+                else {
+                    return false;
+                };
+                self.focus_document_row_preserving_view(block.after_row);
+                self.inline_focus = Some(InlineFocus {
+                    block_id: block.id.clone(),
+                    line: line.clamp(first_body_line, last_body_line),
+                });
+                self.apply_diff_scroll_policy(scroll_policy, visual_index, visual_rows.len());
+                true
+            }
+        }
+    }
+
+    fn apply_diff_scroll_policy(
+        &mut self,
+        scroll_policy: DiffScrollPolicy,
+        visual_index: usize,
+        visual_row_count: usize,
+    ) {
+        match scroll_policy {
+            DiffScrollPolicy::EnsureVisible => {
+                self.ensure_diff_visual_index_visible(visual_index, visual_row_count)
+            }
+            DiffScrollPolicy::Center => {
+                self.center_diff_visual_index(visual_index, visual_row_count)
+            }
+        }
+    }
+
+    fn focus_document_row_preserving_view(&mut self, row: usize) {
+        self.diff_buffer
+            .viewer_mut()
+            .focus_row_preserving_view(&self.document, row);
+    }
+
+    fn diff_document_row_screen_offset(&self, row: usize) -> Option<usize> {
+        let inline_blocks = self.diff_inline_blocks();
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        let side = self.diff_buffer.viewer().cursor.side;
+        let visual_index = visual_rows
+            .iter()
+            .position(|visual_row| visual_row.row_for_side(side) == Some(row))
+            .or_else(|| {
+                visual_rows
+                    .iter()
+                    .position(|visual_row| visual_row.document_row() == Some(row))
+            })?;
+        visual_index.checked_sub(self.diff_buffer.viewer().viewport.scroll_y)
+    }
+
+    fn keep_diff_document_row_at_screen_offset(&mut self, row: usize, screen_offset: usize) {
+        let inline_blocks = self.diff_inline_blocks();
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        let side = self.diff_buffer.viewer().cursor.side;
+        let Some(visual_index) = visual_rows
+            .iter()
+            .position(|visual_row| visual_row.row_for_side(side) == Some(row))
+            .or_else(|| {
+                visual_rows
+                    .iter()
+                    .position(|visual_row| visual_row.document_row() == Some(row))
+            })
+        else {
+            return;
+        };
+        let height = self.viewport_height.max(1);
+        let max_scroll = visual_rows.len().saturating_sub(height);
+        self.diff_buffer.viewer_mut().viewport.scroll_y =
+            visual_index.saturating_sub(screen_offset).min(max_scroll);
+        self.ensure_diff_visual_index_visible(visual_index, visual_rows.len());
+    }
+
+    fn ensure_diff_visual_index_visible(&mut self, visual_index: usize, visual_row_count: usize) {
+        let height = self.viewport_height.max(1);
+        let top_margin = self.active_top_margin().min(height.saturating_sub(1));
+        let scroll_y = self.diff_buffer.viewer().viewport.scroll_y;
+        let max_scroll = visual_row_count.saturating_sub(height);
+        let first_unobscured = scroll_y.saturating_add(top_margin);
+        let next_scroll_y = if visual_index < first_unobscured {
+            visual_index.saturating_sub(top_margin)
+        } else if visual_index >= scroll_y.saturating_add(height) {
+            visual_index.saturating_sub(height.saturating_sub(1))
+        } else {
+            scroll_y
+        };
+        self.diff_buffer.viewer_mut().viewport.scroll_y = next_scroll_y.min(max_scroll);
+    }
+
+    fn center_focused_diff_visual_row(&mut self) {
+        let inline_blocks = self.diff_inline_blocks();
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        if let Some(index) = self.current_diff_visual_index(&visual_rows, &inline_blocks) {
+            self.center_diff_visual_index(index, visual_rows.len());
+        }
+    }
+
+    fn ensure_focused_diff_visual_row_visible(&mut self) {
+        let inline_blocks = self.diff_inline_blocks();
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        if let Some(index) = self.current_diff_visual_index(&visual_rows, &inline_blocks) {
+            self.ensure_diff_visual_index_visible(index, visual_rows.len());
+        }
+    }
+
+    fn ensure_inline_comment_editor_cursor_visible(&mut self) {
+        let Some(modal) = self.comment_modal.as_ref() else {
+            return;
+        };
+        let inline_blocks = self.diff_inline_blocks();
+        let Some(editor_block_index) = inline_blocks
+            .iter()
+            .position(|block| block.kind == DiffInlineBlockKind::Editor)
+        else {
+            return;
+        };
+        let visual_rows = self
+            .diff_buffer
+            .viewer()
+            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+        let pane = self.diff_buffer.viewer().viewport.pane_rect(
+            Rect::new(
+                0,
+                0,
+                self.diff_buffer.viewer().viewport.width.saturating_sub(1),
+                self.diff_buffer.viewer().viewport.height.max(1),
+            ),
+            inline_blocks[editor_block_index].side,
+        );
+        let text_width = inline_block_text_width(pane);
+        let editor_line = modal.visual_cursor_row(text_width).saturating_add(1);
+        let Some(visual_index) = visual_rows.iter().position(|visual_row| {
+            matches!(
+                visual_row,
+                DiffVisualRow::InlineBlock { index, line, .. }
+                    if *index == editor_block_index && *line == editor_line
+            )
+        }) else {
+            return;
+        };
+        self.ensure_diff_visual_index_visible(visual_index, visual_rows.len());
+    }
+
+    fn center_diff_visual_index(&mut self, visual_index: usize, visual_row_count: usize) {
+        let height = self.viewport_height.max(1);
+        let max_scroll = visual_row_count.saturating_sub(height);
+        let center = height / 2;
+        self.diff_buffer.viewer_mut().viewport.scroll_y =
+            visual_index.saturating_sub(center).min(max_scroll);
+    }
+
+    fn move_diff_cursor_cols(&mut self, delta: isize, rows: usize) {
+        let _ = rows;
+        self.diff_buffer
+            .viewer_mut()
+            .move_cursor_cols(&self.document, delta);
+    }
+
     fn move_active_relative(&mut self, delta: isize, rows: usize) {
+        if self.surface == AppSurface::Diff {
+            self.move_diff_cursor_rows(delta, rows);
+            return;
+        }
         if rows == 0 {
-            self.state.selected_row = 0;
-            self.state.scroll_y = 0;
+            self.diff_buffer.viewer_mut().cursor.row = 0;
+            self.diff_buffer.viewer_mut().viewport.scroll_y = 0;
             return;
         }
 
-        let selecting = self.state.selection.is_some();
+        let selecting = self.diff_buffer.viewer().selection.is_some();
         if !self.is_active_visible(rows) {
-            self.state.selected_row = self.first_unobscured_visible_row(rows);
+            self.diff_buffer.viewer_mut().cursor.row = self.first_unobscured_visible_row(rows);
             self.update_keyboard_selection(rows);
             return;
         }
 
-        self.state.selected_row = self
-            .state
-            .selected_row
+        self.diff_buffer.viewer_mut().cursor.row = self
+            .diff_buffer
+            .viewer()
+            .cursor
+            .row
             .saturating_add_signed(delta)
             .min(rows.saturating_sub(1));
         self.keep_active_visible(rows);
         if selecting {
             self.update_keyboard_selection(rows);
         } else {
-            self.state.clear_mouse_selection();
+            self.diff_buffer.viewer_mut().clear_selection();
         }
     }
 
     fn move_active_half_page(&mut self, direction: isize, rows: usize) {
-        if rows == 0 {
-            self.state.selected_row = 0;
-            self.state.scroll_y = 0;
+        let _ = rows;
+        if self.surface == AppSurface::Diff {
+            let inline_blocks = self.diff_inline_blocks();
+            let visual_rows = self
+                .diff_buffer
+                .viewer()
+                .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
+            let Some(current_index) = self.current_diff_visual_index(&visual_rows, &inline_blocks)
+            else {
+                return;
+            };
+            let half = (self.viewport_height.max(2) / 2).max(1) as isize;
+            let target_index = current_index
+                .saturating_add_signed(direction.saturating_mul(half))
+                .min(visual_rows.len().saturating_sub(1));
+            self.focus_diff_visual_index(
+                &visual_rows,
+                &inline_blocks,
+                target_index,
+                DiffScrollPolicy::Center,
+            );
             return;
         }
-
-        let half_page = (self.viewport_height.max(2) / 2).max(1) as isize;
-        let viewport_height = self.viewport_height.max(1);
-        let target = self
-            .state
-            .scroll_y
-            .saturating_add_signed(direction.saturating_mul(half_page))
-            .min(rows.saturating_sub(1));
-        let max_scroll = rows.saturating_sub(viewport_height);
-        let target_scroll = target.min(max_scroll);
-
-        self.state.clear_mouse_selection();
-        self.state.scroll_y = target_scroll;
-        self.state.selected_row = self.first_unobscured_visible_row(rows);
+        self.diff_buffer
+            .viewer_mut()
+            .half_page(&self.document, direction);
     }
 
-    fn toggle_visual_selection(&mut self, rows: usize) {
-        if self.state.selection.is_some() {
-            self.state.clear_mouse_selection();
-            return;
+    fn toggle_visual_selection(&mut self, rows: usize, linewise: bool) {
+        let _ = rows;
+        if self.diff_buffer.viewer().selection.is_some() {
+            self.diff_buffer.viewer_mut().clear_selection();
+        } else if linewise {
+            self.diff_buffer
+                .viewer_mut()
+                .start_visual_line_selection(&self.document);
+        } else {
+            self.diff_buffer
+                .viewer_mut()
+                .start_visual_selection(&self.document);
         }
-        if rows == 0 {
-            return;
-        }
-        let Some(target) = self.focus_comment_target() else {
-            return;
-        };
-        let row = self.state.selected_row;
-        self.state
-            .start_mouse_selection(row, target.side, 0, rows, self.viewport_height);
-        self.state
-            .update_mouse_selection(row, usize::MAX, rows, self.viewport_height);
     }
 
     fn update_keyboard_selection(&mut self, rows: usize) {
-        if self.state.selection.is_none() {
+        if self.diff_buffer.viewer().selection.is_none() {
             return;
         }
-        self.state.update_mouse_selection(
-            self.state.selected_row,
-            usize::MAX,
-            rows,
-            self.viewport_height,
-        );
+        self.diff_buffer
+            .viewer_mut()
+            .update_visual_selection(&self.document);
+        let _ = rows;
     }
 
     fn is_active_visible(&self, rows: usize) -> bool {
@@ -2621,57 +3939,67 @@ impl App {
                     .saturating_sub(1),
             )
             .min(rows.saturating_sub(1));
-        self.state.selected_row >= first_visible && self.state.selected_row <= last_visible
+        let row = self.diff_buffer.viewer().cursor.row;
+        row >= first_visible && row <= last_visible
     }
 
     fn first_unobscured_visible_row(&self, rows: usize) -> usize {
-        self.state
+        self.diff_buffer
+            .viewer()
+            .viewport
             .scroll_y
             .saturating_add(self.active_top_margin())
             .min(rows.saturating_sub(1))
     }
 
     fn active_top_margin(&self) -> usize {
-        STICKY_FILE_OVERLAY_ROWS.min(self.viewport_height.saturating_sub(1))
+        0
     }
 
     fn keep_active_visible(&mut self, rows: usize) {
         if rows == 0 {
-            self.state.scroll_y = 0;
-            self.state.selected_row = 0;
+            self.diff_buffer.viewer_mut().viewport.scroll_y = 0;
+            self.diff_buffer.viewer_mut().cursor.row = 0;
             return;
         }
         let top_margin = self.active_top_margin();
         let viewport_height = self.viewport_height.max(1);
-        self.state.selected_row = self.state.selected_row.min(rows.saturating_sub(1));
-        if self.state.selected_row < self.state.scroll_y.saturating_add(top_margin) {
-            self.state.scroll_y = self.state.selected_row.saturating_sub(top_margin);
-        } else if self.state.selected_row >= self.state.scroll_y.saturating_add(viewport_height) {
-            self.state.scroll_y = self
-                .state
-                .selected_row
-                .saturating_sub(viewport_height.saturating_sub(1));
+        self.diff_buffer.viewer_mut().cursor.row = self
+            .diff_buffer
+            .viewer()
+            .cursor
+            .row
+            .min(rows.saturating_sub(1));
+        let row = self.diff_buffer.viewer().cursor.row;
+        let scroll_y = self.diff_buffer.viewer().viewport.scroll_y;
+        if row < scroll_y.saturating_add(top_margin) {
+            self.diff_buffer.viewer_mut().viewport.scroll_y = row.saturating_sub(top_margin);
+        } else if row >= scroll_y.saturating_add(viewport_height) {
+            self.diff_buffer.viewer_mut().viewport.scroll_y =
+                row.saturating_sub(viewport_height.saturating_sub(1));
         }
-        self.state.scroll_y = self
-            .state
+        self.diff_buffer.viewer_mut().viewport.scroll_y = self
+            .diff_buffer
+            .viewer()
+            .viewport
             .scroll_y
             .min(rows.saturating_sub(viewport_height));
     }
 
     fn navigation_origin_row(&self) -> usize {
-        if self.state.selected_row >= self.state.scroll_y
-            && self.state.selected_row < self.state.scroll_y.saturating_add(self.viewport_height)
-        {
-            self.state.selected_row
+        let cursor_row = self.diff_cursor_row();
+        let scroll_y = self.diff_scroll_y();
+        if cursor_row >= scroll_y && cursor_row < scroll_y.saturating_add(self.viewport_height) {
+            cursor_row
         } else {
-            self.state.scroll_y
+            scroll_y
         }
     }
 
     fn jump_relative_file(&mut self, delta: isize, rows: usize) {
         let Some(current) = self
             .document
-            .row_file_index(self.state.mode, self.navigation_origin_row())
+            .row_file_index(self.diff_mode(), self.navigation_origin_row())
         else {
             return;
         };
@@ -2682,7 +4010,7 @@ impl App {
     }
 
     fn jump_to_file(&mut self, file_index: usize, rows: usize) {
-        let Some(row) = self.document.file_row(self.state.mode, file_index) else {
+        let Some(row) = self.document.file_row(self.diff_mode(), file_index) else {
             return;
         };
         self.focus_row(row, rows);
@@ -2690,25 +4018,27 @@ impl App {
 
     fn jump_to_text_result(&mut self, result: &TextSearchResult, rows: usize) {
         let Some(row) = self.document.line_row(
-            self.state.mode,
+            self.diff_mode(),
             result.file_index,
             result.hunk_index,
             result.line_index,
         ) else {
             return;
         };
-        self.state.clear_mouse_selection();
-        self.state.selected_side = if result.kind == "-" {
+        self.diff_buffer.viewer_mut().clear_selection();
+        self.diff_buffer.viewer_mut().cursor.side = if result.kind == "-" {
             DiffSide::Left
         } else {
             DiffSide::Right
         };
-        self.state.selected_row = row.min(rows.saturating_sub(1));
+        self.diff_buffer.viewer_mut().cursor.row = row.min(rows.saturating_sub(1));
         let sticky_header_rows = 2usize;
         let context_rows = sticky_header_rows + 3;
-        self.state.scroll_y = self
-            .state
-            .selected_row
+        self.diff_buffer.viewer_mut().viewport.scroll_y = self
+            .diff_buffer
+            .viewer()
+            .cursor
+            .row
             .saturating_sub(context_rows)
             .min(rows.saturating_sub(self.viewport_height));
     }
@@ -2719,31 +4049,34 @@ impl App {
 
     fn jump_relative_hunk_from(&mut self, origin_row: usize, delta: isize, rows: usize) {
         let target = if delta > 0 {
-            self.document.next_hunk_row(self.state.mode, origin_row)
+            self.document.next_hunk_row(self.diff_mode(), origin_row)
         } else {
-            self.document.previous_hunk_row(self.state.mode, origin_row)
+            self.document
+                .previous_hunk_row(self.diff_mode(), origin_row)
         };
         let Some(row) = target else { return };
-        self.state.clear_mouse_selection();
-        self.state.selected_row = row.min(rows.saturating_sub(1));
-        self.state.scroll_y = self
-            .state
-            .selected_row
+        self.diff_buffer.viewer_mut().clear_selection();
+        self.diff_buffer.viewer_mut().cursor.row = row.min(rows.saturating_sub(1));
+        self.diff_buffer.viewer_mut().viewport.scroll_y = self
+            .diff_buffer
+            .viewer()
+            .cursor
+            .row
             .min(rows.saturating_sub(self.viewport_height));
     }
 
     fn active_line_target(&self) -> Option<DiffLineTarget> {
         self.document.line_target(
-            self.state.mode,
-            self.state.selected_row,
-            self.state.selected_side,
+            self.diff_mode(),
+            self.diff_buffer.viewer().cursor.row,
+            self.diff_buffer.viewer().cursor.side,
         )
     }
 
     fn handle_review_sidebar_key(&mut self, code: KeyCode, rows: usize) {
         let visible_rows = self.review_tree_rows();
         match code {
-            KeyCode::Esc => self.review_sidebar_focus = false,
+            KeyCode::Esc => self.set_diff_focus(DiffFocusPane::Right),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.review_sidebar_selection = self
                     .review_sidebar_selection
@@ -3223,8 +4556,11 @@ impl App {
     }
 
     fn active_review_target(&mut self) -> Option<DiffLineRangeTarget> {
-        if let Some(selection) = self.state.selection {
-            if let Some(target) = self.document.selection_target(self.state.mode, selection) {
+        if let Some(selection) = self.diff_buffer.viewer().selection {
+            if let Some(target) = self
+                .document
+                .selection_target(self.diff_buffer.viewer().viewport.mode, selection)
+            {
                 return Some(target);
             }
         }
@@ -3232,22 +4568,31 @@ impl App {
     }
 
     fn focus_comment_target(&mut self) -> Option<DiffLineTarget> {
-        let rows = row_count_for_mode(&self.document, self.state.mode);
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let cursor = self.diff_buffer.viewer().cursor;
+        let rows = row_count_for_mode(&self.document, mode);
         if rows == 0 {
             return None;
         }
 
-        if let Some(target) = self.line_target_at(self.state.selected_row) {
+        if let Some(target) = self.line_target_at(cursor.row) {
             return Some(target);
         }
 
-        let visible_top = self.state.scroll_y.min(rows.saturating_sub(1));
+        let visible_top = self
+            .diff_buffer
+            .viewer()
+            .viewport
+            .scroll_y
+            .min(rows.saturating_sub(1));
         let visible_bottom = self
-            .state
+            .diff_buffer
+            .viewer()
+            .viewport
             .scroll_y
             .saturating_add(self.viewport_height.saturating_sub(1))
             .min(rows.saturating_sub(1));
-        let start = self.state.selected_row.clamp(visible_top, visible_bottom);
+        let start = cursor.row.clamp(visible_top, visible_bottom);
 
         for row in start..=visible_bottom {
             if let Some(target) = self.line_target_at(row) {
@@ -3263,24 +4608,21 @@ impl App {
     }
 
     fn line_target_at(&mut self, row: usize) -> Option<DiffLineTarget> {
-        if let Some(target) =
-            self.document
-                .line_target(self.state.mode, row, self.state.selected_side)
-        {
-            self.state.selected_row = row;
-            self.state.selected_side = target.side;
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let side = self.diff_buffer.viewer().cursor.side;
+        if let Some(target) = self.document.line_target(mode, row, side) {
+            self.diff_buffer.viewer_mut().cursor.row = row;
+            self.diff_buffer.viewer_mut().cursor.side = target.side;
             return Some(target);
         }
 
-        let other_side = match self.state.selected_side {
+        let other_side = match side {
             DiffSide::Left => DiffSide::Right,
             DiffSide::Right => DiffSide::Left,
         };
-        let target = self
-            .document
-            .line_target(self.state.mode, row, other_side)?;
-        self.state.selected_row = row;
-        self.state.selected_side = target.side;
+        let target = self.document.line_target(mode, row, other_side)?;
+        self.diff_buffer.viewer_mut().cursor.row = row;
+        self.diff_buffer.viewer_mut().cursor.side = target.side;
         Some(target)
     }
 }
@@ -3332,6 +4674,7 @@ enum TerminalFlowResult {
 enum DetailTab {
     Semantic,
     Description,
+    Graph,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3344,6 +4687,22 @@ enum QueuePane {
 enum CommitPane {
     List,
     Detail,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffFocusPane {
+    Sidebar,
+    Left,
+    Right,
+}
+
+impl DiffFocusPane {
+    fn non_sidebar(self) -> Self {
+        match self {
+            DiffFocusPane::Sidebar => DiffFocusPane::Right,
+            DiffFocusPane::Left | DiffFocusPane::Right => self,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3599,6 +4958,22 @@ fn branch_status_label(worktree: &Worktree) -> String {
     }
 }
 
+fn inline_block_accent_for_review_kind(kind: ReviewItemKind) -> DiffInlineBlockAccent {
+    match kind {
+        ReviewItemKind::Question => DiffInlineBlockAccent::Question,
+        ReviewItemKind::Instruction => DiffInlineBlockAccent::Instruction,
+        ReviewItemKind::Note => DiffInlineBlockAccent::Note,
+        ReviewItemKind::AgentCheck => DiffInlineBlockAccent::Agent,
+    }
+}
+
+fn inline_block_body_line_range(block: &DiffInlineBlock) -> Option<(usize, usize)> {
+    if block.height < 3 {
+        return None;
+    }
+    Some((1, block.height.saturating_sub(2)))
+}
+
 impl WorkItem {
     fn pull_request<'a>(&self, app: &'a App) -> Option<&'a GitHubPullRequest> {
         self.pr_index.and_then(|index| app.github.items.get(index))
@@ -3729,15 +5104,6 @@ impl CommentView {
     fn from_note(note: &ReviewNote) -> Self {
         Self {
             author: note.author.clone(),
-            body: note.body.clone(),
-            created_at: "local".to_string(),
-        }
-    }
-
-    fn from_thread_note(note: &ReviewNote) -> Self {
-        let reply = note.parent_id.map(|_| " follow-up").unwrap_or_default();
-        Self {
-            author: format!("{} {}{}", note.author, note.kind.label(), reply),
             body: note.body.clone(),
             created_at: "local".to_string(),
         }
@@ -3916,6 +5282,13 @@ pub(crate) fn now_stamp() -> u64 {
         .unwrap_or_default()
 }
 
+fn side_sort_key(side: DiffSide) -> u8 {
+    match side {
+        DiffSide::Left => 0,
+        DiffSide::Right => 1,
+    }
+}
+
 fn git_stdout_in<const N: usize>(cwd: &Path, args: [&str; N]) -> Option<String> {
     git_stdout_result_in(cwd, args)
         .ok()
@@ -3941,6 +5314,24 @@ fn git_stdout_result_in<const N: usize>(
         });
     }
     String::from_utf8(output.stdout).map_err(|error| format!("git output was not utf-8: {error}"))
+}
+
+fn git_blob_at(repo_path: &Path, rev: &str, path: &str) -> Option<String> {
+    let spec = format!("{rev}:{path}");
+    git_stdout_result_in(repo_path, ["show", spec.as_str()]).ok()
+}
+
+fn git_index_blob_at(repo_path: &Path, path: &str) -> Option<String> {
+    let spec = format!(":{path}");
+    git_stdout_result_in(repo_path, ["show", spec.as_str()]).ok()
+}
+
+fn local_diff_old_ref(base_ref: &str) -> &str {
+    if base_ref == "--cached" {
+        "HEAD"
+    } else {
+        base_ref
+    }
 }
 
 fn file_preview_row_count(file: &FileDiff) -> usize {

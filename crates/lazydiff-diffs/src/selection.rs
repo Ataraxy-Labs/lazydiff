@@ -19,6 +19,167 @@ pub struct TextSelectionRange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffSearchMatch {
+    pub row: usize,
+    pub side: DiffSide,
+    pub range: TextSelectionRange,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffTextPoint {
+    pub row: usize,
+    pub side: DiffSide,
+    /// Display cell column in the rendered diff row, including the diff gutter.
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffSelectionMode {
+    Character,
+    Line,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffTextSelection {
+    pub active: bool,
+    pub anchor: DiffTextPoint,
+    pub cursor: DiffTextPoint,
+    pub mode: DiffSelectionMode,
+    pub side_filtered: bool,
+    pub side: DiffSide,
+    pub include_initial_newline: bool,
+    pub include_final_newline: bool,
+}
+
+impl DiffTextSelection {
+    pub fn character(point: DiffTextPoint) -> Self {
+        Self {
+            active: true,
+            anchor: point,
+            cursor: point,
+            mode: DiffSelectionMode::Character,
+            side_filtered: true,
+            side: point.side,
+            include_initial_newline: false,
+            include_final_newline: false,
+        }
+    }
+
+    pub fn line(point: DiffTextPoint) -> Self {
+        Self {
+            mode: DiffSelectionMode::Line,
+            ..Self::character(point)
+        }
+    }
+
+    pub fn set_cursor(&mut self, point: DiffTextPoint) {
+        self.cursor = point;
+    }
+
+    pub fn normalized(&self) -> (DiffTextPoint, DiffTextPoint) {
+        if (self.anchor.row, self.anchor.column) <= (self.cursor.row, self.cursor.column) {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    pub fn contains_row_on_side(&self, row: usize, side: DiffSide) -> bool {
+        if !self.active || (self.side_filtered && self.side != side) {
+            return false;
+        }
+        let (start, end) = self.normalized();
+        row >= start.row && row <= end.row
+    }
+
+    pub fn column_range_on_side(
+        &self,
+        row: usize,
+        side: DiffSide,
+        code_start: usize,
+    ) -> Option<TextSelectionRange> {
+        if !self.contains_row_on_side(row, side) {
+            return None;
+        }
+        if self.mode == DiffSelectionMode::Line {
+            return Some(TextSelectionRange {
+                start: 0,
+                end: usize::MAX,
+            });
+        }
+
+        let (start, end) = self.normalized();
+        let to_text_col = |column: usize| column.saturating_sub(code_start);
+        let range = if start.row == end.row {
+            let start_col = to_text_col(start.column.min(end.column));
+            let end_col = to_text_col(end.column.max(start.column)).saturating_add(1);
+            TextSelectionRange {
+                start: start_col,
+                end: end_col,
+            }
+        } else if row == start.row {
+            TextSelectionRange {
+                start: to_text_col(start.column),
+                end: usize::MAX,
+            }
+        } else if row == end.row {
+            TextSelectionRange {
+                start: 0,
+                end: to_text_col(end.column).saturating_add(1),
+            }
+        } else {
+            TextSelectionRange {
+                start: 0,
+                end: usize::MAX,
+            }
+        };
+
+        (range.start < range.end).then_some(range)
+    }
+
+    pub fn document_column_range_on_side(
+        &self,
+        row: usize,
+        side: DiffSide,
+    ) -> Option<TextSelectionRange> {
+        if !self.contains_row_on_side(row, side) {
+            return None;
+        }
+        if self.mode == DiffSelectionMode::Line {
+            return Some(TextSelectionRange {
+                start: 0,
+                end: usize::MAX,
+            });
+        }
+
+        let (start, end) = self.normalized();
+        let range = if start.row == end.row {
+            TextSelectionRange {
+                start: start.column.min(end.column),
+                end: end.column.max(start.column).saturating_add(1),
+            }
+        } else if row == start.row {
+            TextSelectionRange {
+                start: start.column,
+                end: usize::MAX,
+            }
+        } else if row == end.row {
+            TextSelectionRange {
+                start: 0,
+                end: end.column.saturating_add(1),
+            }
+        } else {
+            TextSelectionRange {
+                start: 0,
+                end: usize::MAX,
+            }
+        };
+
+        (range.start < range.end).then_some(range)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextViewport {
     pub scroll_x: usize,
     pub scroll_y: usize,
@@ -89,39 +250,6 @@ impl TextSelection {
             row: viewport.scroll_y.saturating_add(local_row),
             column: viewport.scroll_x.saturating_add(local_column),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DiffSelection {
-    pub side: DiffSide,
-    pub text: TextSelection,
-}
-
-impl DiffSelection {
-    pub fn new(row: usize, side: DiffSide, column: usize) -> Self {
-        Self {
-            side,
-            text: TextSelection::new(TextPoint { row, column }),
-        }
-    }
-
-    pub fn focus(&self) -> TextPoint {
-        self.text.focus
-    }
-
-    pub fn set_focus(&mut self, row: usize, column: usize) {
-        self.text.set_focus(TextPoint { row, column });
-    }
-
-    pub fn contains_row_on_side(&self, row: usize, side: DiffSide) -> bool {
-        self.side == side && self.text.contains_row(row)
-    }
-
-    pub fn column_range_on_side(&self, row: usize, side: DiffSide) -> Option<TextSelectionRange> {
-        (self.side == side)
-            .then(|| self.text.column_range_on_row(row))
-            .flatten()
     }
 }
 

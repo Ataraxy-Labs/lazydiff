@@ -43,13 +43,13 @@ impl AppHeader<'_> {
             left_width += 3 + self.scope.chars().count();
         }
 
-        // Build right side (viewer · spinner · summary).
+        // Build right side (spinner · summary). Do not render the
+        // GitHub viewer name here; the top bar can be screenshotted or
+        // streamed during reviews.
         let mut right: Vec<Span<'_>> = Vec::new();
         let mut right_width = 0usize;
-        right.push(Span::styled(self.viewer.to_string(), viewer));
-        right_width += self.viewer.chars().count();
-        right.push(Span::styled("  ".to_string(), muted));
-        right_width += 2;
+        let _ = viewer;
+        let _ = self.viewer;
         if self.is_fetching {
             right.push(Span::styled(format!("{} ", self.spinner), spinner));
             right_width += self.spinner.chars().count() + 1;

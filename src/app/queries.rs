@@ -152,8 +152,9 @@ impl App {
                                 &local_diff.document,
                             );
                             self.sync_viewed_state_for_session();
-                            self.diff_source = route;
+                            self.diff_source = route.clone();
                             self.replace_document_preserving_view(local_diff.document);
+                            self.apply_pending_semantic_focus(&route);
                         }
                     }
                     Err(error) => self.query_client.finish_error(QueryKey::LocalDiff, error),
@@ -197,7 +198,7 @@ impl App {
                         self.session = App::load_session_for_route(&self.store, &route, &document);
                         self.sync_viewed_state_for_session();
                         self.replace_document_preserving_view(document);
-                        self.state = DiffViewState::default();
+                        self.apply_pending_semantic_focus(&route);
                         self.surface_scroll_y = 0;
                     }
                     Err(error) => self.commit_status = Some(format!("commit diff failed: {error}")),

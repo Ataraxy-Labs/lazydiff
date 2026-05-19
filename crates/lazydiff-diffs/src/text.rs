@@ -4,7 +4,10 @@ use ratatui::style::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::pierre::{selection_style, split_line_cell};
-use crate::{DiffTheme, InlineDiffSpan, RowKind, SyntaxSpan, TextSelectionRange};
+use crate::{
+    DiffOverlayKind, DiffPaneTextLayout, DiffTheme, DiffVisualOverlay, InlineDiffSpan, RowKind,
+    SyntaxSpan,
+};
 
 pub(crate) fn concealed_text(text: &str, conceal_first: bool) -> String {
     let _ = conceal_first;
@@ -35,8 +38,8 @@ pub(crate) fn render_segments(
     row_kind: RowKind,
     theme: DiffTheme,
     base_style: Style,
-    selection_range: Option<TextSelectionRange>,
-    scroll_x: usize,
+    layout: DiffPaneTextLayout,
+    overlays: &[DiffVisualOverlay],
 ) {
     for x in area.left()..area.right() {
         buf[(x, y)].set_symbol(" ").set_style(base_style);
@@ -54,9 +57,14 @@ pub(crate) fn render_segments(
         x = x.saturating_add(UnicodeWidthStr::width(fitted.as_str()) as u16);
     }
 
+    let text_x = area
+        .x
+        .saturating_add(layout.visual_code_start as u16)
+        .min(right);
+
     render_styled_text(
         buf,
-        x,
+        text_x,
         y,
         right,
         text,
@@ -65,8 +73,8 @@ pub(crate) fn render_segments(
         row_kind,
         theme,
         base_style,
-        selection_range,
-        scroll_x,
+        layout,
+        overlays,
     );
 }
 
@@ -81,10 +89,12 @@ fn render_styled_text(
     row_kind: RowKind,
     theme: DiffTheme,
     base_style: Style,
-    selection_range: Option<TextSelectionRange>,
-    scroll_x: usize,
+    layout: DiffPaneTextLayout,
+    overlays: &[DiffVisualOverlay],
 ) -> u16 {
     let selection_style = selection_style();
+    let cursor_style = selection_style.add_modifier(ratatui::style::Modifier::BOLD);
+    let search_style = Style::new().fg(theme.bg).bg(theme.add_fg);
     let mut display_column = 0usize;
     let cell = split_line_cell(
         row_kind,
@@ -104,17 +114,23 @@ fn render_styled_text(
 
             let char_width = ch.width().unwrap_or(0).max(1);
             let char_end = display_column + char_width;
-            if char_end <= scroll_x {
+            let doc_column = layout.document_code_start.saturating_add(display_column);
+            let doc_char_end = layout.document_code_start.saturating_add(char_end);
+            if char_end <= layout.scroll_x {
                 display_column = char_end;
                 continue;
             }
-            let selected = selection_range
-                .is_some_and(|range| display_column < range.end && char_end > range.start);
-            let style = if selected {
-                selection_style
-            } else {
-                span.style
-            };
+            let pane_column = layout.document_col_to_pane_col(doc_column);
+            let pane_char_end = layout.document_col_to_pane_col(doc_char_end);
+            let style = overlay_style_for(
+                overlays,
+                pane_column,
+                pane_char_end,
+                span.style,
+                selection_style,
+                search_style,
+                cursor_style,
+            );
 
             let mut buf_text = [0; 4];
             let text = ch.encode_utf8(&mut buf_text);
@@ -125,9 +141,14 @@ fn render_styled_text(
         }
     }
 
-    if let Some(selection_range) = selection_range {
-        if selection_range.end == usize::MAX && display_column < selection_range.end {
-            let start = selection_range.start.saturating_sub(display_column) as u16;
+    for overlay in overlays
+        .iter()
+        .filter(|overlay| matches!(overlay.kind, DiffOverlayKind::Selection | DiffOverlayKind::Yank))
+    {
+        let doc_column = layout.document_code_start.saturating_add(display_column);
+        let pane_column = layout.document_col_to_pane_col(doc_column);
+        if overlay.range.end == usize::MAX && pane_column < overlay.range.end {
+            let start = overlay.range.start.saturating_sub(pane_column) as u16;
             let selection_start_x = x.saturating_add(start).min(right);
             for selected_x in selection_start_x..right {
                 buf[(selected_x, y)].set_style(selection_style);
@@ -136,6 +157,25 @@ fn render_styled_text(
     }
 
     x
+}
+
+fn overlay_style_for(
+    overlays: &[DiffVisualOverlay],
+    pane_column: usize,
+    pane_char_end: usize,
+    base: Style,
+    selection: Style,
+    search: Style,
+    cursor: Style,
+) -> Style {
+    overlays
+        .iter()
+        .filter(|overlay| pane_column < overlay.range.end && pane_char_end > overlay.range.start)
+        .fold(base, |_style, overlay| match overlay.kind {
+            DiffOverlayKind::Selection | DiffOverlayKind::Yank => selection,
+            DiffOverlayKind::Search => search,
+            DiffOverlayKind::Cursor => cursor,
+        })
 }
 
 fn fit(text: &str, width: usize) -> String {

@@ -1,7 +1,8 @@
 pub(crate) mod review_store;
 
 pub(crate) use review_store::{
-    CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient, PersistedPullRequestComments,
-    PersistedPullRequestDiff, PersistedSemanticDiff, PersistedViewedState, ReviewItemKind,
-    ReviewItemState, ReviewNote, ReviewSession, ReviewStore, ReviewThread, ReviewUiState,
+    CommentEditorMode, CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient,
+    PersistedPullRequestComments, PersistedPullRequestDiff, PersistedSemanticDiff,
+    PersistedViewedState, ReviewItemKind, ReviewItemState, ReviewNote, ReviewSession, ReviewStore,
+    ReviewThread, ReviewUiState,
 };

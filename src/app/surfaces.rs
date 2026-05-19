@@ -1369,6 +1369,10 @@ impl App {
             DetailTab::Description => {
                 self.render_detail_description(frame, tab_area, selected, palette);
             }
+            DetailTab::Graph => {
+                let semantic_route = selected.route(self);
+                self.render_semantic_graph(frame, tab_area, &semantic_route, palette);
+            }
         }
     }
 
@@ -1872,11 +1876,18 @@ impl App {
         } else {
             inactive
         };
+        let graph = if self.detail_tab == DetailTab::Graph {
+            active
+        } else {
+            inactive
+        };
         frame.render_widget(
             Line::from(vec![
                 Span::styled("Semantic", semantic),
                 Span::styled("   ", inactive),
                 Span::styled("Description", description),
+                Span::styled("   ", inactive),
+                Span::styled("Graph", graph),
             ]),
             area,
         );
@@ -2001,6 +2012,262 @@ impl App {
     }
 
     pub(super) fn render_semantic_tree(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        route: &DiffSource,
+        palette: HomePalette,
+    ) -> u16 {
+        if area.height == 0 || area.width == 0 {
+            return area.y;
+        }
+        self.seed_semantic_expansion(route);
+        let rows = self.semantic_tree_rows(route);
+        if rows.is_empty() {
+            self.set_semantic_viewport(SemanticViewport {
+                total_rows: 0,
+                visible_rows: 1,
+                selected: 0,
+                scroll_y: 0,
+            });
+            return area.y;
+        }
+        let total_rows = rows.len();
+        let body_area = semantic_tree_body_area(area);
+        let viewport = self.semantic_viewport_for(total_rows, body_area.height as usize);
+        self.set_semantic_viewport(viewport);
+        let bg = palette.layer_bg(SurfaceLayer::Surface);
+        let heading = palette.text(TextRole::Heading).bg(bg);
+        let muted = palette.text(TextRole::Muted).bg(bg);
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        draw_box(
+            frame.buffer_mut(),
+            area,
+            Style::new().fg(palette.theme.colors.border).bg(bg),
+        );
+        frame.render_widget(
+            Line::from(vec![
+                Span::styled(" Semantic ", heading),
+                Span::styled(
+                    right_aligned_text(
+                        area.width.saturating_sub(2),
+                        " Semantic ".chars().count(),
+                        "↑↓ focus · enter/click opens · space ticks",
+                    ),
+                    muted,
+                ),
+            ]),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        for (screen_row, row_index) in (viewport.scroll_y..total_rows)
+            .take(body_area.height as usize)
+            .enumerate()
+        {
+            let Some(row) = rows.get(row_index) else {
+                continue;
+            };
+            let selected = row_index == viewport.selected.min(total_rows.saturating_sub(1));
+            let line =
+                self.render_semantic_tree_row(row, body_area.width as usize, selected, palette, bg);
+            frame.render_widget(
+                line,
+                Rect::new(
+                    body_area.x,
+                    body_area.y.saturating_add(screen_row as u16),
+                    body_area.width,
+                    1,
+                ),
+            );
+        }
+        render_modal_diff_scrollbar(
+            frame.buffer_mut(),
+            body_area,
+            total_rows,
+            viewport.visible_rows,
+            viewport.scroll_y,
+        );
+        body_area.bottom()
+    }
+
+    fn render_semantic_tree_row(
+        &self,
+        row: &SemanticTreeRow,
+        width: usize,
+        selected: bool,
+        palette: HomePalette,
+        bg: Color,
+    ) -> Line<'static> {
+        let row_bg = if selected { palette.selected_bg } else { bg };
+        let selected_fg = if selected {
+            palette.selected_text
+        } else {
+            palette.fg
+        };
+        let muted = if selected {
+            palette.selected_text
+        } else {
+            palette.muted
+        };
+        let muted_style = Style::new().fg(muted).bg(row_bg);
+        let tick = Style::new()
+            .fg(if selected {
+                palette.selected_text
+            } else {
+                palette.success
+            })
+            .bg(row_bg)
+            .add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(" ", Style::new().bg(row_bg))];
+        match row {
+            SemanticTreeRow::Directory {
+                name,
+                depth,
+                collapsed,
+                ..
+            } => {
+                let indent = " ".repeat(*depth);
+                let marker = if *collapsed { "▶" } else { "▼" };
+                spans.push(Span::styled(indent, muted_style));
+                spans.push(Span::styled(format!("  {marker} "), muted_style));
+                spans.push(Span::styled(
+                    truncate(name, width.saturating_sub(depth.saturating_add(5))),
+                    Style::new()
+                        .fg(if selected {
+                            selected_fg
+                        } else {
+                            palette.accent
+                        })
+                        .bg(row_bg),
+                ));
+            }
+            SemanticTreeRow::File {
+                path,
+                name,
+                depth,
+                change_count,
+                collapsed,
+                ..
+            } => {
+                let checked = if self.is_file_viewed(path) {
+                    "✓ "
+                } else {
+                    "  "
+                };
+                let marker = if *collapsed { "▶" } else { "▼" };
+                let indent = " ".repeat(*depth);
+                let suffix = format!(" {change_count} symbols");
+                let label_width = width.saturating_sub(1 + suffix.chars().count());
+                spans.push(Span::styled(indent.clone(), muted_style));
+                spans.push(Span::styled(checked, tick));
+                spans.push(Span::styled(format!("{marker} "), muted_style));
+                spans.push(Span::styled(
+                    truncate(name, label_width.saturating_sub(depth.saturating_add(4))),
+                    Style::new()
+                        .fg(file_tree_color(path, palette, selected))
+                        .bg(row_bg),
+                ));
+                spans.push(Span::styled(
+                    right_aligned_text(
+                        width as u16,
+                        (indent.chars().count()
+                            + checked.chars().count()
+                            + 2
+                            + name.chars().count())
+                        .min(label_width)
+                            + 1,
+                        &suffix,
+                    ),
+                    muted_style,
+                ));
+            }
+            SemanticTreeRow::Entity {
+                path,
+                depth,
+                entity_type,
+                entity_name,
+                change_type,
+                line,
+                ..
+            } => {
+                let entity_key = Self::semantic_entity_key_parts(
+                    path,
+                    entity_type,
+                    entity_name,
+                    change_type,
+                    *line,
+                );
+                let checked = if self.is_entity_viewed(&entity_key) {
+                    "✓ "
+                } else {
+                    "  "
+                };
+                let marker = semantic_change_marker(change_type);
+                let marker_style = match marker {
+                    "+" => Style::new()
+                        .fg(if selected {
+                            selected_fg
+                        } else {
+                            palette.success
+                        })
+                        .bg(row_bg),
+                    "-" => Style::new()
+                        .fg(if selected {
+                            selected_fg
+                        } else {
+                            palette.danger
+                        })
+                        .bg(row_bg),
+                    _ => Style::new()
+                        .fg(if selected {
+                            selected_fg
+                        } else {
+                            palette.orange
+                        })
+                        .bg(row_bg),
+                };
+                let indent = " ".repeat(*depth);
+                let suffix = format!(" {marker} {}", compact_entity_type(entity_type));
+                let label_width = width.saturating_sub(1 + suffix.chars().count());
+                spans.push(Span::styled(indent.clone(), muted_style));
+                spans.push(Span::styled(checked, tick));
+                spans.push(Span::styled(
+                    truncate(
+                        entity_name,
+                        label_width.saturating_sub(depth.saturating_add(2)),
+                    ),
+                    Style::new()
+                        .fg(entity_tree_color(entity_type, palette, selected))
+                        .bg(row_bg),
+                ));
+                spans.push(Span::styled(
+                    right_aligned_text(
+                        width as u16,
+                        (indent.chars().count()
+                            + checked.chars().count()
+                            + entity_name.chars().count())
+                        .min(label_width)
+                            + 1,
+                        &suffix,
+                    ),
+                    marker_style,
+                ));
+            }
+            SemanticTreeRow::Status(status) => {
+                spans.push(Span::styled(
+                    truncate(status, width.saturating_sub(1)),
+                    muted_style,
+                ));
+            }
+        }
+        Line::from(spans).style(Style::new().bg(row_bg))
+    }
+
+    pub(super) fn render_semantic_graph(
         &mut self,
         frame: &mut Frame,
         area: Rect,
@@ -2475,11 +2742,11 @@ impl App {
             .add_modifier(Modifier::BOLD);
         let inactive = Style::new().fg(palette.rule_dim).bg(bg);
         let hint = Style::new().fg(palette.muted).bg(bg);
-        if self.state.mode == DiffMode::Split {
+        if self.diff_buffer.viewer().viewport.mode == DiffMode::Split {
             let half = diff_body.width / 2;
             let left = Rect::new(diff_body.x, rule.y, half, 1);
             let right = Rect::new(diff_body.x + half, rule.y, diff_body.width - half, 1);
-            let left_active = self.state.selected_side == DiffSide::Left;
+            let left_active = self.diff_buffer.viewer().cursor.side == DiffSide::Left;
             frame.render_widget(
                 Line::from("━".repeat(left.width as usize)).style(if left_active {
                     active
@@ -2497,8 +2764,9 @@ impl App {
                 right,
             );
         }
-        let label = if self.state.scroll_x > 0 {
-            format!(" tab pane · H/L scroll · x{} ", self.state.scroll_x)
+        let scroll_x = self.diff_buffer.viewer().active_horizontal_scroll();
+        let label = if scroll_x > 0 {
+            format!(" tab pane · H/L scroll · x{} ", scroll_x)
         } else {
             " tab pane · H/L scroll ".to_string()
         };
@@ -2583,7 +2851,7 @@ impl App {
         let current = self.current_file_index().map_or(String::new(), |index| {
             format!("  {}/{}", index + 1, self.document.files.len())
         });
-        let mode = match self.state.mode {
+        let mode = match self.diff_buffer.viewer().viewport.mode {
             DiffMode::Split => "unified",
             DiffMode::Unified => "split",
         };
@@ -2596,40 +2864,59 @@ impl App {
                 Span::styled("enter", key),
                 Span::styled(" jump", label),
             ])
+        } else if self.surface == AppSurface::Diff
+            && self.diff_buffer.mode() == DiffBufferMode::Search
+        {
+            Line::from(vec![
+                Span::styled("/", key),
+                Span::styled(self.diff_buffer.search_query().to_string(), label),
+                Span::styled("  enter", key),
+                Span::styled(" accept  ", label),
+                Span::styled("esc", key),
+                Span::styled(" cancel", label),
+            ])
+        } else if self.surface == AppSurface::Diff
+            && self.diff_buffer.mode() == DiffBufferMode::Command
+        {
+            Line::from(vec![
+                Span::styled(":", key),
+                Span::styled(self.diff_buffer.command_line().to_string(), label),
+                Span::styled("  enter", key),
+                Span::styled(" run  ", label),
+                Span::styled("esc", key),
+                Span::styled(" cancel", label),
+            ])
+        } else if let Some(status) = self.branch_operation_status.as_deref() {
+            Line::from(vec![
+                Span::styled(" notice ", key),
+                Span::styled(status, label),
+            ])
         } else {
             let mut spans = vec![
                 Span::styled(" esc", key),
                 Span::styled(" clear  ", label),
                 Span::styled("↑↓", key),
                 Span::styled(" line  ", label),
-                Span::styled("a", key),
-                Span::styled(" ask  ", label),
                 Span::styled("i", key),
-                Span::styled(" instruct  ", label),
-                Span::styled("n", key),
-                Span::styled(" note  ", label),
+                Span::styled(" comment  ", label),
             ];
             if matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
-                spans.push(Span::styled("e", key));
-                spans.push(Span::styled(" vim  ", label));
+                spans.push(Span::styled("<space>e", key));
+                spans.push(Span::styled(" files  ", label));
             }
             spans.extend([
                 Span::styled("enter", key),
                 Span::styled(" discuss  ", label),
                 Span::styled(":", key),
-                Span::styled(" inbox  ", label),
+                Span::styled(" command  ", label),
                 Span::styled("/", key),
                 Span::styled(" search  ", label),
-                Span::styled("f", key),
-                Span::styled(" files  ", label),
                 Span::styled("s", key),
-                Span::styled(" sidebar  ", label),
+                Span::styled(format!(" {mode}  "), label),
                 Span::styled("space", key),
                 Span::styled(" viewed  ", label),
                 Span::styled("v", key),
                 Span::styled(" select  ", label),
-                Span::styled("m", key),
-                Span::styled(format!(" {mode}  "), label),
                 Span::styled("A", key),
                 Span::styled(" attempts", label),
                 Span::styled(current, label),
@@ -2637,124 +2924,6 @@ impl App {
             Line::from(spans)
         };
         frame.render_widget(line.style(Style::new().bg(bg)), area);
-    }
-
-    pub(super) fn render_comment_preview(&self, frame: &mut Frame, area: Rect) {
-        let palette = self.home_palette();
-        let bg = palette.bg;
-        let border = Style::new().fg(palette.rule).bg(bg);
-        let text = Style::new().fg(palette.fg).bg(bg);
-        let muted = Style::new().fg(palette.muted).bg(bg);
-        let key = Style::new()
-            .fg(palette.accent)
-            .bg(bg)
-            .add_modifier(Modifier::BOLD);
-        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
-        if area.height == 0 {
-            return;
-        }
-        frame.render_widget(
-            Line::from("─".repeat(area.width as usize)).style(border),
-            Rect::new(area.x, area.y, area.width, 1),
-        );
-        if area.height < 2 {
-            return;
-        }
-        let line_area = Rect::new(area.x, area.y + 1, area.width, 1);
-        if !matches!(
-            self.diff_source,
-            DiffSource::LocalWorktree(_) | DiffSource::PullRequest { .. }
-        ) {
-            frame.render_widget(
-                Line::from(vec![
-                    Span::styled("  external diff  ", muted),
-                    Span::styled("esc", key),
-                    Span::styled(" back  ", muted),
-                    Span::styled("/", key),
-                    Span::styled(" search  ", muted),
-                    Span::styled("f", key),
-                    Span::styled(" files", muted),
-                ]),
-                line_area,
-            );
-            return;
-        }
-        let Some(target) = self.active_line_target() else {
-            frame.render_widget(
-                Line::from(vec![
-                    Span::styled("  focus a changed line ", muted),
-                    Span::styled("j/k", key),
-                    Span::styled(" or click gutter/line to comment", muted),
-                ]),
-                line_area,
-            );
-            return;
-        };
-        if matches!(self.diff_source, DiffSource::PullRequest { .. }) {
-            frame.render_widget(
-                Line::from(vec![
-                    Span::styled("  ", muted),
-                    Span::styled("n", key),
-                    Span::styled(" comment on PR · ", muted),
-                    Span::styled(
-                        target_line_label(&target),
-                        text.add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" · ", muted),
-                    Span::styled(short_path(&target.path).to_string(), muted),
-                ]),
-                line_area,
-            );
-            return;
-        }
-        let notes = self.session.notes_for_target(&target);
-        if let Some(note) = notes.last() {
-            let (symbol, color) = note.kind.gutter_marker();
-            frame.render_widget(
-                Line::from(vec![
-                    Span::styled(format!("  {symbol} "), Style::new().fg(color).bg(bg)),
-                    Span::styled(
-                        target_line_label(&target),
-                        text.add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(
-                            " {} · {} item{} · ",
-                            note.kind.label(),
-                            notes.len(),
-                            plural_s(notes.len())
-                        ),
-                        muted,
-                    ),
-                    Span::styled("enter thread", key),
-                    Span::styled("  ", muted),
-                    Span::styled(
-                        truncate(&note.summary(), area.width.saturating_sub(42) as usize),
-                        text,
-                    ),
-                ]),
-                line_area,
-            );
-        } else {
-            frame.render_widget(
-                Line::from(vec![
-                    Span::styled("  ", muted),
-                    Span::styled("a", key),
-                    Span::styled(" ask  ", muted),
-                    Span::styled("i", key),
-                    Span::styled(" instruct  ", muted),
-                    Span::styled("n", key),
-                    Span::styled(" note · ", muted),
-                    Span::styled(
-                        target_line_label(&target),
-                        text.add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" · ", muted),
-                    Span::styled(short_path(&target.path).to_string(), muted),
-                ]),
-                line_area,
-            );
-        }
     }
 
     pub(super) fn render_note_gutter_markers(&self, frame: &mut Frame, body: Rect) {
@@ -2766,30 +2935,31 @@ impl App {
             return;
         }
 
-        let rows = row_count_for_mode(&self.document, self.state.mode);
-        let viewport_top = self.state.scroll_y.min(rows.saturating_sub(1));
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let scroll_y = self.diff_buffer.viewer().viewport.scroll_y;
+        let rows = row_count_for_mode(&self.document, mode);
+        let viewport_top = scroll_y.min(rows.saturating_sub(1));
         let viewport_bottom = self
-            .state
+            .diff_buffer
+            .viewer()
+            .viewport
             .scroll_y
             .saturating_add(self.viewport_height.saturating_sub(1))
             .min(rows.saturating_sub(1));
         let content_width = body.width.saturating_sub(1).max(1);
         let half = content_width / 2;
-        let overlay_cutoff = body.y.saturating_add(STICKY_FILE_OVERLAY_ROWS as u16);
 
         for row in viewport_top..=viewport_bottom {
-            let y = body
-                .y
-                .saturating_add(row.saturating_sub(self.state.scroll_y) as u16);
-            if y < overlay_cutoff || y >= body.bottom() {
+            let y = body.y.saturating_add(row.saturating_sub(scroll_y) as u16);
+            if y >= body.bottom() {
                 continue;
             }
 
             for side in [DiffSide::Left, DiffSide::Right] {
-                let Some(target) = self.document.line_target(self.state.mode, row, side) else {
+                let Some(target) = self.document.line_target(mode, row, side) else {
                     continue;
                 };
-                let x = match self.state.mode {
+                let x = match mode {
                     DiffMode::Unified => body.x,
                     DiffMode::Split => match side {
                         DiffSide::Left => body.x,

@@ -3,7 +3,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::StatefulWidget;
 use std::collections::HashMap;
+use std::time::Instant;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod gutter;
 mod inline_diff;
@@ -13,16 +15,25 @@ mod scrollbar;
 mod selection;
 mod text;
 mod theme;
+mod viewer;
 pub use gutter::{GutterCell, LineSign};
 use inline_diff::compute_inline_diff_spans;
 pub use inline_diff::InlineDiffSpan;
 pub use metadata::{FileDiffKind, FileDiffMetadata, HunkContent, HunkMetadata};
 pub use pierre::{line_render_spans, RenderCellKind, RenderSpan, SplitLineCell};
 pub use scrollbar::{render_scrollbar, SliderGeometry, SliderState, VerticalScrollbar};
-pub use selection::{DiffSelection, TextPoint, TextSelection, TextSelectionRange, TextViewport};
+pub use selection::{
+    DiffSearchMatch, DiffSelectionMode, DiffTextPoint, DiffTextSelection, TextPoint,
+    TextSelection, TextSelectionRange, TextViewport,
+};
 use text::{concealed_text, render_full_line, render_segments};
 use theme::row_style;
 pub use theme::{DiffTheme, DiffThemeName, SyntaxTheme};
+pub use viewer::{
+    DiffCursor, DiffInlineBlock, DiffInlineBlockAccent, DiffInlineBlockKind, DiffRenderModel,
+    DiffScreenPosition, DiffSearchState, DiffSideBySideRow, DiffViewerState, DiffViewport,
+    DiffVisualRow, DiffWordMotion,
+};
 
 const HIGHLIGHT_NAMES: &[&str] = &[
     "attribute",
@@ -89,6 +100,104 @@ pub struct DiffDocument {
     pub files: Vec<FileDiff>,
     unified_rows: Vec<RowRef>,
     split_rows: Vec<RowRef>,
+}
+
+/// Shared coordinate contract for diff text.
+///
+/// - Document columns are semantic text columns anchored at the start of the
+///   line's selectable code text.
+/// - Visual pane columns are terminal-cell columns inside the rendered pane and
+///   include gutter/rail decoration plus horizontal scroll.
+/// - `document_code_start` is the semantic code offset used by selection,
+///   search, yank, cursor, and copy operations.
+/// - `visual_code_start` is the rendered terminal-cell start of code text.
+/// - Cursor, mouse, search, selection, yank, and renderer paint conversions must
+///   go through this layout. Do not use `row_code_start` directly as a screen-x
+///   coordinate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffPaneTextLayout {
+    pub mode: DiffMode,
+    pub side: DiffSide,
+    pub row: usize,
+    pub pane: Rect,
+    pub document_code_start: usize,
+    pub visual_code_start: usize,
+    pub scroll_x: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffOverlayKind {
+    Selection,
+    Search,
+    Yank,
+    Cursor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffVisualOverlay {
+    pub row: usize,
+    pub side: DiffSide,
+    pub range: TextSelectionRange,
+    pub kind: DiffOverlayKind,
+}
+
+impl DiffPaneTextLayout {
+    pub fn document_col_to_pane_col(&self, document_col: usize) -> usize {
+        self.visual_code_start
+            .saturating_add(document_col.saturating_sub(self.document_code_start))
+            .saturating_sub(self.scroll_x)
+    }
+
+    pub fn document_col_to_screen_x(&self, document_col: usize) -> u16 {
+        self.pane
+            .x
+            .saturating_add(self.document_col_to_pane_col(document_col) as u16)
+            .min(self.pane.right().saturating_sub(1))
+    }
+
+    pub fn screen_x_to_document_col(&self, x: u16, document_code_end: usize) -> usize {
+        let pane_col = x.saturating_sub(self.pane.x) as usize;
+        let text_col = pane_col
+            .saturating_sub(self.visual_code_start)
+            .saturating_add(self.scroll_x);
+        self.document_code_start
+            .saturating_add(text_col)
+            .max(self.document_code_start)
+            .min(document_code_end.saturating_sub(1))
+    }
+
+    pub fn scroll_to_reveal(&self, document_col: usize) -> usize {
+        let text_col = document_col.saturating_sub(self.document_code_start);
+        if text_col < self.scroll_x {
+            return text_col;
+        }
+        let visible_text_width = usize::from(self.pane.width)
+            .saturating_sub(self.visual_code_start)
+            .max(1);
+        if text_col >= self.scroll_x.saturating_add(visible_text_width) {
+            text_col.saturating_sub(visible_text_width.saturating_sub(1))
+        } else {
+            self.scroll_x
+        }
+    }
+
+    pub fn selection_range_to_visual(self, range: TextSelectionRange) -> TextSelectionRange {
+        TextSelectionRange {
+            start: self.document_col_to_pane_col(range.start),
+            end: if range.end == usize::MAX {
+                usize::MAX
+            } else {
+                self.document_col_to_pane_col(range.end)
+            },
+        }
+    }
+
+    pub fn text_local_range_to_document(self, range: TextSelectionRange) -> TextSelectionRange {
+        TextSelectionRange {
+            start: self.document_code_start.saturating_add(range.start),
+            end: self.document_code_start.saturating_add(range.end),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -417,12 +526,67 @@ impl DiffDocument {
         }
     }
 
+    pub fn row_code_start(&self, mode: DiffMode, row_index: usize, side: DiffSide) -> Option<usize> {
+        match *self.rows(mode).get(row_index)? {
+            RowRef::Unified { line } => {
+                let diff_line = self.line(line);
+                let (old, new) = match diff_line {
+                    DiffLine::Context { old_line, new_line, .. } => (Some(*old_line), Some(*new_line)),
+                    DiffLine::Add { new_line, .. } => (None, Some(*new_line)),
+                    DiffLine::Delete { old_line, .. } => (Some(*old_line), None),
+                };
+                Some(
+                    UnicodeWidthStr::width(gutter::exact_line_num(old).as_str())
+                        + UnicodeWidthStr::width(" ")
+                        + UnicodeWidthStr::width(gutter::exact_line_num(new).as_str())
+                        + UnicodeWidthStr::width(" "),
+                )
+            }
+            RowRef::Split { .. } => {
+                let line = self.line_target(mode, row_index, side).map(|target| target.line);
+                Some(
+                    UnicodeWidthStr::width(gutter::exact_line_num(line).as_str())
+                        + UnicodeWidthStr::width("")
+                        + UnicodeWidthStr::width(" "),
+                )
+            }
+            RowRef::FileSeparator
+            | RowRef::FileHeader { .. }
+            | RowRef::Collapsed { .. }
+            | RowRef::HunkHeader { .. } => None,
+        }
+    }
+
+    pub fn pane_text_layout(
+        &self,
+        mode: DiffMode,
+        row_index: usize,
+        side: DiffSide,
+        pane: Rect,
+        scroll_x: usize,
+    ) -> Option<DiffPaneTextLayout> {
+        let document_code_start = self.row_code_start(mode, row_index, side)?;
+        let visual_code_start = match mode {
+            DiffMode::Unified => document_code_start,
+            DiffMode::Split => document_code_start.saturating_add(1),
+        };
+        Some(DiffPaneTextLayout {
+            mode,
+            side,
+            row: row_index,
+            pane,
+            document_code_start,
+            visual_code_start,
+            scroll_x,
+        })
+    }
+
     pub fn selection_target(
         &self,
         mode: DiffMode,
-        selection: DiffSelection,
+        selection: DiffTextSelection,
     ) -> Option<DiffLineRangeTarget> {
-        let (start, end) = selection.text.normalized();
+        let (start, end) = selection.normalized();
         let mut first = None;
         let mut last = None;
 
@@ -445,25 +609,30 @@ impl DiffDocument {
         })
     }
 
-    pub fn selection_text(&self, mode: DiffMode, selection: DiffSelection) -> String {
-        let (start, end) = selection.text.normalized();
+    pub fn selection_text(&self, mode: DiffMode, selection: DiffTextSelection) -> String {
+        let (start, end) = selection.normalized();
         let mut lines = Vec::new();
 
         for row_index in start.row..=end.row {
             let Some(text) = self.row_text_for_selection(mode, row_index, selection.side) else {
                 continue;
             };
-            let range = selection.text.column_range_on_row(row_index).unwrap_or(TextSelectionRange {
-                start: 0,
-                end: usize::MAX,
-            });
+            let code_start = self
+                .row_code_start(mode, row_index, selection.side)
+                .unwrap_or(0);
+            let range = selection
+                .column_range_on_side(row_index, selection.side, code_start)
+                .unwrap_or(TextSelectionRange {
+                    start: 0,
+                    end: usize::MAX,
+                });
             lines.push(slice_text_columns(text, range.start, range.end));
         }
 
         lines.join("\n")
     }
 
-    fn row_text_for_selection(
+    pub(crate) fn row_text_for_selection(
         &self,
         mode: DiffMode,
         row_index: usize,
@@ -597,107 +766,6 @@ impl DiffLineRangeTarget {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct DiffViewState {
-    pub mode: DiffMode,
-    pub scroll_x: usize,
-    pub scroll_y: usize,
-    pub selected_row: usize,
-    pub selected_side: DiffSide,
-    pub selection: Option<DiffSelection>,
-}
-
-impl Default for DiffViewState {
-    fn default() -> Self {
-        Self {
-            mode: DiffMode::Split,
-            scroll_x: 0,
-            scroll_y: 0,
-            selected_row: 0,
-            selected_side: DiffSide::Right,
-            selection: None,
-        }
-    }
-}
-
-impl DiffViewState {
-    pub fn move_selection(&mut self, delta: isize, row_count: usize, viewport_height: usize) {
-        if row_count == 0 {
-            self.selected_row = 0;
-            self.scroll_y = 0;
-            return;
-        }
-
-        let selected = self
-            .selected_row
-            .saturating_add_signed(delta)
-            .min(row_count.saturating_sub(1));
-        self.selected_row = selected;
-
-        if selected < self.scroll_y {
-            self.scroll_y = selected;
-        } else if selected >= self.scroll_y.saturating_add(viewport_height) {
-            self.scroll_y = selected.saturating_sub(viewport_height.saturating_sub(1));
-        }
-    }
-
-    pub fn start_mouse_selection(
-        &mut self,
-        row: usize,
-        side: DiffSide,
-        column: usize,
-        row_count: usize,
-        viewport_height: usize,
-    ) {
-        let row = row.min(row_count.saturating_sub(1));
-        self.selection = Some(DiffSelection::new(row, side, column));
-        self.selected_side = side;
-        self.selected_row = row;
-        self.keep_selected_visible(row_count, viewport_height);
-    }
-
-    pub fn update_mouse_selection(
-        &mut self,
-        row: usize,
-        column: usize,
-        row_count: usize,
-        viewport_height: usize,
-    ) {
-        let Some(mut selection) = self.selection else {
-            return;
-        };
-        selection.set_focus(row.min(row_count.saturating_sub(1)), column);
-        self.selection = Some(selection);
-        self.selected_side = selection.side;
-        self.selected_row = selection.focus().row;
-        self.keep_selected_visible(row_count, viewport_height);
-    }
-
-    pub fn clear_mouse_selection(&mut self) {
-        self.selection = None;
-    }
-
-    pub fn scroll_horizontal(&mut self, delta: isize) {
-        self.scroll_x = self.scroll_x.saturating_add_signed(delta).min(400);
-    }
-
-    fn keep_selected_visible(&mut self, row_count: usize, viewport_height: usize) {
-        if row_count == 0 {
-            self.scroll_y = 0;
-            self.selected_row = 0;
-            return;
-        }
-        self.selected_row = self.selected_row.min(row_count.saturating_sub(1));
-        if self.selected_row < self.scroll_y {
-            self.scroll_y = self.selected_row;
-        } else if self.selected_row >= self.scroll_y.saturating_add(viewport_height) {
-            self.scroll_y = self
-                .selected_row
-                .saturating_sub(viewport_height.saturating_sub(1));
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     Context,
@@ -720,6 +788,9 @@ struct Cell<'a> {
 pub struct DiffWidget<'a> {
     document: &'a DiffDocument,
     theme: DiffTheme,
+    search_matches: &'a [DiffSearchMatch],
+    inline_blocks: &'a [DiffInlineBlock],
+    show_diff_cursor: bool,
 }
 
 impl<'a> DiffWidget<'a> {
@@ -727,6 +798,9 @@ impl<'a> DiffWidget<'a> {
         Self {
             document,
             theme: DiffTheme::default(),
+            search_matches: &[],
+            inline_blocks: &[],
+            show_diff_cursor: true,
         }
     }
 
@@ -734,10 +808,25 @@ impl<'a> DiffWidget<'a> {
         self.theme = theme;
         self
     }
+
+    pub fn search_matches(mut self, search_matches: &'a [DiffSearchMatch]) -> Self {
+        self.search_matches = search_matches;
+        self
+    }
+
+    pub fn inline_blocks(mut self, inline_blocks: &'a [DiffInlineBlock]) -> Self {
+        self.inline_blocks = inline_blocks;
+        self
+    }
+
+    pub fn show_diff_cursor(mut self, show: bool) -> Self {
+        self.show_diff_cursor = show;
+        self
+    }
 }
 
 impl StatefulWidget for DiffWidget<'_> {
-    type State = DiffViewState;
+    type State = DiffViewerState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         fill(area, buf, " ", Style::new().bg(self.theme.bg));
@@ -745,42 +834,48 @@ impl StatefulWidget for DiffWidget<'_> {
             return;
         }
 
-        let rows = self.document.rows(state.mode);
-        let content_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-        let scrollbar_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
-        let viewport_height = area.height as usize;
-        let max_scroll = rows.len().saturating_sub(viewport_height);
-        state.scroll_y = state.scroll_y.min(max_scroll);
-        state.selected_row = state.selected_row.min(rows.len().saturating_sub(1));
+        let rows = self.document.rows(state.viewport.mode);
+        let now = Instant::now();
+        let model = state.render_model(self.document, self.inline_blocks, area);
 
-        for (screen_y, row_index) in (state.scroll_y..rows.len())
-            .take(viewport_height)
-            .enumerate()
-        {
-            let y = content_area.y + screen_y as u16;
-            let selected = state.selection.is_none() && row_index == state.selected_row;
-            render_row_ref(
-                self.document,
-                rows[row_index],
-                row_index,
-                content_area,
-                y,
-                buf,
-                selected,
-                state.selected_side,
-                state.selection,
-                self.theme,
-                state.mode,
-                state.scroll_x,
-            );
+        for (screen_y, visual_row) in model.visual_rows.iter().enumerate() {
+            let y = model.content_area.y + screen_y as u16;
+            match *visual_row {
+                DiffVisualRow::Document { row: row_index, .. } => render_row_ref(
+                    state,
+                    self.document,
+                    rows[row_index],
+                    row_index,
+                    model.content_area,
+                    y,
+                    buf,
+                    state.cursor.side,
+                    now,
+                    self.search_matches,
+                    self.theme,
+                    state.viewport,
+                    self.show_diff_cursor,
+                ),
+                DiffVisualRow::InlineBlock { index, line, .. } => render_inline_block_row(
+                    self.inline_blocks
+                        .get(index)
+                        .map(|block| state.viewport.pane_rect(model.content_area, block.side))
+                        .unwrap_or(model.content_area),
+                    y,
+                    buf,
+                    self.inline_blocks.get(index),
+                    line,
+                    self.theme,
+                ),
+            }
         }
 
         scrollbar::render_scrollbar(
-            scrollbar_area,
+            model.scrollbar_area,
             buf,
-            rows.len(),
-            viewport_height,
-            state.scroll_y,
+            model.visual_row_count,
+            model.viewport_height,
+            state.viewport.scroll_y,
         );
     }
 }
@@ -959,6 +1054,16 @@ pub fn add_tree_sitter_highlights(document: &mut DiffDocument) -> HighlightStats
 }
 
 pub fn add_pierre_highlights(document: &mut DiffDocument) -> HighlightStats {
+    add_pierre_highlights_with_sources(document, |_file, _side| None)
+}
+
+pub fn add_pierre_highlights_with_sources<F>(
+    document: &mut DiffDocument,
+    mut resolve_source: F,
+) -> HighlightStats
+where
+    F: FnMut(&FileDiff, DiffSide) -> Option<String>,
+{
     let Some(mut highlighter) = pierre::PierreHighlighter::new() else {
         return HighlightStats::default();
     };
@@ -966,8 +1071,12 @@ pub fn add_pierre_highlights(document: &mut DiffDocument) -> HighlightStats {
 
     for file in &mut document.files {
         let language = pierre::language_for_path(&file.new_path);
-        let old_source = collect_side_source(file, DiffSide::Left);
-        let new_source = collect_side_source(file, DiffSide::Right);
+        let old_source = resolve_source(file, DiffSide::Left)
+            .map(SideSource::from_full_text)
+            .unwrap_or_else(|| collect_side_source(file, DiffSide::Left));
+        let new_source = resolve_source(file, DiffSide::Right)
+            .map(SideSource::from_full_text)
+            .unwrap_or_else(|| collect_side_source(file, DiffSide::Right));
         let old_spans = highlighter.highlight_lines(language, &old_source.text);
         let new_spans = highlighter.highlight_lines(language, &new_source.text);
 
@@ -1121,6 +1230,14 @@ struct SideSource {
 }
 
 impl SideSource {
+    fn from_full_text(text: String) -> Self {
+        let mut line_indices = HashMap::new();
+        for (index, _) in text.split('\n').enumerate() {
+            line_indices.insert(index.saturating_add(1) as u32, index);
+        }
+        Self { text, line_indices }
+    }
+
     fn line_to_index(&self, line: u32) -> Option<usize> {
         self.line_indices.get(&line).copied()
     }
@@ -1129,6 +1246,8 @@ impl SideSource {
 fn collect_side_source(file: &FileDiff, side: DiffSide) -> SideSource {
     let mut text = String::new();
     let mut line_indices = HashMap::new();
+    let mut source_line_index = 0usize;
+    let mut previous_line_number = None::<u32>;
 
     for hunk in &file.hunks {
         for line in &hunk.lines {
@@ -1147,9 +1266,17 @@ fn collect_side_source(file: &FileDiff, side: DiffSide) -> SideSource {
             if let Some((line_number, line_text)) = next {
                 if !text.is_empty() {
                     text.push('\n');
+                    source_line_index = source_line_index.saturating_add(1);
+                }
+                if let Some(previous) = previous_line_number {
+                    for _ in previous.saturating_add(1)..line_number {
+                        text.push('\n');
+                        source_line_index = source_line_index.saturating_add(1);
+                    }
                 }
                 text.push_str(line_text);
-                line_indices.insert(line_number, line_indices.len());
+                line_indices.insert(line_number, source_line_index);
+                previous_line_number = Some(line_number);
             }
         }
     }
@@ -1491,18 +1618,19 @@ fn is_markdown_path(path: &str) -> bool {
 }
 
 fn render_row_ref(
+    state: &DiffViewerState,
     document: &DiffDocument,
     row: RowRef,
     row_index: usize,
     area: Rect,
     y: u16,
     buf: &mut Buffer,
-    selected: bool,
-    selected_side: DiffSide,
-    selection: Option<DiffSelection>,
+    _selected_side: DiffSide,
+    now: Instant,
+    search_matches: &[DiffSearchMatch],
     theme: DiffTheme,
-    mode: DiffMode,
-    scroll_x: usize,
+    viewport: DiffViewport,
+    show_diff_cursor: bool,
 ) {
     match row {
         RowRef::FileSeparator => {
@@ -1537,7 +1665,7 @@ fn render_row_ref(
         }
         RowRef::Unified { line } => {
             let diff_line = document.line(line);
-            let (old, new, kind, text, syntax_spans, inline_spans) = match diff_line {
+            let (old, new, kind, side, text, syntax_spans, inline_spans) = match diff_line {
                 DiffLine::Context {
                     old_line,
                     new_line,
@@ -1547,6 +1675,7 @@ fn render_row_ref(
                     Some(*old_line),
                     Some(*new_line),
                     RowKind::Context,
+                    DiffSide::Right,
                     text.as_str(),
                     syntax_spans.as_slice(),
                     &[][..],
@@ -1560,6 +1689,7 @@ fn render_row_ref(
                     None,
                     Some(*new_line),
                     RowKind::Add,
+                    DiffSide::Right,
                     text.as_str(),
                     syntax_spans.as_slice(),
                     inline_spans.as_slice(),
@@ -1573,19 +1703,16 @@ fn render_row_ref(
                     Some(*old_line),
                     None,
                     RowKind::Delete,
+                    DiffSide::Left,
                     text.as_str(),
                     syntax_spans.as_slice(),
                     inline_spans.as_slice(),
                 ),
             };
-            let style = row_style(kind, selected, theme);
-            let gutter_style = if selected {
-                Style::new().fg(Color::White).bg(theme.selected)
-            } else {
-                Style::new()
-                    .fg(theme.muted)
-                    .bg(style.bg.unwrap_or(theme.bg))
-            };
+            let style = row_style(kind, false, theme);
+            let gutter_style = Style::new()
+                .fg(theme.muted)
+                .bg(style.bg.unwrap_or(theme.bg));
             let gutter = format!(
                 "{} {} ",
                 gutter::exact_line_num(old),
@@ -1593,6 +1720,34 @@ fn render_row_ref(
             );
             let conceal_first = is_markdown_path(&document.files[line.file_index].new_path);
             let visible_text = concealed_text(text, conceal_first);
+            let code_start = document.row_code_start(DiffMode::Unified, row_index, side).unwrap_or(0);
+            let layout = document
+                .pane_text_layout(
+                    DiffMode::Unified,
+                    row_index,
+                    side,
+                    area,
+                    viewport.scroll_x_for_side(side),
+                )
+                .unwrap_or(DiffPaneTextLayout {
+                    mode: DiffMode::Unified,
+                    side,
+                    row: row_index,
+                    pane: area,
+                    document_code_start: code_start,
+                    visual_code_start: code_start,
+                    scroll_x: viewport.scroll_x_for_side(side),
+                });
+            let overlays = row_overlays_for_render(
+                state,
+                document,
+                area,
+                row_index,
+                side,
+                now,
+                search_matches,
+                show_diff_cursor,
+            );
             render_segments(
                 area,
                 y,
@@ -1604,8 +1759,8 @@ fn render_row_ref(
                 kind,
                 theme,
                 style,
-                None,
-                scroll_x,
+                layout,
+                &overlays,
             );
         }
         RowRef::Split {
@@ -1621,27 +1776,47 @@ fn render_row_ref(
                 .map(|line| cell_for_line_ref(document, line, DiffSide::Left, left_reserve_sign));
             let right_cell = right
                 .map(|line| cell_for_line_ref(document, line, DiffSide::Right, right_reserve_sign));
+            let left_overlays = row_overlays_for_render(
+                state,
+                document,
+                area,
+                row_index,
+                DiffSide::Left,
+                now,
+                search_matches,
+                show_diff_cursor,
+            );
+            let right_overlays = row_overlays_for_render(
+                state,
+                document,
+                area,
+                row_index,
+                DiffSide::Right,
+                now,
+                search_matches,
+                show_diff_cursor,
+            );
             render_split_cell(
+                document,
+                row_index,
+                DiffSide::Left,
                 left_area,
                 buf,
                 left_cell.as_ref(),
-                selected && mode == DiffMode::Split && selected_side == DiffSide::Left,
-                selection.and_then(|selection| {
-                    selection.column_range_on_side(row_index, DiffSide::Left)
-                }),
+                &left_overlays,
                 theme,
-                scroll_x,
+                viewport.scroll_x_for_side(DiffSide::Left),
             );
             render_split_cell(
+                document,
+                row_index,
+                DiffSide::Right,
                 right_area,
                 buf,
                 right_cell.as_ref(),
-                selected && mode == DiffMode::Split && selected_side == DiffSide::Right,
-                selection.and_then(|selection| {
-                    selection.column_range_on_side(row_index, DiffSide::Right)
-                }),
+                &right_overlays,
                 theme,
-                scroll_x,
+                viewport.scroll_x_for_side(DiffSide::Right),
             );
         }
     }
@@ -1771,6 +1946,169 @@ fn render_hunk_header_row(area: Rect, y: u16, buf: &mut Buffer, header: &str, th
     }
 }
 
+fn row_overlays_for_render(
+    state: &DiffViewerState,
+    document: &DiffDocument,
+    area: Rect,
+    row_index: usize,
+    side: DiffSide,
+    now: Instant,
+    search_matches: &[DiffSearchMatch],
+    show_diff_cursor: bool,
+) -> Vec<DiffVisualOverlay> {
+    let mut overlays = state.overlays_for_row_side(
+        document,
+        area,
+        row_index,
+        side,
+        now,
+        search_matches,
+    );
+    if !show_diff_cursor {
+        overlays.retain(|overlay| overlay.kind != DiffOverlayKind::Cursor);
+    }
+    overlays
+}
+
+fn render_inline_block_row(
+    area: Rect,
+    y: u16,
+    buf: &mut Buffer,
+    block: Option<&DiffInlineBlock>,
+    line: usize,
+    theme: DiffTheme,
+) {
+    let style = Style::new().fg(theme.text).bg(theme.panel_alt);
+    for x in area.left()..area.right() {
+        buf[(x, y)].set_symbol(" ").set_style(style);
+    }
+    let Some(block) = block else {
+        return;
+    };
+    let accent = inline_block_accent_color(block.accent, theme);
+    let box_x = area.x.saturating_add(2).min(area.right());
+    let box_width = area.width.saturating_sub(4).min(76).max(0);
+    if box_width < 4 || box_x >= area.right() {
+        return;
+    }
+    let box_width = box_width.min(area.right().saturating_sub(box_x));
+    let border_style = Style::new().fg(accent).bg(theme.panel_alt);
+    let body_style = Style::new().fg(theme.text).bg(theme.panel_alt);
+
+    if line == 0 {
+        let title = if block.title.is_empty() {
+            String::new()
+        } else {
+            format!(" {} ", block.title)
+        };
+        let available = box_width.saturating_sub(2) as usize;
+        let title_width = UnicodeWidthStr::width(title.as_str()).min(available);
+        buf.set_stringn(box_x, y, "╭", 1, border_style);
+        buf.set_stringn(box_x.saturating_add(1), y, &title, available, border_style);
+        let used = 1u16.saturating_add(title_width as u16);
+        for x in box_x.saturating_add(used)..box_x.saturating_add(box_width).saturating_sub(1) {
+            buf.set_stringn(x, y, "─", 1, border_style);
+        }
+        buf.set_stringn(
+            box_x.saturating_add(box_width).saturating_sub(1),
+            y,
+            "╮",
+            1,
+            border_style,
+        );
+        return;
+    }
+
+    if line + 1 == block.height {
+        buf.set_stringn(box_x, y, "╰", 1, border_style);
+        for x in box_x.saturating_add(1)..box_x.saturating_add(box_width).saturating_sub(1) {
+            buf.set_stringn(x, y, "─", 1, border_style);
+        }
+        buf.set_stringn(
+            box_x.saturating_add(box_width).saturating_sub(1),
+            y,
+            "╯",
+            1,
+            border_style,
+        );
+        return;
+    }
+
+    buf.set_stringn(box_x, y, "│", 1, border_style);
+    buf.set_stringn(
+        box_x.saturating_add(box_width).saturating_sub(1),
+        y,
+        "│",
+        1,
+        border_style,
+    );
+    for x in box_x.saturating_add(1)..box_x.saturating_add(box_width).saturating_sub(1) {
+        buf[(x, y)].set_symbol(" ").set_style(body_style);
+    }
+    let content_width = box_width.saturating_sub(5) as usize;
+    let wrapped_body = wrap_inline_block_body(&block.body, content_width);
+    let body_line_index = line.saturating_sub(1);
+    let body_line = wrapped_body
+        .get(body_line_index)
+        .map(String::as_str)
+        .unwrap_or_default();
+    let placeholder = block.kind == DiffInlineBlockKind::Editor
+        && block.body.is_empty()
+        && body_line_index == 0;
+    let text = if placeholder { "type a comment…" } else { body_line };
+    let text_style = if placeholder {
+        Style::new().fg(theme.muted).bg(body_style.bg.unwrap_or(theme.panel_alt))
+    } else {
+        body_style
+    };
+    if box_width > 5 {
+        buf.set_stringn(
+            box_x.saturating_add(2),
+            y,
+            text,
+            content_width,
+            text_style,
+        );
+    }
+}
+
+fn wrap_inline_block_body(body: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for logical in body.lines() {
+        if logical.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for ch in logical.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+            if current_width > 0 && current_width.saturating_add(ch_width) > width {
+                out.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width = current_width.saturating_add(ch_width);
+        }
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn inline_block_accent_color(accent: DiffInlineBlockAccent, theme: DiffTheme) -> Color {
+    match accent {
+        DiffInlineBlockAccent::Instruction => theme.del_fg,
+        DiffInlineBlockAccent::Question => theme.add_fg,
+        DiffInlineBlockAccent::Agent => theme.muted,
+        DiffInlineBlockAccent::Note | DiffInlineBlockAccent::Draft => theme.line_number_fg,
+    }
+}
+
 fn compact_hunk_header(header: &str) -> String {
     let mut parts = header.split("@@");
     let _ = parts.next();
@@ -1840,11 +2178,13 @@ fn cell_for_line_ref<'a>(
 }
 
 fn render_split_cell(
+    document: &DiffDocument,
+    row_index: usize,
+    side: DiffSide,
     area: Rect,
     buf: &mut Buffer,
     cell: Option<&Cell<'_>>,
-    selected: bool,
-    selection_range: Option<TextSelectionRange>,
+    overlays: &[DiffVisualOverlay],
     theme: DiffTheme,
     scroll_x: usize,
 ) {
@@ -1857,7 +2197,7 @@ fn render_split_cell(
         conceal_first: false,
         reserve_sign: false,
     });
-    let style = row_style(cell.kind, selected, theme);
+    let style = row_style(cell.kind, false, theme);
     let sign = match cell.kind {
         RowKind::Add => Some(LineSign::Add),
         RowKind::Delete => Some(LineSign::Delete),
@@ -1871,7 +2211,7 @@ fn render_split_cell(
         },
         cell.kind,
         theme,
-        selected,
+        false,
     );
     let prefix_segments = [
         (gutter.rail, gutter.rail_style),
@@ -1880,6 +2220,20 @@ fn render_split_cell(
         (gutter.trailing, gutter.line_number_style),
     ];
     let visible_text = concealed_text(cell.text, cell.conceal_first);
+    let layout = document
+        .pane_text_layout(DiffMode::Split, row_index, side, area, scroll_x)
+        .unwrap_or(DiffPaneTextLayout {
+            mode: DiffMode::Split,
+            side,
+            row: row_index,
+            pane: area,
+            document_code_start: 0,
+            visual_code_start: prefix_segments
+                .iter()
+                .map(|(text, _)| UnicodeWidthStr::width(*text))
+                .sum(),
+            scroll_x,
+        });
     render_segments(
         area,
         area.y,
@@ -1891,8 +2245,8 @@ fn render_split_cell(
         cell.kind,
         theme,
         style,
-        selection_range,
-        scroll_x,
+        layout,
+        overlays,
     );
 
     if cell.kind == RowKind::Empty {
@@ -1920,13 +2274,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fallback_highlight_source_preserves_sparse_line_gaps() {
+        let document = parse_unified_diff(
+            "diff --git a/app.rs b/app.rs\n--- a/app.rs\n+++ b/app.rs\n@@ -1 +1 @@\n fn first() {}\n@@ -10 +10 @@\n fn tenth() {}\n",
+        );
+        let file = document.files.first().expect("file diff");
+        let source = collect_side_source(file, DiffSide::Right);
+
+        assert_eq!(source.line_to_index(1), Some(0));
+        assert_eq!(source.line_to_index(10), Some(9));
+        assert_eq!(source.text.lines().nth(9), Some("fn tenth() {}"));
+    }
+
+    #[test]
+    fn full_highlight_source_maps_real_file_line_numbers() {
+        let source = SideSource::from_full_text("one\ntwo\nthree".to_string());
+
+        assert_eq!(source.line_to_index(1), Some(0));
+        assert_eq!(source.line_to_index(2), Some(1));
+        assert_eq!(source.line_to_index(3), Some(2));
+    }
+
+    #[test]
     fn selection_text_extracts_split_side_columns() {
         let document = parse_unified_diff(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old alpha\n-old beta\n+new alpha\n+new beta\n",
         );
         let row = document.line_row(DiffMode::Split, 0, 0, 2).unwrap();
-        let mut selection = DiffSelection::new(row, DiffSide::Right, 4);
-        selection.set_focus(row + 1, 8);
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Right)
+            .unwrap();
+        let mut selection = DiffTextSelection::character(DiffTextPoint {
+            row,
+            side: DiffSide::Right,
+            column: code_start + 4,
+        });
+        selection.set_cursor(DiffTextPoint {
+            row: row + 1,
+            side: DiffSide::Right,
+            column: code_start + 7,
+        });
 
         assert_eq!(document.selection_text(DiffMode::Split, selection), "alpha\nnew beta");
     }
@@ -1937,8 +2324,19 @@ mod tests {
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old alpha\n-old beta\n+new alpha\n+new beta\n",
         );
         let row = document.line_row(DiffMode::Split, 0, 0, 2).unwrap();
-        let mut selection = DiffSelection::new(row + 1, DiffSide::Right, 8);
-        selection.set_focus(row, 4);
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Right)
+            .unwrap();
+        let mut selection = DiffTextSelection::character(DiffTextPoint {
+            row: row + 1,
+            side: DiffSide::Right,
+            column: code_start + 7,
+        });
+        selection.set_cursor(DiffTextPoint {
+            row,
+            side: DiffSide::Right,
+            column: code_start + 4,
+        });
 
         assert_eq!(document.selection_text(DiffMode::Split, selection), "alpha\nnew beta");
     }
@@ -1949,9 +2347,235 @@ mod tests {
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
         );
         let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
-        let mut selection = DiffSelection::new(row, DiffSide::Right, 4);
-        selection.set_focus(row, 9);
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Right)
+            .unwrap();
+        let mut selection = DiffTextSelection::character(DiffTextPoint {
+            row,
+            side: DiffSide::Right,
+            column: code_start + 4,
+        });
+        selection.set_cursor(DiffTextPoint {
+            row,
+            side: DiffSide::Right,
+            column: code_start + 8,
+        });
 
         assert_eq!(document.selection_text(DiffMode::Split, selection), "alpha");
+    }
+
+    #[test]
+    fn pane_text_layout_round_trips_document_and_screen_columns() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let area = Rect::new(20, 0, 20, 1);
+        let layout = document
+            .pane_text_layout(DiffMode::Split, row, DiffSide::Right, area, 0)
+            .expect("pane layout");
+        let text_col = 4;
+        let document_col = layout.document_code_start + text_col;
+        let x = layout.document_col_to_screen_x(document_col);
+
+        assert_eq!(
+            layout.screen_x_to_document_col(x, layout.document_code_start + "new alpha".len()),
+            document_col
+        );
+    }
+
+    #[test]
+    fn pane_text_layout_scroll_to_reveal_accounts_for_gutter_width() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new alpha beta gamma delta\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let area = Rect::new(20, 0, 12, 1);
+        let layout = document
+            .pane_text_layout(DiffMode::Split, row, DiffSide::Right, area, 0)
+            .expect("pane layout");
+        let last_col = layout.document_code_start + "new alpha beta gamma delta".len() - 1;
+        let scroll_x = layout.scroll_to_reveal(last_col);
+        let scrolled = document
+            .pane_text_layout(DiffMode::Split, row, DiffSide::Right, area, scroll_x)
+            .expect("scrolled layout");
+
+        assert!(scrolled.document_col_to_pane_col(last_col) < usize::from(area.width));
+    }
+
+    #[test]
+    fn split_selection_paints_at_cursor_document_column() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Right)
+            .unwrap();
+        let mut state = DiffViewerState::default();
+        state.viewport.mode = DiffMode::Split;
+        state.cursor.row = row;
+        state.cursor.side = DiffSide::Right;
+        state.selection = Some(DiffTextSelection::character(DiffTextPoint {
+            row,
+            side: DiffSide::Right,
+            column: code_start + 4,
+        }));
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        StatefulWidget::render(DiffWidget::new(&document), area, &mut buf, &mut state);
+
+        let selected_bg = crate::pierre::selection_style().bg.unwrap();
+        let y = row as u16;
+        let content_width = area.width.saturating_sub(1);
+        let right_pane_x = content_width / 2;
+        let expected_x = right_pane_x + (code_start + 4) as u16 + 1;
+        let previous_x = expected_x - 1;
+
+        assert_eq!(buf[(expected_x, y)].bg, selected_bg);
+        assert_ne!(buf[(previous_x, y)].bg, selected_bg);
+    }
+
+    #[test]
+    fn split_left_selection_paints_at_cursor_document_column() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Left)
+            .unwrap();
+        let mut state = DiffViewerState::default();
+        state.viewport.mode = DiffMode::Split;
+        state.cursor.row = row;
+        state.cursor.side = DiffSide::Left;
+        state.selection = Some(DiffTextSelection::character(DiffTextPoint {
+            row,
+            side: DiffSide::Left,
+            column: code_start,
+        }));
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        StatefulWidget::render(DiffWidget::new(&document), area, &mut buf, &mut state);
+
+        let selected_bg = crate::pierre::selection_style().bg.unwrap();
+        let y = row as u16;
+
+        let expected_x = code_start as u16 + 1;
+        assert_eq!(buf[(expected_x, y)].bg, selected_bg);
+        assert_ne!(buf[(expected_x - 1, y)].bg, selected_bg);
+    }
+
+    #[test]
+    fn split_selection_paints_only_selected_side() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Right)
+            .unwrap();
+        let mut state = DiffViewerState::default();
+        state.viewport.mode = DiffMode::Split;
+        state.cursor.row = row;
+        state.cursor.side = DiffSide::Right;
+        state.selection = Some(DiffTextSelection::character(DiffTextPoint {
+            row,
+            side: DiffSide::Right,
+            column: code_start + 4,
+        }));
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        StatefulWidget::render(DiffWidget::new(&document), area, &mut buf, &mut state);
+
+        let selected_bg = crate::pierre::selection_style().bg.unwrap();
+        let y = row as u16;
+        let content_width = area.width.saturating_sub(1);
+        let right_pane_x = content_width / 2;
+        let right_x = right_pane_x + (code_start + 4) as u16 + 1;
+        let left_x = (code_start + 4) as u16;
+
+        assert_eq!(buf[(right_x, y)].bg, selected_bg);
+        assert_ne!(buf[(left_x, y)].bg, selected_bg);
+    }
+
+    #[test]
+    fn split_search_paints_at_match_document_column() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let code_start = document
+            .row_code_start(DiffMode::Split, row, DiffSide::Right)
+            .unwrap();
+        let search_matches = [DiffSearchMatch {
+            row,
+            side: DiffSide::Right,
+            range: TextSelectionRange { start: 4, end: 9 },
+        }];
+        let mut state = DiffViewerState::default();
+        state.viewport.mode = DiffMode::Split;
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        StatefulWidget::render(
+            DiffWidget::new(&document).search_matches(&search_matches),
+            area,
+            &mut buf,
+            &mut state,
+        );
+
+        let search_bg = DiffTheme::default().add_fg;
+        let y = row as u16;
+        let content_width = area.width.saturating_sub(1);
+        let right_pane_x = content_width / 2;
+        let expected_x = right_pane_x + (code_start + 4) as u16 + 1;
+        let previous_x = expected_x - 1;
+
+        assert_eq!(buf[(expected_x, y)].bg, search_bg);
+        assert_ne!(buf[(previous_x, y)].bg, search_bg);
+    }
+
+    #[test]
+    fn renderer_consumes_inline_block_visual_rows() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old alpha\n+new alpha\n",
+        );
+        let row = document.line_row(DiffMode::Split, 0, 0, 1).unwrap();
+        let inline_blocks = [DiffInlineBlock {
+            id: "note:1".to_string(),
+            after_row: row,
+            side: DiffSide::Right,
+            height: 3,
+            kind: DiffInlineBlockKind::Comment,
+            accent: DiffInlineBlockAccent::Note,
+            title: "note · pi".to_string(),
+            body: "inline body".to_string(),
+        }];
+        let mut state = DiffViewerState::default();
+        state.viewport.mode = DiffMode::Split;
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+
+        StatefulWidget::render(
+            DiffWidget::new(&document).inline_blocks(&inline_blocks),
+            area,
+            &mut buf,
+            &mut state,
+        );
+
+        let inline_y = row as u16 + 1;
+        let rendered = (0..area.width)
+            .map(|x| buf[(x, inline_y)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains("note · pi"));
+        let body_y = inline_y + 1;
+        let rendered_body = (0..area.width)
+            .map(|x| buf[(x, body_y)].symbol())
+            .collect::<String>();
+        assert!(rendered_body.contains("inline body"));
     }
 }

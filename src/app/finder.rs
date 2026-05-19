@@ -93,10 +93,13 @@ fn command_result(
 }
 
 impl App {
-    pub(super) fn handle_file_picker_key(&mut self, code: KeyCode, rows: usize) {
+    pub(super) fn handle_file_picker_key(&mut self, key: KeyEvent, rows: usize) {
         let filtered_len = self.filtered_results_len();
-        match code {
-            KeyCode::Esc | KeyCode::Char('q') => self.file_picker_open = false,
+        match key.code {
+            KeyCode::Esc => self.file_picker_open = false,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.file_picker_open = false;
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.file_picker_selection = self
                     .file_picker_selection
@@ -186,7 +189,13 @@ impl App {
             {
                 self.open_command_palette_mode(FinderKind::Files);
             }
-            KeyCode::Char(ch) if !ch.is_control() => {
+            KeyCode::Char(ch)
+                if !ch.is_control()
+                    && key
+                        .modifiers
+                        .intersection(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        .is_empty() =>
+            {
                 self.file_picker_query.push(ch);
                 self.file_picker_selection = 0;
                 self.file_picker_preview_scroll = 0;
@@ -593,20 +602,22 @@ impl App {
     }
 
     pub(super) fn jump_to_review_item(&mut self, note: &ReviewNote, rows: usize) {
+        let mode = self.diff_buffer.viewer().viewport.mode;
         let Some(row) = self.document.line_row(
-            self.state.mode,
+            mode,
             note.target.start.file_index,
             note.target.start.hunk_index,
             note.target.start.line_index,
         ) else {
             return;
         };
-        self.state.clear_mouse_selection();
-        self.state.selected_side = note.target.side();
-        self.state.selected_row = row.min(rows.saturating_sub(1));
-        self.state.scroll_y = self
-            .state
-            .selected_row
+        let viewer = self.diff_buffer.viewer_mut();
+        viewer.clear_selection();
+        viewer.cursor.side = note.target.side();
+        viewer.cursor.row = row.min(rows.saturating_sub(1));
+        viewer.viewport.scroll_y = viewer
+            .cursor
+            .row
             .saturating_sub(STICKY_FILE_OVERLAY_ROWS + 2)
             .min(rows.saturating_sub(self.viewport_height));
     }

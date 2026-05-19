@@ -255,6 +255,14 @@ impl SemanticViewport {
             .min(viewport.total_rows.saturating_sub(viewport.visible_rows));
         viewport
     }
+
+    fn row_at(&self, visible_row: usize) -> Option<usize> {
+        if visible_row >= self.visible_rows {
+            return None;
+        }
+        let row = self.scroll_y.saturating_add(visible_row);
+        (row < self.total_rows).then_some(row)
+    }
 }
 
 pub(crate) fn semantic_tree_body_area(area: Rect) -> Rect {
@@ -664,32 +672,35 @@ impl App {
         end_line: Option<usize>,
         change_type: Option<String>,
     ) {
+        let semantic_focus = SemanticFocusTarget {
+            route: route.clone(),
+            path: path.clone(),
+            line,
+            end_line,
+            change_type: change_type.clone(),
+        };
         match &route {
             DiffSource::LocalWorktree(_) => {
                 self.document = self.document_for_route(&route);
                 self.push_route(AppRoute::Diff(route.clone()));
-                self.state = DiffViewState::default();
-                self.focus_path_if_present(&path, line, end_line, change_type.as_deref());
+                *self.diff_buffer.viewer_mut() = Default::default();
+                self.pending_semantic_focus = Some(semantic_focus);
+                self.apply_pending_semantic_focus(&route);
                 self.revalidate_local_diff();
             }
             DiffSource::PullRequest { repository, number } => {
-                self.pending_semantic_focus = Some(SemanticFocusTarget {
-                    route: route.clone(),
-                    path: path.clone(),
-                    line,
-                    end_line,
-                    change_type: change_type.clone(),
-                });
+                self.pending_semantic_focus = Some(semantic_focus);
                 self.push_route(AppRoute::Diff(route.clone()));
                 self.document = self.document_for_route(&route);
-                self.state = DiffViewState::default();
+                *self.diff_buffer.viewer_mut() = Default::default();
                 self.apply_pending_semantic_focus(&route);
                 self.revalidate_pull_request_diff(repository.clone(), *number);
             }
             DiffSource::Commit { repo_path, sha } => {
+                self.pending_semantic_focus = Some(semantic_focus);
                 self.push_route(AppRoute::Diff(route.clone()));
                 self.document = parse_unified_diff("");
-                self.state = DiffViewState::default();
+                *self.diff_buffer.viewer_mut() = Default::default();
                 let sender = self.query_tx.clone();
                 let repo_path = repo_path.clone();
                 let sha = sha.clone();
@@ -725,6 +736,28 @@ impl App {
         let rows = self.semantic_tree_rows(&route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
         self.set_semantic_viewport(viewport);
+        if self.detail_tab == DetailTab::Semantic {
+            let row_index = viewport
+                .scroll_y
+                .saturating_add(row.saturating_sub(body.y) as usize);
+            let Some(tree_row) = rows.get(row_index).cloned() else {
+                return false;
+            };
+            self.semantic_selection = row_index;
+            match tree_row {
+                SemanticTreeRow::Directory { key, .. } => self.toggle_semantic_file(key),
+                SemanticTreeRow::File { key, .. } => self.toggle_semantic_file(key),
+                SemanticTreeRow::Entity {
+                    path,
+                    line,
+                    end_line,
+                    change_type,
+                    ..
+                } => self.open_semantic_path(route, path, line, end_line, Some(change_type)),
+                SemanticTreeRow::Status(_) => return false,
+            }
+            return true;
+        }
         let nodes = build_semantic_map_nodes(&rows);
         let positions = semantic_map_screen_positions(
             &nodes,
@@ -800,6 +833,16 @@ impl App {
         let rows = self.semantic_tree_rows(route);
         let viewport = self.semantic_viewport_for(rows.len(), body.height as usize);
         self.set_semantic_viewport(viewport);
+        if self.detail_tab == DetailTab::Semantic {
+            let row_index = viewport
+                .scroll_y
+                .saturating_add(row.saturating_sub(body.y) as usize);
+            if row_index < rows.len() {
+                self.semantic_selection = row_index;
+                return true;
+            }
+            return false;
+        }
         let nodes = build_semantic_map_nodes(&rows);
         let positions = semantic_map_screen_positions(
             &nodes,
@@ -1016,7 +1059,7 @@ impl App {
             return;
         }
         self.pending_semantic_focus = None;
-        self.state = DiffViewState::default();
+        *self.diff_buffer.viewer_mut() = Default::default();
         self.focus_path_if_present(
             &target.path,
             target.line,
@@ -1035,7 +1078,7 @@ impl App {
     }
 
     pub(super) fn open_selected_semantic_row(&mut self) -> bool {
-        if self.detail_tab != DetailTab::Semantic {
+        if !self.semantic_panel_active() {
             return false;
         }
         let Some(route) = self.selected_work_item().map(|item| item.route(self)) else {
@@ -1110,7 +1153,8 @@ impl App {
         }) else {
             return;
         };
-        let rows = row_count_for_mode(&self.document, self.state.mode);
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let rows = row_count_for_mode(&self.document, mode);
         // sem-core reports primary entity spans on the after side for added/
         // modified/renamed/moved/reordered changes and on the before side for
         // deleted changes.
@@ -1122,17 +1166,16 @@ impl App {
                 .max(line);
             let target = best_line_match(&self.document.files[index], line, end_line, use_old_side)
                 .and_then(|(hunk_index, line_index)| {
-                    self.document
-                        .line_row(self.state.mode, index, hunk_index, line_index)
+                    self.document.line_row(mode, index, hunk_index, line_index)
                 });
             if let Some(row) = target {
-                self.focus_row(row, rows);
+                self.focus_semantic_document_row(row);
                 self.trigger_transient_focus(path.to_string(), row);
                 return;
             }
         }
         self.jump_to_file(index, rows);
-        self.trigger_transient_focus(path.to_string(), self.state.selected_row);
+        self.trigger_transient_focus(path.to_string(), self.diff_buffer.viewer().cursor.row);
     }
 }
 
