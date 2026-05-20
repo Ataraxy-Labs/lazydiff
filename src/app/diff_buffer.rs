@@ -152,7 +152,7 @@ impl DiffBufferState {
             DiffBufferMode::Search => return self.handle_search_key(key),
             DiffBufferMode::Command => return self.handle_command_key(key),
             DiffBufferMode::PendingTextObject(kind) => {
-                return self.handle_text_object_key(key, kind)
+                return self.handle_text_object_key(key, kind);
             }
             DiffBufferMode::Normal | DiffBufferMode::Visual | DiffBufferMode::VisualLine => {}
         }

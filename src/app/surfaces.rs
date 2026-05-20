@@ -513,11 +513,7 @@ impl App {
                     "  "
                 };
                 let marker = if *semantic_count > 0 {
-                    if *collapsed {
-                        "▶"
-                    } else {
-                        "▼"
-                    }
+                    if *collapsed { "▶" } else { "▼" }
                 } else {
                     " "
                 };

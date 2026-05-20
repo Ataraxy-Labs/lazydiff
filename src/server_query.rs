@@ -3,10 +3,10 @@ use std::{collections::HashMap, time::SystemTime};
 use lazydiff_diffs::DiffDocument;
 
 use crate::{
+    GitHubComment, GitHubQueue,
     app::{DiffSource, SemanticDiff},
     design_system::ThemeVariant,
     github::{GitCommit, Worktree},
-    GitHubComment, GitHubQueue,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

@@ -5,10 +5,10 @@ pub(crate) mod worktree;
 
 pub(crate) use models::{GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus};
 pub(crate) use service::{
-    fetch_commit_patch, fetch_pull_request_comments, fetch_pull_request_commits,
+    GitHubAuthStatus, fetch_commit_patch, fetch_pull_request_comments, fetch_pull_request_commits,
     fetch_pull_request_patch, github_auth_status, login_with_device_flow, logout_github,
-    post_pull_request_comment, GitHubAuthStatus,
+    post_pull_request_comment,
 };
 pub(crate) use worktree::{
-    link_worktree_pr, list_branch_commits, list_worktrees, GitCommit, PrId, Worktree, WorktreeId,
+    GitCommit, PrId, Worktree, WorktreeId, link_worktree_pr, list_branch_commits, list_worktrees,
 };

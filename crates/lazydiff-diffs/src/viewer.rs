@@ -213,7 +213,8 @@ impl DiffViewerState {
     }
 
     pub fn scroll_active_side_horizontally(&mut self, delta: isize) {
-        self.viewport.scroll_side_horizontally(self.cursor.side, delta);
+        self.viewport
+            .scroll_side_horizontally(self.cursor.side, delta);
     }
 
     pub fn render_model(
@@ -379,10 +380,12 @@ impl DiffViewerState {
         document: &DiffDocument,
         inline_blocks: &[DiffInlineBlock],
     ) -> usize {
-        document
-            .rows(self.viewport.mode)
-            .len()
-            .saturating_add(inline_blocks.iter().map(|block| block.height).sum::<usize>())
+        document.rows(self.viewport.mode).len().saturating_add(
+            inline_blocks
+                .iter()
+                .map(|block| block.height)
+                .sum::<usize>(),
+        )
     }
 
     pub fn visible_rows_with_inline_blocks(
@@ -539,7 +542,9 @@ impl DiffViewerState {
         let visual_rows = self.visual_rows_with_inline_blocks(document, inline_blocks);
         let visual_index = visual_rows
             .iter()
-            .position(|visual_row| visual_row.row_for_side(self.cursor.side) == Some(self.cursor.row))
+            .position(|visual_row| {
+                visual_row.row_for_side(self.cursor.side) == Some(self.cursor.row)
+            })
             .or_else(|| {
                 visual_rows
                     .iter()
@@ -612,7 +617,8 @@ impl DiffViewerState {
         }
         self.prepare_cursor_for_movement(document);
         let next_row = if self.viewport.mode == DiffMode::Split {
-            self.next_split_cursor_row(document, delta).unwrap_or(self.cursor.row)
+            self.next_split_cursor_row(document, delta)
+                .unwrap_or(self.cursor.row)
         } else {
             self.cursor
                 .row
@@ -621,7 +627,10 @@ impl DiffViewerState {
         };
         self.cursor.row = next_row;
         self.normalize_cursor_side(document);
-        let row_end = self.cursor_code_range(document).map(|(_, end)| end).unwrap_or(0);
+        let row_end = self
+            .cursor_code_range(document)
+            .map(|(_, end)| end)
+            .unwrap_or(0);
         self.cursor.col = self.cursor.goal_col.min(row_end);
         self.clamp_cursor_col(document);
         self.ensure_cursor_visible(document);
@@ -835,7 +844,8 @@ impl DiffViewerState {
             pane,
             self.viewport.scroll_x_for_side(side),
         )?;
-        let line = &document.files[target.file_index].hunks[target.hunk_index].lines[target.line_index];
+        let line =
+            &document.files[target.file_index].hunks[target.hunk_index].lines[target.line_index];
         let text_len = match line {
             DiffLine::Context { text, .. }
             | DiffLine::Add { text, .. }
@@ -935,7 +945,10 @@ impl DiffViewerState {
     }
 
     pub fn finish_mouse_selection(&mut self) {
-        if self.selection.is_some_and(|selection| selection.anchor == selection.cursor) {
+        if self
+            .selection
+            .is_some_and(|selection| selection.anchor == selection.cursor)
+        {
             self.selection = None;
         }
     }
@@ -1000,12 +1013,9 @@ impl DiffViewerState {
                         DiffLine::Delete { text, .. } => (text, DiffSide::Left),
                     };
                     let text_lower = text.to_ascii_lowercase();
-                    let Some(row) = document.line_row(
-                        self.viewport.mode,
-                        file_index,
-                        hunk_index,
-                        line_index,
-                    ) else {
+                    let Some(row) =
+                        document.line_row(self.viewport.mode, file_index, hunk_index, line_index)
+                    else {
                         continue;
                     };
                     let mut start = 0;
@@ -1128,7 +1138,10 @@ impl DiffViewerState {
             return;
         }
         for side in [DiffSide::Right, DiffSide::Left] {
-            if document.line_target(self.viewport.mode, self.cursor.row, side).is_some() {
+            if document
+                .line_target(self.viewport.mode, self.cursor.row, side)
+                .is_some()
+            {
                 self.cursor.side = side;
                 return;
             }
@@ -1137,7 +1150,8 @@ impl DiffViewerState {
 
     fn cursor_code_range(&self, document: &DiffDocument) -> Option<(usize, usize)> {
         let target = document.line_target(self.viewport.mode, self.cursor.row, self.cursor.side)?;
-        let line = &document.files[target.file_index].hunks[target.hunk_index].lines[target.line_index];
+        let line =
+            &document.files[target.file_index].hunks[target.hunk_index].lines[target.line_index];
         let text_len = match line {
             DiffLine::Context { text, .. }
             | DiffLine::Add { text, .. }
@@ -1201,13 +1215,18 @@ impl DiffViewerState {
             .col
             .saturating_sub(code_start)
             .min(code_end.saturating_sub(code_start).saturating_sub(1));
-        let Some((open_col, close_col)) = find_delimited_text_object_on_row(text, local_col, open, close) else {
+        let Some((open_col, close_col)) =
+            find_delimited_text_object_on_row(text, local_col, open, close)
+        else {
             return false;
         };
         let (start, end) = if around {
             (open_col, close_col)
         } else {
-            (next_cell_after(text, open_col), previous_cell_before(text, close_col))
+            (
+                next_cell_after(text, open_col),
+                previous_cell_before(text, close_col),
+            )
         };
         if end < start {
             return false;
@@ -1270,65 +1289,106 @@ impl DiffViewerState {
         match motion {
             DiffWordMotion::NextStart { big } => {
                 for row in self.cursor.row..row_count {
-                    let Some((code_start, _)) = self.code_range_for_row_side(document, row, self.cursor.side) else {
+                    let Some((code_start, _)) =
+                        self.code_range_for_row_side(document, row, self.cursor.side)
+                    else {
                         continue;
                     };
-                    let text = document.row_text_for_selection(self.viewport.mode, row, self.cursor.side)?;
+                    let text = document.row_text_for_selection(
+                        self.viewport.mode,
+                        row,
+                        self.cursor.side,
+                    )?;
                     let local_col = if row == self.cursor.row {
                         self.cursor.col.saturating_sub(code_start)
                     } else {
                         0
                     };
-                    if let Some(col) = next_word_start(text, local_col, row == self.cursor.row, big) {
-                        return Some(DiffTextPoint { row, side: self.cursor.side, column: code_start.saturating_add(col) });
+                    if let Some(col) = next_word_start(text, local_col, row == self.cursor.row, big)
+                    {
+                        return Some(DiffTextPoint {
+                            row,
+                            side: self.cursor.side,
+                            column: code_start.saturating_add(col),
+                        });
                     }
                 }
             }
             DiffWordMotion::NextEnd { big } => {
                 for row in self.cursor.row..row_count {
-                    let Some((code_start, _)) = self.code_range_for_row_side(document, row, self.cursor.side) else {
+                    let Some((code_start, _)) =
+                        self.code_range_for_row_side(document, row, self.cursor.side)
+                    else {
                         continue;
                     };
-                    let text = document.row_text_for_selection(self.viewport.mode, row, self.cursor.side)?;
+                    let text = document.row_text_for_selection(
+                        self.viewport.mode,
+                        row,
+                        self.cursor.side,
+                    )?;
                     let local_col = if row == self.cursor.row {
                         self.cursor.col.saturating_sub(code_start)
                     } else {
                         0
                     };
                     if let Some(col) = next_word_end(text, local_col, row == self.cursor.row, big) {
-                        return Some(DiffTextPoint { row, side: self.cursor.side, column: code_start.saturating_add(col) });
+                        return Some(DiffTextPoint {
+                            row,
+                            side: self.cursor.side,
+                            column: code_start.saturating_add(col),
+                        });
                     }
                 }
             }
             DiffWordMotion::PreviousStart { big } => {
                 for row in (0..=self.cursor.row).rev() {
-                    let Some((code_start, code_end)) = self.code_range_for_row_side(document, row, self.cursor.side) else {
+                    let Some((code_start, code_end)) =
+                        self.code_range_for_row_side(document, row, self.cursor.side)
+                    else {
                         continue;
                     };
-                    let text = document.row_text_for_selection(self.viewport.mode, row, self.cursor.side)?;
+                    let text = document.row_text_for_selection(
+                        self.viewport.mode,
+                        row,
+                        self.cursor.side,
+                    )?;
                     let local_col = if row == self.cursor.row {
                         self.cursor.col.saturating_sub(code_start)
                     } else {
                         code_end.saturating_sub(code_start)
                     };
                     if let Some(col) = previous_word_start(text, local_col, big) {
-                        return Some(DiffTextPoint { row, side: self.cursor.side, column: code_start.saturating_add(col) });
+                        return Some(DiffTextPoint {
+                            row,
+                            side: self.cursor.side,
+                            column: code_start.saturating_add(col),
+                        });
                     }
                 }
             }
             DiffWordMotion::PreviousEnd { big } => {
                 for row in (0..=self.cursor.row).rev() {
-                    let Some((code_start, code_end)) = self.code_range_for_row_side(document, row, self.cursor.side) else {
+                    let Some((code_start, code_end)) =
+                        self.code_range_for_row_side(document, row, self.cursor.side)
+                    else {
                         continue;
                     };
-                    let text = document.row_text_for_selection(self.viewport.mode, row, self.cursor.side)?;
+                    let text = document.row_text_for_selection(
+                        self.viewport.mode,
+                        row,
+                        self.cursor.side,
+                    )?;
                     let local_col = if row == self.cursor.row {
                         self.cursor.col.saturating_sub(code_start)
                     } else {
                         code_end.saturating_sub(code_start)
                     };
                     if let Some(col) = previous_word_end(text, local_col, big) {
-                        return Some(DiffTextPoint { row, side: self.cursor.side, column: code_start.saturating_add(col) });
+                        return Some(DiffTextPoint {
+                            row,
+                            side: self.cursor.side,
+                            column: code_start.saturating_add(col),
+                        });
                     }
                 }
             }
@@ -1659,7 +1719,11 @@ fn find_delimited_text_object_on_row(
         })
 }
 
-fn find_quote_text_object_on_row(text: &str, cursor_col: usize, quote: char) -> Option<(usize, usize)> {
+fn find_quote_text_object_on_row(
+    text: &str,
+    cursor_col: usize,
+    quote: char,
+) -> Option<(usize, usize)> {
     let quote_cols = text_cells(text)
         .into_iter()
         .filter_map(|cell| (cell.ch == quote).then_some(cell.start))
@@ -1713,9 +1777,7 @@ fn text_cells(text: &str) -> Vec<TextCell> {
 }
 
 fn text_cell_width(text: &str) -> usize {
-    text.chars()
-        .map(|ch| ch.width().unwrap_or(0).max(1))
-        .sum()
+    text.chars().map(|ch| ch.width().unwrap_or(0).max(1)).sum()
 }
 
 fn text_cell_kind(ch: char) -> TextCellKind {
@@ -2085,8 +2147,8 @@ mod tests {
 
         let pane_width = usize::from(viewer.viewport.width / 2);
         let local_code_col = viewer.cursor.col.saturating_sub(code_start);
-        let visible_code_col = local_code_col
-            .saturating_sub(viewer.horizontal_scroll_for_side(DiffSide::Right));
+        let visible_code_col =
+            local_code_col.saturating_sub(viewer.horizontal_scroll_for_side(DiffSide::Right));
         assert!(visible_code_col < pane_width.saturating_sub(code_start));
         assert_eq!(viewer.horizontal_scroll_for_side(DiffSide::Left), 0);
     }
@@ -2349,12 +2411,7 @@ mod tests {
         let area = Rect::new(0, 0, 40, 5);
 
         let point = viewer
-            .text_point_for_screen_cell(
-                &document,
-                area,
-                20 + code_start as u16 + 5,
-                row as u16,
-            )
+            .text_point_for_screen_cell(&document, area, 20 + code_start as u16 + 5, row as u16)
             .expect("mouse point");
 
         assert_eq!(point.row, row);
@@ -2414,7 +2471,10 @@ mod tests {
 
         viewer.half_page(&document, -1);
         assert_eq!(viewer.cursor.row, start_row);
-        assert_eq!(viewer.viewport.scroll_y, viewer.cursor.row.saturating_sub(2));
+        assert_eq!(
+            viewer.viewport.scroll_y,
+            viewer.cursor.row.saturating_sub(2)
+        );
     }
 
     #[test]
@@ -2516,11 +2576,17 @@ mod tests {
 
         assert!(viewer.select_text_object(&document, false, '{'));
         let selection = viewer.selection.expect("inner brace selection");
-        assert_eq!(document.selection_text(DiffMode::Split, selection), "foo: <bar>");
+        assert_eq!(
+            document.selection_text(DiffMode::Split, selection),
+            "foo: <bar>"
+        );
 
         assert!(viewer.select_text_object(&document, true, '{'));
         let selection = viewer.selection.expect("around brace selection");
-        assert_eq!(document.selection_text(DiffMode::Split, selection), "{foo: <bar>}");
+        assert_eq!(
+            document.selection_text(DiffMode::Split, selection),
+            "{foo: <bar>}"
+        );
 
         viewer.cursor.col = code_start + "items = {foo: <b".len();
         assert!(viewer.select_text_object(&document, false, '<'));
@@ -2550,7 +2616,10 @@ mod tests {
 
         assert!(viewer.select_text_object(&document, false, '"'));
         let selection = viewer.selection.expect("inner quote selection");
-        assert_eq!(document.selection_text(DiffMode::Split, selection), "lazy diff");
+        assert_eq!(
+            document.selection_text(DiffMode::Split, selection),
+            "lazy diff"
+        );
 
         viewer.cursor.col = code_start + "name = \"lazy diff\" + 'p".len();
         assert!(viewer.select_text_object(&document, false, '\''));

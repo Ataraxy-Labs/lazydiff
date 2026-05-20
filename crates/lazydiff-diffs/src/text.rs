@@ -141,10 +141,12 @@ fn render_styled_text(
         }
     }
 
-    for overlay in overlays
-        .iter()
-        .filter(|overlay| matches!(overlay.kind, DiffOverlayKind::Selection | DiffOverlayKind::Yank))
-    {
+    for overlay in overlays.iter().filter(|overlay| {
+        matches!(
+            overlay.kind,
+            DiffOverlayKind::Selection | DiffOverlayKind::Yank
+        )
+    }) {
         let doc_column = layout.document_code_start.saturating_add(display_column);
         let pane_column = layout.document_col_to_pane_col(doc_column);
         if overlay.range.end == usize::MAX && pane_column < overlay.range.end {

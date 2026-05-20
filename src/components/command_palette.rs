@@ -1,12 +1,12 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::Clear,
-    Frame,
 };
 
-use crate::{draw_box, fill_rect, truncate, CommandResult, FinderPalette};
+use crate::{CommandResult, FinderPalette, draw_box, fill_rect, truncate};
 
 pub(crate) struct CommandPalette<'a> {
     pub(crate) title: &'a str,

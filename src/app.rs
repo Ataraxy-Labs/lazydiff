@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs::OpenOptions,
     hash::{Hash, Hasher},
     io::{self, Write},
@@ -19,28 +19,28 @@ use crossterm::{
     },
     execute,
     terminal::{
-        disable_raw_mode, enable_raw_mode, Clear as TerminalClear, ClearType, EnterAlternateScreen,
-        LeaveAlternateScreen,
+        Clear as TerminalClear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+        disable_raw_mode, enable_raw_mode,
     },
 };
 use lazydiff_diffs::{
-    add_pierre_highlights, add_pierre_highlights_with_sources, parse_unified_diff,
-    render_scrollbar, row_count_for_mode, DiffDocument, DiffInlineBlock, DiffInlineBlockAccent,
-    DiffInlineBlockKind, DiffLine, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode,
-    DiffSide, DiffTheme, DiffVisualRow, DiffWidget, DiffWordMotion, FileDiff, FileDiffKind,
-    InlineDiffSpan, SliderState, SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar,
+    DiffDocument, DiffInlineBlock, DiffInlineBlockAccent, DiffInlineBlockKind, DiffLine,
+    DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
+    DiffVisualRow, DiffWidget, DiffWordMotion, FileDiff, FileDiffKind, InlineDiffSpan, SliderState,
+    SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar, add_pierre_highlights,
+    add_pierre_highlights_with_sources, parse_unified_diff, render_scrollbar, row_count_for_mode,
 };
 use nucleo_matcher::{
-    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
     Config, Matcher, Utf32Str,
+    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, StatefulWidget},
-    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -85,14 +85,14 @@ fn diff_viewport_area(area: Rect) -> Rect {
         area.height.saturating_sub(sticky_rows),
     )
 }
-use crate::commands::{command_for_layer, Command, Layer};
+use crate::commands::{Command, Layer, command_for_layer};
 use crate::components::{app_chrome::AppHeader, command_palette::CommandPalette};
 use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
 use crate::github::{
-    fetch_commit_patch, fetch_pull_request_comments, fetch_pull_request_commits,
-    fetch_pull_request_patch, github_auth_status, link_worktree_pr, list_branch_commits,
-    list_worktrees, login_with_device_flow, post_pull_request_comment, GitCommit, GitHubAuthStatus,
-    GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus, PrId, Worktree, WorktreeId,
+    GitCommit, GitHubAuthStatus, GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus,
+    PrId, Worktree, WorktreeId, fetch_commit_patch, fetch_pull_request_comments,
+    fetch_pull_request_commits, fetch_pull_request_patch, github_auth_status, link_worktree_pr,
+    list_branch_commits, list_worktrees, login_with_device_flow, post_pull_request_comment,
 };
 use crate::persistence::{
     CommentEditorMode, CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient,
@@ -105,9 +105,9 @@ use crate::server_query::{
 };
 use crate::text::{body_preview_lines, markdown_preview_lines, relative_age, relative_unix_age};
 use crate::ui::{
-    centered_rect, contains_point, draw_box, draw_horizontal_rule, draw_vertical_rule, fill_rect,
-    list_item_rows, list_row_at, render_home_rule, right_aligned_text, short_path, truncate,
-    truncate_middle, ListGeometryBuilder, ListRowGeometry, ListRowKind,
+    ListGeometryBuilder, ListRowGeometry, ListRowKind, centered_rect, contains_point, draw_box,
+    draw_horizontal_rule, draw_vertical_rule, fill_rect, list_item_rows, list_row_at,
+    render_home_rule, right_aligned_text, short_path, truncate, truncate_middle,
 };
 
 mod finder;
@@ -120,8 +120,8 @@ mod modals;
 mod queries;
 mod semantic;
 pub(crate) use semantic::{
-    build_semantic_map_nodes, semantic_map_screen_positions, semantic_tree_body_area,
     SemanticChange, SemanticDiff, SemanticNodeKey, SemanticTreeRow, SemanticViewport,
+    build_semantic_map_nodes, semantic_map_screen_positions, semantic_tree_body_area,
 };
 mod selection;
 use selection::{ScreenPoint, ScreenTextSelection};

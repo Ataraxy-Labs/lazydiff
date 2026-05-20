@@ -1294,9 +1294,5 @@ pub(crate) fn target_range_label(target: &DiffLineRangeTarget) -> String {
 }
 
 pub(crate) fn plural_s(count: usize) -> &'static str {
-    if count == 1 {
-        ""
-    } else {
-        "s"
-    }
+    if count == 1 { "" } else { "s" }
 }

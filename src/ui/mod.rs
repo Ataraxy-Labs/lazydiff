@@ -1,8 +1,8 @@
 use ratatui::{
+    Frame,
     layout::Rect,
     style::{Color, Style},
     text::Line,
-    Frame,
 };
 
 pub(crate) fn short_path(path: &str) -> &str {

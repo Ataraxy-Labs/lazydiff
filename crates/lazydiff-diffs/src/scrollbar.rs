@@ -127,9 +127,11 @@ impl VerticalScrollbar {
             .virtual_thumb_start;
         let local_row = row.saturating_sub(self.area.y) as usize;
         let virtual_mouse = local_row.min(self.area.height as usize) * 2;
-        virtual_mouse
-            .saturating_sub(thumb_start)
-            .min(slider.geometry(self.area.height.max(1) as usize).virtual_thumb_size)
+        virtual_mouse.saturating_sub(thumb_start).min(
+            slider
+                .geometry(self.area.height.max(1) as usize)
+                .virtual_thumb_size,
+        )
     }
 
     pub fn value_from_drag(self, row: u16, drag_offset_virtual: usize) -> usize {

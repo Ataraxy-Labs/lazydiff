@@ -9,19 +9,19 @@ use color_eyre::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use lazydiff_diffs::{
-    add_pierre_highlights, add_pierre_highlights_with_sources, parse_unified_diff,
-    row_count_for_mode, DiffDocument, DiffMode, DiffSide, DiffViewerState, DiffWidget,
+    DiffDocument, DiffMode, DiffSide, DiffViewerState, DiffWidget, add_pierre_highlights,
+    add_pierre_highlights_with_sources, parse_unified_diff, row_count_for_mode,
 };
 use ratatui::{
+    Terminal,
     backend::{CrosstermBackend, TestBackend},
     layout::{Constraint, Layout},
     style::{Color, Style},
     text::Line,
     widgets::StatefulWidget,
-    Terminal,
 };
 use serde::Deserialize;
 
@@ -39,8 +39,8 @@ mod ui;
 use app::App;
 pub(crate) use app::CommandResult;
 pub(crate) use design_system::{FinderPalette, HomePalette};
-use github::{login_with_device_flow, logout_github};
 pub(crate) use github::{GitHubComment, GitHubQueue};
+use github::{login_with_device_flow, logout_github};
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use text::relative_unix_age;
 pub(crate) use ui::{draw_box, fill_rect, right_aligned_text, truncate};
@@ -214,7 +214,7 @@ impl AgentListFilter {
                 other => {
                     return Err(color_eyre::eyre::eyre!(
                         "unknown agent list option `{other}`"
-                    ))
+                    ));
                 }
             }
             index += 1;
@@ -369,7 +369,7 @@ fn read_body_arg(args: &[String]) -> Result<String> {
         match first.as_str() {
             "--body" | "-m" => return Ok(required_arg(args, 1, "body")?.to_string()),
             "--body-file" | "-F" => {
-                return Ok(fs::read_to_string(required_arg(args, 1, "body file")?)?)
+                return Ok(fs::read_to_string(required_arg(args, 1, "body file")?)?);
             }
             value => return Ok(value.to_string()),
         }

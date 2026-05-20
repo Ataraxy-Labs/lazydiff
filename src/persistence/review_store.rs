@@ -3,10 +3,10 @@ use std::{env, fs, path::PathBuf, process::Command as ProcessCommand};
 use color_eyre::Result;
 use lazydiff_diffs::{DiffDocument, DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffSide};
 use ratatui::style::Color;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::app::{now_stamp, stable_id, SemanticDiff, WorkItemKind};
+use crate::app::{SemanticDiff, WorkItemKind, now_stamp, stable_id};
 use crate::design_system::ThemeVariant;
 use crate::github::{GitHubComment, GitHubQueue};
 

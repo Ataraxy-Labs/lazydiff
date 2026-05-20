@@ -17,14 +17,14 @@ mod text;
 mod theme;
 mod viewer;
 pub use gutter::{GutterCell, LineSign};
-use inline_diff::compute_inline_diff_spans;
 pub use inline_diff::InlineDiffSpan;
+use inline_diff::compute_inline_diff_spans;
 pub use metadata::{FileDiffKind, FileDiffMetadata, HunkContent, HunkMetadata};
-pub use pierre::{line_render_spans, RenderCellKind, RenderSpan, SplitLineCell};
-pub use scrollbar::{render_scrollbar, SliderGeometry, SliderState, VerticalScrollbar};
+pub use pierre::{RenderCellKind, RenderSpan, SplitLineCell, line_render_spans};
+pub use scrollbar::{SliderGeometry, SliderState, VerticalScrollbar, render_scrollbar};
 pub use selection::{
-    DiffSearchMatch, DiffSelectionMode, DiffTextPoint, DiffTextSelection, TextPoint,
-    TextSelection, TextSelectionRange, TextViewport,
+    DiffSearchMatch, DiffSelectionMode, DiffTextPoint, DiffTextSelection, TextPoint, TextSelection,
+    TextSelectionRange, TextViewport,
 };
 use text::{concealed_text, render_full_line, render_segments};
 use theme::row_style;
@@ -464,11 +464,13 @@ impl DiffDocument {
                     && line.hunk_index == hunk_index
                     && line.line_index == line_index
             }
-            RowRef::Split { left, right, .. } => [*left, *right].into_iter().flatten().any(|line| {
-                line.file_index == file_index
-                    && line.hunk_index == hunk_index
-                    && line.line_index == line_index
-            }),
+            RowRef::Split { left, right, .. } => {
+                [*left, *right].into_iter().flatten().any(|line| {
+                    line.file_index == file_index
+                        && line.hunk_index == hunk_index
+                        && line.line_index == line_index
+                })
+            }
             _ => false,
         })
     }
@@ -526,12 +528,19 @@ impl DiffDocument {
         }
     }
 
-    pub fn row_code_start(&self, mode: DiffMode, row_index: usize, side: DiffSide) -> Option<usize> {
+    pub fn row_code_start(
+        &self,
+        mode: DiffMode,
+        row_index: usize,
+        side: DiffSide,
+    ) -> Option<usize> {
         match *self.rows(mode).get(row_index)? {
             RowRef::Unified { line } => {
                 let diff_line = self.line(line);
                 let (old, new) = match diff_line {
-                    DiffLine::Context { old_line, new_line, .. } => (Some(*old_line), Some(*new_line)),
+                    DiffLine::Context {
+                        old_line, new_line, ..
+                    } => (Some(*old_line), Some(*new_line)),
                     DiffLine::Add { new_line, .. } => (None, Some(*new_line)),
                     DiffLine::Delete { old_line, .. } => (Some(*old_line), None),
                 };
@@ -543,7 +552,9 @@ impl DiffDocument {
                 )
             }
             RowRef::Split { .. } => {
-                let line = self.line_target(mode, row_index, side).map(|target| target.line);
+                let line = self
+                    .line_target(mode, row_index, side)
+                    .map(|target| target.line);
                 Some(
                     UnicodeWidthStr::width(gutter::exact_line_num(line).as_str())
                         + UnicodeWidthStr::width("")
@@ -1720,7 +1731,9 @@ fn render_row_ref(
             );
             let conceal_first = is_markdown_path(&document.files[line.file_index].new_path);
             let visible_text = concealed_text(text, conceal_first);
-            let code_start = document.row_code_start(DiffMode::Unified, row_index, side).unwrap_or(0);
+            let code_start = document
+                .row_code_start(DiffMode::Unified, row_index, side)
+                .unwrap_or(0);
             let layout = document
                 .pane_text_layout(
                     DiffMode::Unified,
@@ -1956,14 +1969,8 @@ fn row_overlays_for_render(
     search_matches: &[DiffSearchMatch],
     show_diff_cursor: bool,
 ) -> Vec<DiffVisualOverlay> {
-    let mut overlays = state.overlays_for_row_side(
-        document,
-        area,
-        row_index,
-        side,
-        now,
-        search_matches,
-    );
+    let mut overlays =
+        state.overlays_for_row_side(document, area, row_index, side, now, search_matches);
     if !show_diff_cursor {
         overlays.retain(|overlay| overlay.kind != DiffOverlayKind::Cursor);
     }
@@ -2052,23 +2059,22 @@ fn render_inline_block_row(
         .get(body_line_index)
         .map(String::as_str)
         .unwrap_or_default();
-    let placeholder = block.kind == DiffInlineBlockKind::Editor
-        && block.body.is_empty()
-        && body_line_index == 0;
-    let text = if placeholder { "type a comment…" } else { body_line };
+    let placeholder =
+        block.kind == DiffInlineBlockKind::Editor && block.body.is_empty() && body_line_index == 0;
+    let text = if placeholder {
+        "type a comment…"
+    } else {
+        body_line
+    };
     let text_style = if placeholder {
-        Style::new().fg(theme.muted).bg(body_style.bg.unwrap_or(theme.panel_alt))
+        Style::new()
+            .fg(theme.muted)
+            .bg(body_style.bg.unwrap_or(theme.panel_alt))
     } else {
         body_style
     };
     if box_width > 5 {
-        buf.set_stringn(
-            box_x.saturating_add(2),
-            y,
-            text,
-            content_width,
-            text_style,
-        );
+        buf.set_stringn(box_x.saturating_add(2), y, text, content_width, text_style);
     }
 }
 
@@ -2315,7 +2321,10 @@ mod tests {
             column: code_start + 7,
         });
 
-        assert_eq!(document.selection_text(DiffMode::Split, selection), "alpha\nnew beta");
+        assert_eq!(
+            document.selection_text(DiffMode::Split, selection),
+            "alpha\nnew beta"
+        );
     }
 
     #[test]
@@ -2338,7 +2347,10 @@ mod tests {
             column: code_start + 4,
         });
 
-        assert_eq!(document.selection_text(DiffMode::Split, selection), "alpha\nnew beta");
+        assert_eq!(
+            document.selection_text(DiffMode::Split, selection),
+            "alpha\nnew beta"
+        );
     }
 
     #[test]
