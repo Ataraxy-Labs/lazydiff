@@ -1,6 +1,6 @@
 [package]
 name = "lazydiff"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.7"
 edition = "2024"
 description = "A fast terminal UI for reviewing Git diffs"
 license = "MIT"
