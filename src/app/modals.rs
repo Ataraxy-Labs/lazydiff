@@ -235,8 +235,9 @@ impl App {
             let body = modal.body;
             self.branch_operation_status = Some("posting PR comment…".to_string());
             let sender = self.query_tx.clone();
+            let forge = Arc::clone(&self.forge);
             thread::spawn(move || {
-                let result = post_pull_request_comment(&repository, number, &target, &body);
+                let result = forge.post_comment(&repository, number, &target, &body);
                 let _ = sender.send(QueryEvent::PostedComment {
                     repository,
                     number,

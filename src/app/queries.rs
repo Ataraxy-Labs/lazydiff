@@ -486,16 +486,9 @@ impl App {
             return;
         }
         let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let queue = GitHubQueue::load_fresh();
-            let result = match &queue.status {
-                GitHubQueueStatus::Ready => Ok(queue),
-                GitHubQueueStatus::MissingToken => {
-                    Err("set GITHUB_TOKEN or GH_TOKEN to load PRs".to_string())
-                }
-                GitHubQueueStatus::Error(error) => Err(error.clone()),
-                GitHubQueueStatus::Loading => Ok(queue),
-            };
+            let result = forge.fetch_queue();
             let _ = sender.send(QueryEvent::Queue(result));
         });
     }
@@ -509,8 +502,9 @@ impl App {
             return;
         }
         let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let result = fetch_pull_request_comments(&repository, number);
+            let result = forge.fetch_pull_request_comments(&repository, number);
             let _ = sender.send(QueryEvent::Comments {
                 repository,
                 number,
@@ -528,8 +522,9 @@ impl App {
             return;
         }
         let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let result = Self::load_pull_request_diff(&repository, number);
+            let result = Self::load_pull_request_diff_via_forge(forge.as_ref(), &repository, number);
             let _ = sender.send(QueryEvent::Diff {
                 repository,
                 number,

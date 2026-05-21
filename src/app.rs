@@ -5,7 +5,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{Arc, mpsc::{self, Receiver, Sender}},
     thread,
     time::{Duration, Instant},
 };
@@ -88,11 +88,10 @@ fn diff_viewport_area(area: Rect) -> Rect {
 use crate::commands::{Command, Layer, command_for_layer};
 use crate::components::{app_chrome::AppHeader, command_palette::CommandPalette};
 use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
+use crate::forge::Forge;
 use crate::github::{
     GitCommit, GitHubAuthStatus, GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus,
-    PrId, Worktree, WorktreeId, fetch_commit_patch, fetch_pull_request_comments,
-    fetch_pull_request_commits, fetch_pull_request_patch, github_auth_status, link_worktree_pr,
-    list_branch_commits, list_worktrees, login_with_device_flow, post_pull_request_comment,
+    PrId, Worktree, WorktreeId, link_worktree_pr, list_branch_commits, list_worktrees,
 };
 use crate::persistence::{
     CommentEditorMode, CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient,
@@ -140,6 +139,7 @@ fn app_content_area(area: Rect) -> Rect {
 }
 
 pub(crate) struct App {
+    forge: Arc<dyn Forge>,
     path: String,
     project_label: Option<String>,
     document: DiffDocument,
@@ -341,8 +341,13 @@ const TRANSIENT_FOCUS_DURATION: Duration = Duration::from_millis(900);
 const TRANSIENT_FOCUS_TICK: Duration = Duration::from_millis(60);
 
 impl App {
-    pub(crate) fn new(path: String, bytes: usize, document: DiffDocument) -> Self {
-        Self::new_with_initial_route(path, bytes, document, None, true)
+    pub(crate) fn new(
+        path: String,
+        bytes: usize,
+        document: DiffDocument,
+        forge: Arc<dyn Forge>,
+    ) -> Self {
+        Self::new_with_initial_route(path, bytes, document, None, true, forge)
     }
 
     pub(crate) fn new_local_diff(
@@ -352,6 +357,7 @@ impl App {
         repo_path: String,
         branch: String,
         base_ref: String,
+        forge: Arc<dyn Forge>,
     ) -> Self {
         let route = LocalWorktreeRoute {
             repo_path,
@@ -364,6 +370,7 @@ impl App {
             document,
             Some(AppRoute::Diff(DiffSource::LocalWorktree(route))),
             false,
+            forge,
         )
     }
 
@@ -373,6 +380,7 @@ impl App {
         document: DiffDocument,
         repo_path: String,
         sha: String,
+        forge: Arc<dyn Forge>,
     ) -> Self {
         Self::new_with_initial_route(
             path,
@@ -380,6 +388,7 @@ impl App {
             document,
             Some(AppRoute::Diff(DiffSource::Commit { repo_path, sha })),
             false,
+            forge,
         )
     }
 
@@ -389,6 +398,7 @@ impl App {
         document: DiffDocument,
         initial_route: Option<AppRoute>,
         refresh_local_diff: bool,
+        forge: Arc<dyn Forge>,
     ) -> Self {
         eprintln!(
             "[lazydiff] initial-diff={path} bytes={bytes} files={}",
@@ -418,7 +428,7 @@ impl App {
             .as_ref()
             .and_then(|client| client.client_state.queue.clone())
             .unwrap_or_else(GitHubQueue::empty_loading);
-        let github_auth = github_auth_status();
+        let github_auth = forge.auth_status();
         let mut query_client = QueryClient::default();
         if let Some(cached_at) = github.cached_at {
             query_client.hydrate_success(QueryKey::GitHubQueue, cached_at);
@@ -434,6 +444,7 @@ impl App {
             .or_else(|| store.restore_theme_variant())
             .unwrap_or(crate::design_system::ThemeVariant::DefaultDark);
         let mut app = Self {
+            forge,
             path,
             project_label,
             local_document: document.clone(),
@@ -698,8 +709,8 @@ impl App {
         terminal.backend_mut().flush()?;
 
         let result = match flow {
-            TerminalFlow::GitHubLogin => {
-                TerminalFlowResult::GitHubLogin(login_with_device_flow().map(|user| user.login))
+            TerminalFlow::ForgeLogin => {
+                TerminalFlowResult::ForgeLogin(self.forge.login())
             }
             TerminalFlow::OpenEditor { command, cwd } => {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -734,17 +745,17 @@ impl App {
             let _ = event::read()?;
         }
 
-        self.github_auth = github_auth_status();
+        self.github_auth = self.forge.auth_status();
         match result {
-            TerminalFlowResult::GitHubLogin(Ok(login)) if self.github_auth.can_load_github() => {
+            TerminalFlowResult::ForgeLogin(Ok(login)) if self.github_auth.can_load_github() => {
                 self.github.viewer = Some(login);
                 self.github.status = GitHubQueueStatus::Loading;
                 self.revalidate_queue();
             }
-            TerminalFlowResult::GitHubLogin(Ok(_)) => {
+            TerminalFlowResult::ForgeLogin(Ok(_)) => {
                 self.github.status = GitHubQueueStatus::MissingToken;
             }
-            TerminalFlowResult::GitHubLogin(Err(error)) => {
+            TerminalFlowResult::ForgeLogin(Err(error)) => {
                 self.github.status = GitHubQueueStatus::Error(error);
             }
             TerminalFlowResult::Editor(Ok(())) => self.revalidate_local_diff(),
@@ -2128,7 +2139,7 @@ impl App {
                 self.revalidate_selected_semantic_diff();
                 self.revalidate_queue();
             }
-            Command::LoginGitHub => self.pending_terminal_flow = Some(TerminalFlow::GitHubLogin),
+            Command::LoginForge => self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin),
             Command::PullBranch => self.run_selected_branch_operation(BranchOperation::Pull),
             Command::PushBranch => self.run_selected_branch_operation(BranchOperation::Push),
             Command::FetchBranch => self.run_selected_branch_operation(BranchOperation::Fetch),
@@ -2735,9 +2746,13 @@ impl App {
         list_worktrees(Path::new(repo_root.trim()))
     }
 
-    fn load_commit_diff(repo_path: &str, sha: &str) -> std::result::Result<DiffDocument, String> {
-        if let Some(repository) = repo_path.strip_prefix("github:") {
-            let patch = fetch_commit_patch(repository, sha)?;
+    fn load_commit_diff(
+        repo_path: &str,
+        sha: &str,
+        forge: &dyn Forge,
+    ) -> std::result::Result<DiffDocument, String> {
+        if let Some(repository) = repo_path.strip_prefix("forge:") {
+            let patch = forge.fetch_commit_patch(repository, sha)?;
             return Ok(Self::materialize_diff_document(&patch));
         }
         let patch = git_stdout_result_in(
@@ -2758,11 +2773,12 @@ impl App {
         ))
     }
 
-    fn load_pull_request_diff(
+    fn load_pull_request_diff_via_forge(
+        forge: &dyn Forge,
         repository: &str,
         number: u32,
     ) -> std::result::Result<PullRequestDiffResult, String> {
-        let patch = fetch_pull_request_patch(repository, number)?;
+        let patch = forge.fetch_pull_request_patch(repository, number)?;
         let document = Self::materialize_diff_document(&patch);
         Ok(PullRequestDiffResult { patch, document })
     }
@@ -3096,7 +3112,7 @@ impl App {
     }
 
     fn refresh_github_auth_gate(&mut self) -> GitHubAuthStatus {
-        self.github_auth = github_auth_status();
+        self.github_auth = self.forge.auth_status();
         if !self.github_auth.can_load_github() {
             self.github.status = GitHubQueueStatus::MissingToken;
             self.github.viewer = None;
@@ -3306,9 +3322,10 @@ impl App {
             self.commit_status = Some("loading PR commits…".to_string());
             self.push_route(AppRoute::CommitList);
             let sender = self.query_tx.clone();
+            let forge = Arc::clone(&self.forge);
             thread::spawn(move || {
                 let result =
-                    fetch_pull_request_commits(&pull_request.repository, pull_request.number);
+                    forge.fetch_pull_request_commits(&pull_request.repository, pull_request.number);
                 let _ = sender.send(QueryEvent::BranchCommits(result));
             });
         } else if let Some(route) = item.local_route.clone() {
@@ -3336,7 +3353,7 @@ impl App {
             if !self.ensure_github_auth() {
                 return;
             }
-            format!("github:{repository}")
+            format!("forge:{repository}")
         } else {
             return;
         };
@@ -3349,8 +3366,9 @@ impl App {
         self.push_route(AppRoute::Diff(source));
         self.revalidate_semantic_diff(self.diff_source.clone());
         let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let result = Self::load_commit_diff(&repo_path, &commit.sha);
+            let result = Self::load_commit_diff(&repo_path, &commit.sha, forge.as_ref());
             let _ = sender.send(QueryEvent::CommitDiff {
                 repo_path,
                 sha: commit.sha,
@@ -4660,13 +4678,13 @@ enum AppSurface {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum TerminalFlow {
-    GitHubLogin,
+    ForgeLogin,
     OpenEditor { command: String, cwd: PathBuf },
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum TerminalFlowResult {
-    GitHubLogin(std::result::Result<String, String>),
+    ForgeLogin(std::result::Result<String, String>),
     Editor(std::result::Result<(), String>),
 }
 
@@ -4783,7 +4801,7 @@ pub(crate) enum DiffSource {
 impl DiffSource {
     fn requires_github_auth(&self) -> bool {
         matches!(self, Self::PullRequest { .. })
-            || matches!(self, Self::Commit { repo_path, .. } if repo_path.starts_with("github:"))
+            || matches!(self, Self::Commit { repo_path, .. } if repo_path.starts_with("forge:"))
     }
 
     fn session_id(&self) -> String {
@@ -4987,17 +5005,14 @@ impl WorkItem {
 
     fn browser_url(&self, app: &App) -> Option<String> {
         if let Some(pull_request) = self.browser_pull_request(app) {
-            return Some(format!(
-                "https://github.com/{}/pull/{}",
-                pull_request.repository, pull_request.number
-            ));
+            return Some(
+                app.forge
+                    .pull_request_url(&pull_request.repository, pull_request.number),
+            );
         }
         let route = self.local_route.as_ref().unwrap_or(&app.local_route);
         let project = app.project_label()?;
-        Some(format!(
-            "https://github.com/{}/tree/{}",
-            project, route.branch
-        ))
+        Some(app.forge.branch_url(&project, &route.branch))
     }
 
     fn route(&self, app: &App) -> DiffSource {

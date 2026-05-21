@@ -30,6 +30,7 @@ mod bounded_map;
 mod commands;
 mod components;
 mod design_system;
+mod forge;
 mod github;
 mod persistence;
 mod server_query;
@@ -40,7 +41,7 @@ use app::App;
 pub(crate) use app::CommandResult;
 pub(crate) use design_system::{FinderPalette, HomePalette};
 pub(crate) use github::{GitHubComment, GitHubQueue};
-use github::{login_with_device_flow, logout_github};
+use forge::detect::detect_forge;
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use text::relative_unix_age;
 pub(crate) use ui::{draw_box, fill_rect, right_aligned_text, truncate};
@@ -60,15 +61,22 @@ fn main() -> Result<()> {
         return run_agent_cli(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "login") {
-        let user = login_with_device_flow().map_err(|error| color_eyre::eyre::eyre!(error))?;
-        println!("Signed in to GitHub as {}.", user.login);
+        let forge = detect_forge();
+        let username = forge
+            .login()
+            .map_err(|error| color_eyre::eyre::eyre!(error))?;
+        println!("Signed in to {} as {username}.", forge.name());
         return Ok(());
     }
     if args.first().is_some_and(|arg| arg == "logout") {
-        if logout_github().map_err(|error| color_eyre::eyre::eyre!(error))? {
-            println!("Signed out of GitHub.");
+        let forge = detect_forge();
+        if forge
+            .logout()
+            .map_err(|error| color_eyre::eyre::eyre!(error))?
+        {
+            println!("Signed out of {}.", forge.name());
         } else {
-            println!("Already signed out of GitHub.");
+            println!("Already signed out of {}.", forge.name());
         }
         return Ok(());
     }
@@ -101,8 +109,9 @@ fn main() -> Result<()> {
         return bench_scroll_render(path, patch.len(), document);
     }
     let mut terminal = init_terminal()?;
+    let forge = detect_forge();
     let app = match launch {
-        LaunchInput::Home => App::new(path, patch.len(), document),
+        LaunchInput::Home => App::new(path, patch.len(), document, forge),
         LaunchInput::LocalDiff {
             label, base_ref, ..
         } => {
@@ -114,11 +123,12 @@ fn main() -> Result<()> {
                 metadata.repo_path,
                 metadata.branch,
                 base_ref,
+                forge,
             )
         }
         LaunchInput::Commit { ref_name } => {
             let metadata = GitMetadata::detect()?;
-            App::new_commit_diff(path, patch.len(), document, metadata.repo_path, ref_name)
+            App::new_commit_diff(path, patch.len(), document, metadata.repo_path, ref_name, forge)
         }
         LaunchInput::Patch { .. } | LaunchInput::Difftool { .. } => App::new_local_diff(
             path,
@@ -127,6 +137,7 @@ fn main() -> Result<()> {
             "patch".to_string(),
             "patch".to_string(),
             "file".to_string(),
+            forge,
         ),
     };
     let result = app.run(&mut terminal);

@@ -284,8 +284,9 @@ impl App {
             return;
         }
         let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let result = Self::load_semantic_diff(&route);
+            let result = Self::load_semantic_diff(&route, forge.as_ref());
             let _ = sender.send(QueryEvent::SemanticDiff { route, result });
         });
     }
@@ -312,7 +313,10 @@ impl App {
         }
     }
 
-    fn load_semantic_diff(route: &DiffSource) -> std::result::Result<SemanticDiff, String> {
+    fn load_semantic_diff(
+        route: &DiffSource,
+        forge: &dyn crate::forge::Forge,
+    ) -> std::result::Result<SemanticDiff, String> {
         let (repo_path, file_changes) = match route {
             DiffSource::LocalWorktree(route) => {
                 let git = GitBridge::open(Path::new(&route.repo_path))
@@ -326,8 +330,8 @@ impl App {
                 (route.repo_path.clone(), files)
             }
             DiffSource::Commit { repo_path, sha } => {
-                if let Some(repository) = repo_path.strip_prefix("github:") {
-                    let patch = fetch_commit_patch(repository, sha)?;
+                if let Some(repository) = repo_path.strip_prefix("forge:") {
+                    let patch = forge.fetch_commit_patch(repository, sha)?;
                     return Ok(SemanticDiff::from_sem_changes(
                         compute_semantic_diff(
                             &file_changes_from_unified_patch(&patch),
@@ -347,7 +351,7 @@ impl App {
                 (repo_path.clone(), files)
             }
             DiffSource::PullRequest { repository, number } => {
-                let patch = fetch_pull_request_patch(repository, *number)?;
+                let patch = forge.fetch_pull_request_patch(repository, *number)?;
                 (String::new(), file_changes_from_unified_patch(&patch))
             }
         };
@@ -704,8 +708,9 @@ impl App {
                 let sender = self.query_tx.clone();
                 let repo_path = repo_path.clone();
                 let sha = sha.clone();
+                let forge = Arc::clone(&self.forge);
                 thread::spawn(move || {
-                    let result = Self::load_commit_diff(&repo_path, &sha);
+                    let result = Self::load_commit_diff(&repo_path, &sha, forge.as_ref());
                     let _ = sender.send(QueryEvent::CommitDiff {
                         repo_path,
                         sha,

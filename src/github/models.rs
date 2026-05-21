@@ -1,7 +1,6 @@
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
-use super::service::{fetch_github_queue, github_token};
 use crate::app::WorkItemKind;
 use crate::text::{markdown_preview_lines, wrap_plain_text};
 
@@ -29,27 +28,6 @@ impl GitHubQueue {
             status: GitHubQueueStatus::Loading,
             items: Vec::new(),
             cached_at: None,
-        }
-    }
-
-    pub(crate) fn load_fresh() -> Self {
-        let Some(token) = github_token() else {
-            return Self {
-                viewer: None,
-                status: GitHubQueueStatus::MissingToken,
-                items: Vec::new(),
-                cached_at: None,
-            };
-        };
-
-        match fetch_github_queue(&token) {
-            Ok(queue) => queue,
-            Err(error) => Self {
-                viewer: None,
-                status: GitHubQueueStatus::Error(error),
-                items: Vec::new(),
-                cached_at: None,
-            },
         }
     }
 
