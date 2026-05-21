@@ -8,8 +8,8 @@ use lazydiff_diffs::{DiffLineRangeTarget, DiffSide};
 use serde::{Deserialize, Serialize};
 
 use crate::app::WorkItemKind;
-use crate::forge::credentials;
 use crate::forge::Forge;
+use crate::forge::credentials;
 
 use super::models::{
     CheckRollupStatus, GitHubCheck, GitHubComment, GitHubPullRequest, GitHubQueue,
@@ -122,7 +122,7 @@ pub(crate) fn logout_github() -> std::result::Result<bool, String> {
             return Err(format!(
                 "failed to remove {}: {error}",
                 convex_user_file().display()
-            ))
+            ));
         }
     }
     Ok(removed)
@@ -985,9 +985,8 @@ impl Forge for GitHubForge {
     }
 
     fn fetch_queue(&self) -> Result<GitHubQueue, String> {
-        let token = github_token().ok_or_else(|| {
-            "set GITHUB_TOKEN or GH_TOKEN to load PRs".to_string()
-        })?;
+        let token =
+            github_token().ok_or_else(|| "set GITHUB_TOKEN or GH_TOKEN to load PRs".to_string())?;
         fetch_github_queue(&token)
     }
 

@@ -27,7 +27,11 @@ impl GitLabForge {
     }
 
     fn api_url(&self, endpoint: &str) -> String {
-        format!("{}/api/v4/{}", self.base_url, endpoint.trim_start_matches('/'))
+        format!(
+            "{}/api/v4/{}",
+            self.base_url,
+            endpoint.trim_start_matches('/')
+        )
     }
 
     fn token(&self) -> Option<String> {
@@ -114,10 +118,16 @@ impl Forge for GitLabForge {
             .token()
             .ok_or_else(|| "set GITLAB_TOKEN to load merge requests".to_string())?;
 
-        let assigned: Vec<GitLabMergeRequest> =
-            self.get_json("merge_requests?scope=assigned_to_me&state=opened&per_page=30", &token, "GitLab assigned MRs")?;
-        let authored: Vec<GitLabMergeRequest> =
-            self.get_json("merge_requests?scope=created_by_me&state=opened&per_page=30", &token, "GitLab authored MRs")?;
+        let assigned: Vec<GitLabMergeRequest> = self.get_json(
+            "merge_requests?scope=assigned_to_me&state=opened&per_page=30",
+            &token,
+            "GitLab assigned MRs",
+        )?;
+        let authored: Vec<GitLabMergeRequest> = self.get_json(
+            "merge_requests?scope=created_by_me&state=opened&per_page=30",
+            &token,
+            "GitLab authored MRs",
+        )?;
 
         let user: GitLabUser = self.get_json("user", &token, "GitLab user")?;
 
@@ -153,14 +163,14 @@ impl Forge for GitLabForge {
             &token,
             "GitLab MR notes",
         )?;
-        Ok(notes.into_iter().filter(|n| !n.system).map(|n| n.into_comment()).collect())
+        Ok(notes
+            .into_iter()
+            .filter(|n| !n.system)
+            .map(|n| n.into_comment())
+            .collect())
     }
 
-    fn fetch_pull_request_patch(
-        &self,
-        repo: &str,
-        number: u32,
-    ) -> Result<String, String> {
+    fn fetch_pull_request_patch(&self, repo: &str, number: u32) -> Result<String, String> {
         let token = self
             .token()
             .ok_or_else(|| "sign in to GitLab to load diffs".to_string())?;
@@ -216,18 +226,13 @@ impl Forge for GitLabForge {
         let project = Self::encode_project(repo);
         let client = self.client()?;
         let response = client
-            .post(self.api_url(&format!(
-                "projects/{project}/merge_requests/{number}/notes"
-            )))
+            .post(self.api_url(&format!("projects/{project}/merge_requests/{number}/notes")))
             .header("PRIVATE-TOKEN", &token)
             .json(&serde_json::json!({ "body": body.trim() }))
             .send()
             .map_err(|e| e.to_string())?;
         if !response.status().is_success() {
-            return Err(format!(
-                "GitLab comment failed: {}",
-                response.status()
-            ));
+            return Err(format!("GitLab comment failed: {}", response.status()));
         }
         let note: GitLabNote = response.json().map_err(|e| e.to_string())?;
         Ok(note.into_comment())
@@ -394,7 +399,10 @@ fn diff_files_to_patch(files: &[GitLabDiffFile]) -> String {
         } else {
             format!("b/{}", file.new_path)
         };
-        patch.push_str(&format!("diff --git a/{} b/{}\n", file.old_path, file.new_path));
+        patch.push_str(&format!(
+            "diff --git a/{} b/{}\n",
+            file.old_path, file.new_path
+        ));
         if file.new_file {
             patch.push_str("new file mode 100644\n");
         }
@@ -402,7 +410,10 @@ fn diff_files_to_patch(files: &[GitLabDiffFile]) -> String {
             patch.push_str("deleted file mode 100644\n");
         }
         if file.renamed_file {
-            patch.push_str(&format!("rename from {}\nrename to {}\n", file.old_path, file.new_path));
+            patch.push_str(&format!(
+                "rename from {}\nrename to {}\n",
+                file.old_path, file.new_path
+            ));
         }
         patch.push_str(&format!("--- {old}\n+++ {new}\n"));
         patch.push_str(&file.diff);
@@ -427,4 +438,3 @@ fn extract_repo_from_web_url(url: &str) -> Option<String> {
     }
     Some(project.to_string())
 }
-

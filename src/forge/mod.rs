@@ -43,11 +43,8 @@ pub(crate) trait Forge: Send + Sync {
     fn fetch_pull_request_patch(&self, repo: &str, number: u32) -> Result<String, String>;
 
     /// Fetch commits belonging to a pull request / merge request.
-    fn fetch_pull_request_commits(
-        &self,
-        repo: &str,
-        number: u32,
-    ) -> Result<Vec<GitCommit>, String>;
+    fn fetch_pull_request_commits(&self, repo: &str, number: u32)
+    -> Result<Vec<GitCommit>, String>;
 
     /// Fetch the unified diff patch for a single commit.
     fn fetch_commit_patch(&self, repo: &str, sha: &str) -> Result<String, String>;

@@ -524,7 +524,8 @@ impl App {
         let sender = self.query_tx.clone();
         let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let result = Self::load_pull_request_diff_via_forge(forge.as_ref(), &repository, number);
+            let result =
+                Self::load_pull_request_diff_via_forge(forge.as_ref(), &repository, number);
             let _ = sender.send(QueryEvent::Diff {
                 repository,
                 number,

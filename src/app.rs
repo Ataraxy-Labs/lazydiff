@@ -5,7 +5,10 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
-    sync::{Arc, mpsc::{self, Receiver, Sender}},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -709,9 +712,7 @@ impl App {
         terminal.backend_mut().flush()?;
 
         let result = match flow {
-            TerminalFlow::ForgeLogin => {
-                TerminalFlowResult::ForgeLogin(self.forge.login())
-            }
+            TerminalFlow::ForgeLogin => TerminalFlowResult::ForgeLogin(self.forge.login()),
             TerminalFlow::OpenEditor { command, cwd } => {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                 TerminalFlowResult::Editor(

@@ -40,8 +40,8 @@ mod ui;
 use app::App;
 pub(crate) use app::CommandResult;
 pub(crate) use design_system::{FinderPalette, HomePalette};
-pub(crate) use github::{GitHubComment, GitHubQueue};
 use forge::detect::detect_forge;
+pub(crate) use github::{GitHubComment, GitHubQueue};
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use text::relative_unix_age;
 pub(crate) use ui::{draw_box, fill_rect, right_aligned_text, truncate};
@@ -128,7 +128,14 @@ fn main() -> Result<()> {
         }
         LaunchInput::Commit { ref_name } => {
             let metadata = GitMetadata::detect()?;
-            App::new_commit_diff(path, patch.len(), document, metadata.repo_path, ref_name, forge)
+            App::new_commit_diff(
+                path,
+                patch.len(),
+                document,
+                metadata.repo_path,
+                ref_name,
+                forge,
+            )
         }
         LaunchInput::Patch { .. } | LaunchInput::Difftool { .. } => App::new_local_diff(
             path,

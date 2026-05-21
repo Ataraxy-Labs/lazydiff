@@ -44,8 +44,7 @@ pub(crate) fn load_token(service: &str) -> Option<String> {
     // Fall back to file.
     let path = file_path(service);
     let raw = fs::read_to_string(&path).ok()?;
-    let mut map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&raw).ok()?;
+    let mut map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw).ok()?;
     let token = map.get("token")?.as_str()?.to_string();
 
     // Attempt to migrate the token into the keyring.

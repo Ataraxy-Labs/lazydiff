@@ -181,11 +181,7 @@ impl Forge for GiteaForge {
         Ok(comments)
     }
 
-    fn fetch_pull_request_patch(
-        &self,
-        repo: &str,
-        number: u32,
-    ) -> Result<String, String> {
+    fn fetch_pull_request_patch(&self, repo: &str, number: u32) -> Result<String, String> {
         let token = self
             .token()
             .ok_or_else(|| "sign in to Gitea to load diffs".to_string())?;
@@ -396,11 +392,7 @@ impl GiteaCommitEntry {
             .as_ref()
             .and_then(|a| a.name.clone())
             .unwrap_or_else(|| "unknown".to_string());
-        let authored_at = self
-            .commit
-            .author
-            .and_then(|a| a.date)
-            .unwrap_or_default();
+        let authored_at = self.commit.author.and_then(|a| a.date).unwrap_or_default();
         GitCommit {
             sha: self.sha,
             short_sha,
@@ -411,4 +403,3 @@ impl GiteaCommitEntry {
         }
     }
 }
-
