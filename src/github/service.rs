@@ -8,6 +8,8 @@ use lazydiff_diffs::{DiffLineRangeTarget, DiffSide};
 use serde::{Deserialize, Serialize};
 
 use crate::app::WorkItemKind;
+use crate::forge::credentials;
+use crate::forge::Forge;
 
 use super::models::{
     CheckRollupStatus, GitHubCheck, GitHubComment, GitHubPullRequest, GitHubQueue,
@@ -57,7 +59,7 @@ pub(crate) fn github_auth_status() -> GitHubAuthStatus {
 }
 
 pub(crate) fn github_token() -> Option<String> {
-    load_persisted_auth().map(|auth| auth.token)
+    credentials::load_token("lazydiff-github")
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -66,12 +68,6 @@ pub(crate) struct GitHubUser {
     pub(crate) avatar_url: String,
     pub(crate) name: Option<String>,
     pub(crate) email: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct PersistedAuth {
-    token: String,
-    user: GitHubUser,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -118,12 +114,15 @@ pub(crate) fn login_with_device_flow() -> std::result::Result<GitHubUser, String
 }
 
 pub(crate) fn logout_github() -> std::result::Result<bool, String> {
-    let mut removed = false;
-    for path in [auth_file(), convex_user_file()] {
-        match fs::remove_file(&path) {
-            Ok(()) => removed = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("failed to remove {}: {error}", path.display())),
+    let mut removed = credentials::delete_token("lazydiff-github")?;
+    match fs::remove_file(convex_user_file()) {
+        Ok(()) => removed = true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "failed to remove {}: {error}",
+                convex_user_file().display()
+            ))
         }
     }
     Ok(removed)
@@ -282,16 +281,8 @@ fn github_post_json(
 }
 
 fn persist_auth(token: &str, user: &GitHubUser) -> std::result::Result<(), String> {
-    let auth = PersistedAuth {
-        token: token.to_string(),
-        user: user.clone(),
-    };
-    write_json(auth_file(), &auth)
-}
-
-fn load_persisted_auth() -> Option<PersistedAuth> {
-    let raw = fs::read_to_string(auth_file()).ok()?;
-    serde_json::from_str(&raw).ok()
+    credentials::store_token("lazydiff-github", token)?;
+    write_json(auth_file(), user)
 }
 
 #[derive(Serialize)]
@@ -966,5 +957,79 @@ fn summarize_checks(checks: &[GitHubCheck]) -> (CheckRollupStatus, Option<String
         (CheckRollupStatus::Failing, summary)
     } else {
         (CheckRollupStatus::Passing, summary)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GitHubForge — Forge trait implementation
+// ---------------------------------------------------------------------------
+
+pub struct GitHubForge;
+
+impl Forge for GitHubForge {
+    fn name(&self) -> &'static str {
+        "GitHub"
+    }
+
+    fn auth_status(&self) -> GitHubAuthStatus {
+        github_auth_status()
+    }
+
+    fn login(&self) -> Result<String, String> {
+        let user = login_with_device_flow()?;
+        Ok(user.login)
+    }
+
+    fn logout(&self) -> Result<bool, String> {
+        logout_github()
+    }
+
+    fn fetch_queue(&self) -> Result<GitHubQueue, String> {
+        let token = github_token().ok_or_else(|| {
+            "set GITHUB_TOKEN or GH_TOKEN to load PRs".to_string()
+        })?;
+        fetch_github_queue(&token)
+    }
+
+    fn fetch_pull_request_comments(
+        &self,
+        repo: &str,
+        number: u32,
+    ) -> Result<Vec<GitHubComment>, String> {
+        fetch_pull_request_comments(repo, number)
+    }
+
+    fn fetch_pull_request_patch(&self, repo: &str, number: u32) -> Result<String, String> {
+        fetch_pull_request_patch(repo, number)
+    }
+
+    fn fetch_pull_request_commits(
+        &self,
+        repo: &str,
+        number: u32,
+    ) -> Result<Vec<GitCommit>, String> {
+        fetch_pull_request_commits(repo, number)
+    }
+
+    fn fetch_commit_patch(&self, repo: &str, sha: &str) -> Result<String, String> {
+        fetch_commit_patch(repo, sha)
+    }
+
+    fn post_comment(
+        &self,
+        repo: &str,
+        number: u32,
+        target: &DiffLineRangeTarget,
+        body: &str,
+    ) -> Result<GitHubComment, String> {
+        post_pull_request_comment(repo, number, target, body)
+    }
+
+    fn pull_request_url(&self, repo: &str, number: u32) -> String {
+        format!("https://github.com/{repo}/pull/{number}")
+    }
+
+    fn branch_url(&self, repo: &str, branch: &str) -> String {
+        format!("https://github.com/{repo}/tree/{branch}")
     }
 }
