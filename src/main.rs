@@ -853,16 +853,16 @@ fn update_from_latest_release() -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
         .build()?;
-    let bytes = client
-        .get(&asset.0.browser_download_url)
-        .send()?
-        .error_for_status()?
-        .bytes()?;
     let checksum_body = client
         .get(&checksum_asset.browser_download_url)
         .send()?
         .error_for_status()?
         .text()?;
+    let bytes = client
+        .get(&asset.0.browser_download_url)
+        .send()?
+        .error_for_status()?
+        .bytes()?;
     verify_sha256(&bytes, &checksum_body)?;
     if asset.1 {
         replace_current_executable_from_archive(&bytes)?;
