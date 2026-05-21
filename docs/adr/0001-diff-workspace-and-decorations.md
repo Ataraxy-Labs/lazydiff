@@ -1,0 +1,3 @@
+# Keep product review behavior in Diff Workspace and generic rendering primitives in lazydiff-diffs
+
+Lazydiff keeps `crates/lazydiff-diffs` as the fast reusable diff core for documents, coordinates, Vim-like motion algorithms, visual rows, generic diff decorations, and rendering. Product-specific review behavior — notes, comments, drafts, thread expansion, editor lifecycle, and side effects — belongs in the app-level **Diff Workspace**, which converts product state into generic diff decorations and effects for the app shell. This follows the ProseMirror-style split where core modules own generic primitives and external plugins/product layers provide behavior.
