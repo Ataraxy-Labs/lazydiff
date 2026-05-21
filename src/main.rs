@@ -786,7 +786,7 @@ fn verify_sha256(bytes: &[u8], checksum_file: &str) -> Result<()> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    if !actual.eq_ignore_ascii_case(&expected) {
+    if actual != expected {
         return Err(color_eyre::eyre::eyre!(
             "sha256 mismatch: expected {expected}, got {actual}"
         ));
