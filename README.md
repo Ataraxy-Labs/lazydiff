@@ -1,6 +1,6 @@
 # LazyDiff
 
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.5-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha.7-orange.svg)](https://github.com/Ataraxy-Labs/lazydiff/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 <img width="1312" height="812" alt="image" src="https://github.com/user-attachments/assets/b703b205-0554-4aa1-a2f7-9b4a29eee6da" />
