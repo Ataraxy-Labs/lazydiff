@@ -763,6 +763,37 @@ struct ReleaseAssetCandidate {
     archive: bool,
 }
 
+fn parse_sha256_digest(checksum_file: &str) -> Result<String> {
+    let token = checksum_file
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| color_eyre::eyre::eyre!("checksum file is empty"))?;
+    if token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(color_eyre::eyre::eyre!(
+            "checksum file does not start with a 64-char hex digest: {token}"
+        ));
+    }
+    Ok(token.to_ascii_lowercase())
+}
+
+fn verify_sha256(bytes: &[u8], checksum_file: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let expected = parse_sha256_digest(checksum_file)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if actual != expected {
+        return Err(color_eyre::eyre::eyre!(
+            "sha256 mismatch: expected {expected}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
 fn update_from_latest_release() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let release = latest_release()?;
@@ -804,17 +835,35 @@ fn update_from_latest_release() -> Result<()> {
                 release.html_url
             )
         })?;
+    let checksum_name = format!("{}.sha256", asset.0.name);
+    let checksum_asset = release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == checksum_name)
+        .ok_or_else(|| {
+            color_eyre::eyre::eyre!(
+                "release {} has no {checksum_name} asset; refusing to update without checksum verification",
+                release.tag_name
+            )
+        })?;
     println!(
         "Updating lazydiff {current} -> {} from {}…",
         release.tag_name, asset.0.name
     );
-    let bytes = reqwest::blocking::Client::builder()
+    let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
-        .build()?
+        .build()?;
+    let checksum_body = client
+        .get(&checksum_asset.browser_download_url)
+        .send()?
+        .error_for_status()?
+        .text()?;
+    let bytes = client
         .get(&asset.0.browser_download_url)
         .send()?
         .error_for_status()?
         .bytes()?;
+    verify_sha256(&bytes, &checksum_body)?;
     if asset.1 {
         replace_current_executable_from_archive(&bytes)?;
     } else {
@@ -1022,4 +1071,46 @@ fn bench_scroll_render(path: String, bytes: usize, document: DiffDocument) -> Re
         state.viewport.scroll_y,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+    #[test]
+    fn verify_sha256_succeeds_when_bytes_match() {
+        let bytes = b"hello";
+        let checksum_file =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  some-asset.tar.gz\n";
+        verify_sha256(bytes, checksum_file).expect("matching bytes should verify");
+    }
+
+    #[test]
+    fn verify_sha256_errors_when_bytes_do_not_match() {
+        let bytes = b"goodbye";
+        let checksum_file =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  some-asset.tar.gz\n";
+        let error = verify_sha256(bytes, checksum_file)
+            .expect_err("non-matching bytes should fail verification");
+        let message = format!("{error}");
+        assert!(
+            message.to_lowercase().contains("mismatch"),
+            "expected mismatch error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn verify_sha256_errors_clearly_on_malformed_checksum_file() {
+        let bytes = b"hello";
+        // Workflow always emits 64 lowercase hex chars; this is too short.
+        let checksum_file = "abc123  some-asset.tar.gz\n";
+        let error = verify_sha256(bytes, checksum_file)
+            .expect_err("malformed checksum file should fail verification");
+        let message = format!("{error}").to_lowercase();
+        assert!(
+            !message.contains("mismatch"),
+            "malformed checksum should not be reported as a hash mismatch: {message}"
+        );
+    }
 }
