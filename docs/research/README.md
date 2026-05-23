@@ -6,6 +6,7 @@ These notes document the external projects we studied while shaping the **Diff W
 
 - Start with `synthesis.md` for the one-page map of how all four sources combine into the LazyDiff architecture.
 - Read each source-specific file (`prosemirror.md`, `xstate.md`, `pi-mono.md`, `pierre.md`) when you want depth on that source's lesson.
+- Read `rust-modules-and-visibility.md` when in doubt about crates, modules, `mod` vs `use`, `pub(crate)` vs `pub(super)`, or why something isn't visible. It is the authoritative reference for this codebase's Rust mechanics.
 - These notes are **not** the decision record. The decisions live in `docs/adr/`. These notes are the evidence behind the decisions.
 
 ## Sources studied
