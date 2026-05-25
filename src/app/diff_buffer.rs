@@ -27,7 +27,7 @@ pub(super) enum DiffBufferMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TextObjectKind {
-    Inner,
+    _Inner,
     Around,
 }
 

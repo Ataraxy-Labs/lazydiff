@@ -678,7 +678,7 @@ impl Typography {
                 .fg(colors.text_muted)
                 .bg(bg)
                 .add_modifier(Modifier::DIM),
-            TextRole::SemanticHook => Style::new()
+            TextRole::_SemanticHook => Style::new()
                 .fg(colors.text_muted)
                 .bg(bg)
                 .add_modifier(Modifier::ITALIC),
@@ -686,7 +686,7 @@ impl Typography {
                 .fg(colors.text)
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
-            TextRole::Brand => Style::new()
+            TextRole::_Brand => Style::new()
                 .fg(colors.text)
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
@@ -694,7 +694,7 @@ impl Typography {
                 .fg(colors.accent)
                 .bg(bg)
                 .add_modifier(Modifier::BOLD),
-            TextRole::Action => Style::new().fg(colors.action).bg(bg),
+            TextRole::_Action => Style::new().fg(colors.action).bg(bg),
             TextRole::Selected => Style::new()
                 .fg(colors.text_selected)
                 .bg(colors.elevated_surface)
@@ -708,11 +708,11 @@ pub(crate) enum TextRole {
     Body,
     Muted,
     Metadata,
-    SemanticHook,
+    _SemanticHook,
     Heading,
-    Brand,
+    _Brand,
     Key,
-    Action,
+    _Action,
     Selected,
 }
 
@@ -727,18 +727,18 @@ pub(crate) struct HomePalette {
     pub(crate) selected_bg: Color,
     pub(crate) selected_text: Color,
     pub(crate) success: Color,
-    pub(crate) warning: Color,
+    pub(crate) _warning: Color,
     pub(crate) danger: Color,
     pub(crate) orange: Color,
     pub(crate) accent: Color,
-    pub(crate) count: Color,
+    pub(crate) _count: Color,
     pub(crate) action: Color,
     pub(crate) code_fg: Color,
     pub(crate) theme: QuiverTheme,
 }
 
 impl HomePalette {
-    pub(crate) fn quiver() -> Self {
+    pub(crate) fn _quiver() -> Self {
         Self::for_variant(ThemeVariant::DefaultDark)
     }
 
@@ -754,11 +754,11 @@ impl HomePalette {
             selected_bg: theme.layer_bg(SurfaceLayer::ElevatedSurface),
             selected_text: theme.colors.text_selected,
             success: theme.status.success,
-            warning: theme.status.warning,
+            _warning: theme.status.warning,
             danger: theme.status.danger,
             orange: theme.status.modified,
             accent: theme.colors.accent,
-            count: theme.colors.count,
+            _count: theme.colors.count,
             action: theme.colors.action,
             code_fg: theme.colors.code_fg,
             theme,

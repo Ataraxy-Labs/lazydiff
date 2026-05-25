@@ -121,7 +121,7 @@ impl App {
                         .query_client
                         .finish_error(QueryKey::ProjectLabel, error),
                 },
-                QueryEvent::ThemePreference(result) => match result {
+                QueryEvent::_ThemePreference(result) => match result {
                     Ok(theme_variant) => {
                         if let Some(theme_variant) = theme_variant {
                             self.theme_variant = theme_variant;
@@ -440,7 +440,7 @@ impl App {
         });
     }
 
-    pub(super) fn revalidate_theme_preference(&mut self) {
+    pub(super) fn _revalidate_theme_preference(&mut self) {
         if !self.query_client.start_fetch(QueryKey::ThemePreference) {
             return;
         }
@@ -448,7 +448,7 @@ impl App {
         let store = self.store.clone();
         thread::spawn(move || {
             let result = Ok(store.restore_theme_variant());
-            let _ = sender.send(QueryEvent::ThemePreference(result));
+            let _ = sender.send(QueryEvent::_ThemePreference(result));
         });
     }
 

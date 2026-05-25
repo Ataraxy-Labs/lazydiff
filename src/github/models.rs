@@ -2,7 +2,7 @@ use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
 use crate::app::WorkItemKind;
-use crate::text::{markdown_preview_lines, wrap_plain_text};
+use crate::text::{_wrap_plain_text, markdown_preview_lines};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct GitHubQueue {
@@ -159,10 +159,10 @@ pub(crate) struct GitHubComment {
 }
 
 impl GitHubComment {
-    pub(crate) fn preview_lines(&self, width: usize) -> Vec<String> {
+    pub(crate) fn _preview_lines(&self, width: usize) -> Vec<String> {
         markdown_preview_lines(&self.body, 3)
             .into_iter()
-            .flat_map(|line| wrap_plain_text(&line, width))
+            .flat_map(|line| _wrap_plain_text(&line, width))
             .collect()
     }
 }

@@ -282,7 +282,7 @@ impl QueryResult {
 
 pub(crate) enum QueryEvent {
     ProjectLabel(std::result::Result<Option<String>, String>),
-    ThemePreference(std::result::Result<Option<ThemeVariant>, String>),
+    _ThemePreference(std::result::Result<Option<ThemeVariant>, String>),
     LocalDiff(std::result::Result<LocalDiffResult, String>),
     Worktrees(std::result::Result<Vec<Worktree>, String>),
     BranchCommits(std::result::Result<Vec<GitCommit>, String>),

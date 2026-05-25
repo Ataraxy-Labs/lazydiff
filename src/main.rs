@@ -44,7 +44,7 @@ use forge::detect::detect_forge;
 pub(crate) use github::{GitHubComment, GitHubQueue};
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use text::relative_unix_age;
-pub(crate) use ui::{draw_box, fill_rect, right_aligned_text, truncate};
+pub(crate) use ui::{draw_box, fill_rect, truncate};
 
 fn main() -> Result<()> {
     color_eyre::install()?;

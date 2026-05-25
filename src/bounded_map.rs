@@ -47,7 +47,7 @@ where
         self.map.get(key)
     }
 
-    pub(crate) fn contains_key(&self, key: &K) -> bool {
+    pub(crate) fn _contains_key(&self, key: &K) -> bool {
         self.map.contains_key(key)
     }
 
@@ -76,7 +76,7 @@ where
         self.order.retain(|k| self.map.contains_key(k));
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) fn _len(&self) -> usize {
         self.map.len()
     }
 }

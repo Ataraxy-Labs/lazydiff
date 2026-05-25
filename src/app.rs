@@ -143,7 +143,7 @@ fn app_content_area(area: Rect) -> Rect {
 
 pub(crate) struct App {
     forge: Arc<dyn Forge>,
-    path: String,
+    _path: String,
     project_label: Option<String>,
     document: DiffDocument,
     local_document: DiffDocument,
@@ -250,7 +250,7 @@ enum DiffScrollPolicy {
 /// where they jumped to when the cursor highlight alone is too subtle.
 #[derive(Clone, Debug)]
 pub(crate) struct TransientFocus {
-    pub(crate) path: String,
+    pub(crate) _path: String,
     pub(crate) row: usize,
     pub(crate) started_at: Instant,
 }
@@ -310,7 +310,7 @@ enum ReviewTreeRow {
     },
     Entity {
         key: String,
-        file_index: usize,
+        _file_index: usize,
         path: String,
         depth: usize,
         entity_type: String,
@@ -448,7 +448,7 @@ impl App {
             .unwrap_or(crate::design_system::ThemeVariant::DefaultDark);
         let mut app = Self {
             forge,
-            path,
+            _path: path,
             project_label,
             local_document: document.clone(),
             document,
@@ -1599,7 +1599,7 @@ impl App {
                 );
                 if !selected {
                     self.branch_operation_status = Some(match kind {
-                        TextObjectKind::Inner => format!("inner {object} text object not found"),
+                        TextObjectKind::_Inner => format!("inner {object} text object not found"),
                         TextObjectKind::Around => format!("around {object} text object not found"),
                     });
                 }
@@ -1847,7 +1847,7 @@ impl App {
         self.diff_buffer.viewer().viewport.mode
     }
 
-    fn focus_first_inline_block_after_row(&mut self, row: usize) -> bool {
+    fn _focus_first_inline_block_after_row(&mut self, row: usize) -> bool {
         let mut blocks = self.diff_inline_blocks();
         blocks.sort_unstable_by_key(|block| (block.after_row, block.id.clone()));
         let Some(block) = blocks
@@ -2140,7 +2140,7 @@ impl App {
                 self.revalidate_selected_semantic_diff();
                 self.revalidate_queue();
             }
-            Command::LoginForge => self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin),
+            Command::_LoginForge => self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin),
             Command::PullBranch => self.run_selected_branch_operation(BranchOperation::Pull),
             Command::PushBranch => self.run_selected_branch_operation(BranchOperation::Push),
             Command::FetchBranch => self.run_selected_branch_operation(BranchOperation::Fetch),
@@ -2609,7 +2609,7 @@ impl App {
         ))
     }
 
-    pub(crate) fn theme_variant(&self) -> crate::design_system::ThemeVariant {
+    pub(crate) fn _theme_variant(&self) -> crate::design_system::ThemeVariant {
         self.theme_variant
     }
 
@@ -2659,7 +2659,7 @@ impl App {
         Some(lines)
     }
 
-    pub(crate) fn home_selection_is_settled(&self) -> bool {
+    pub(crate) fn _home_selection_is_settled(&self) -> bool {
         self.home_selection_changed_at.elapsed() >= Duration::from_millis(120)
     }
 
@@ -3458,7 +3458,7 @@ impl App {
 
     pub(super) fn trigger_transient_focus(&mut self, path: String, row: usize) {
         self.transient_focus = Some(TransientFocus {
-            path,
+            _path: path,
             row,
             started_at: Instant::now(),
         });
@@ -4214,7 +4214,7 @@ impl App {
             if let Some(changes) = changes {
                 rows.extend(changes.iter().map(|change| ReviewTreeRow::Entity {
                     key: Self::review_entity_key(&file.new_path, change),
-                    file_index,
+                    _file_index: file_index,
                     path: file.new_path.clone(),
                     depth: parts.len(),
                     entity_type: change.entity_type.clone(),

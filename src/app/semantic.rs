@@ -256,7 +256,7 @@ impl SemanticViewport {
         viewport
     }
 
-    fn row_at(&self, visible_row: usize) -> Option<usize> {
+    fn _row_at(&self, visible_row: usize) -> Option<usize> {
         if visible_row >= self.visible_rows {
             return None;
         }
