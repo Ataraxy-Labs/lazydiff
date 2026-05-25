@@ -53,7 +53,7 @@ pub(crate) fn draw_vertical_rule(
     }
 }
 
-pub(crate) fn set_symbol(
+pub(crate) fn _set_symbol(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
     y: u16,

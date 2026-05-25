@@ -22,10 +22,10 @@ fn file_path(service: &str) -> PathBuf {
 /// Store a token in the OS keyring, falling back to a JSON file if the
 /// keyring is unavailable.
 pub(crate) fn store_token(service: &str, token: &str) -> Result<(), String> {
-    if let Ok(entry) = keyring_entry(service) {
-        if entry.set_password(token).is_ok() {
-            return Ok(());
-        }
+    if let Ok(entry) = keyring_entry(service)
+        && entry.set_password(token).is_ok()
+    {
+        return Ok(());
     }
     store_token_to_file(service, token)
 }
@@ -35,10 +35,10 @@ pub(crate) fn store_token(service: &str, token: &str) -> Result<(), String> {
 /// migrated into the keyring and stripped from the file.
 pub(crate) fn load_token(service: &str) -> Option<String> {
     // Try keyring first.
-    if let Ok(entry) = keyring_entry(service) {
-        if let Ok(token) = entry.get_password() {
-            return Some(token);
-        }
+    if let Ok(entry) = keyring_entry(service)
+        && let Ok(token) = entry.get_password()
+    {
+        return Some(token);
     }
 
     // Fall back to file.
@@ -48,14 +48,14 @@ pub(crate) fn load_token(service: &str) -> Option<String> {
     let token = map.get("token")?.as_str()?.to_string();
 
     // Attempt to migrate the token into the keyring.
-    if let Ok(entry) = keyring_entry(service) {
-        if entry.set_password(&token).is_ok() {
-            map.remove("token");
-            if map.is_empty() {
-                let _ = fs::remove_file(&path);
-            } else if let Ok(json) = serde_json::to_string_pretty(&map) {
-                let _ = fs::write(&path, json);
-            }
+    if let Ok(entry) = keyring_entry(service)
+        && entry.set_password(&token).is_ok()
+    {
+        map.remove("token");
+        if map.is_empty() {
+            let _ = fs::remove_file(&path);
+        } else if let Ok(json) = serde_json::to_string_pretty(&map) {
+            let _ = fs::write(&path, json);
         }
     }
 

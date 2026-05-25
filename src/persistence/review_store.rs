@@ -11,7 +11,7 @@ use crate::design_system::ThemeVariant;
 use crate::github::{GitHubComment, GitHubQueue};
 
 const GITHUB_QUERY_CACHE_KEY: &str = "github:query-client";
-const GITHUB_QUERY_CACHE_BUSTER: &str = "github-query-cache-v1";
+const _GITHUB_QUERY_CACHE_BUSTER: &str = "github-query-cache-v1";
 const THEME_PREFERENCE_KEY: &str = "ui:theme-preference";
 
 #[derive(Clone)]
@@ -27,7 +27,7 @@ pub(crate) struct ReviewSession {
 }
 
 impl ReviewSession {
-    pub(crate) fn load_or_create(
+    pub(crate) fn _load_or_create(
         store: &ReviewStore,
         path: &str,
         _bytes: usize,
@@ -39,7 +39,7 @@ impl ReviewSession {
         let branch = env::var("LAZYDIFF_BRANCH")
             .ok()
             .filter(|branch| !branch.trim().is_empty())
-            .unwrap_or_else(current_git_branch);
+            .unwrap_or_else(_current_git_branch);
         let base_ref = env::var("LAZYDIFF_BASE_REF").unwrap_or_else(|_| "HEAD".to_string());
         let id = stable_id(&(repo_path.clone(), branch.clone(), base_ref.clone()));
         let patch_hash = stable_id(&(
@@ -644,7 +644,7 @@ impl CommentModal {
         Some((start, end))
     }
 
-    pub(crate) fn selected_text(&self) -> Option<String> {
+    pub(crate) fn _selected_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
         let mut out = String::new();
         for row in start.row..=end.row.min(self.lines.len().saturating_sub(1)) {
@@ -1296,14 +1296,14 @@ struct PersistedThemePreference {
     variant: String,
 }
 
-fn current_git_branch() -> String {
-    git_stdout(["branch", "--show-current"])
-        .or_else(|| git_stdout(["rev-parse", "--abbrev-ref", "HEAD"]))
+fn _current_git_branch() -> String {
+    _git_stdout(["branch", "--show-current"])
+        .or_else(|| _git_stdout(["rev-parse", "--abbrev-ref", "HEAD"]))
         .filter(|branch| branch != "HEAD")
         .unwrap_or_else(|| "detached-head".to_string())
 }
 
-fn git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
+fn _git_stdout<const N: usize>(args: [&str; N]) -> Option<String> {
     let output = ProcessCommand::new("git").args(args).output().ok()?;
     if !output.status.success() {
         return None;
@@ -1401,15 +1401,15 @@ fn parse_diff_side(value: &str) -> DiffSide {
 }
 
 fn xdg_data_home() -> PathBuf {
-    if let Ok(value) = env::var("XDG_DATA_HOME") {
-        if !value.trim().is_empty() {
-            return PathBuf::from(value);
-        }
+    if let Ok(value) = env::var("XDG_DATA_HOME")
+        && !value.trim().is_empty()
+    {
+        return PathBuf::from(value);
     }
-    if let Ok(value) = env::var("HOME") {
-        if !value.trim().is_empty() {
-            return PathBuf::from(value).join(".local").join("share");
-        }
+    if let Ok(value) = env::var("HOME")
+        && !value.trim().is_empty()
+    {
+        return PathBuf::from(value).join(".local").join("share");
     }
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

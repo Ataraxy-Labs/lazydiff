@@ -256,6 +256,7 @@ impl SemanticViewport {
         viewport
     }
 
+    #[cfg(test)]
     fn row_at(&self, visible_row: usize) -> Option<usize> {
         if visible_row >= self.visible_rows {
             return None;
@@ -1133,12 +1134,12 @@ impl App {
         if pull_request.is_none() {
             y = y.saturating_add(2);
         }
-        if let Some(pull_request) = pull_request {
-            if !pull_request.checks.is_empty() {
-                y = y.saturating_add(1);
-                y = y.saturating_add(pull_request.checks.iter().take(8).count().div_ceil(2) as u16);
-                y = y.saturating_add(1);
-            }
+        if let Some(pull_request) = pull_request
+            && !pull_request.checks.is_empty()
+        {
+            y = y.saturating_add(1);
+            y = y.saturating_add(pull_request.checks.iter().take(8).count().div_ceil(2) as u16);
+            y = y.saturating_add(1);
         }
         y
     }

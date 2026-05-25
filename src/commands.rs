@@ -22,7 +22,7 @@ pub(crate) enum Command {
     PageDown,
     PageUp,
     Refresh,
-    LoginForge,
+    _LoginForge,
     PullBranch,
     PushBranch,
     FetchBranch,

@@ -32,7 +32,7 @@ pub(crate) fn markdown_preview_lines(body: &str, limit: usize) -> Vec<String> {
     lines
 }
 
-pub(crate) fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn _wrap_plain_text(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return Vec::new();
     }

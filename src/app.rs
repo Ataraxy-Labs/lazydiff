@@ -143,7 +143,7 @@ fn app_content_area(area: Rect) -> Rect {
 
 pub(crate) struct App {
     forge: Arc<dyn Forge>,
-    path: String,
+    _path: String,
     project_label: Option<String>,
     document: DiffDocument,
     local_document: DiffDocument,
@@ -250,7 +250,7 @@ enum DiffScrollPolicy {
 /// where they jumped to when the cursor highlight alone is too subtle.
 #[derive(Clone, Debug)]
 pub(crate) struct TransientFocus {
-    pub(crate) path: String,
+    pub(crate) _path: String,
     pub(crate) row: usize,
     pub(crate) started_at: Instant,
 }
@@ -310,7 +310,7 @@ enum ReviewTreeRow {
     },
     Entity {
         key: String,
-        file_index: usize,
+        _file_index: usize,
         path: String,
         depth: usize,
         entity_type: String,
@@ -448,7 +448,7 @@ impl App {
             .unwrap_or(crate::design_system::ThemeVariant::DefaultDark);
         let mut app = Self {
             forge,
-            path,
+            _path: path,
             project_label,
             local_document: document.clone(),
             document,
@@ -1599,7 +1599,7 @@ impl App {
                 );
                 if !selected {
                     self.branch_operation_status = Some(match kind {
-                        TextObjectKind::Inner => format!("inner {object} text object not found"),
+                        TextObjectKind::_Inner => format!("inner {object} text object not found"),
                         TextObjectKind::Around => format!("around {object} text object not found"),
                     });
                 }
@@ -1847,7 +1847,7 @@ impl App {
         self.diff_buffer.viewer().viewport.mode
     }
 
-    fn focus_first_inline_block_after_row(&mut self, row: usize) -> bool {
+    fn _focus_first_inline_block_after_row(&mut self, row: usize) -> bool {
         let mut blocks = self.diff_inline_blocks();
         blocks.sort_unstable_by_key(|block| (block.after_row, block.id.clone()));
         let Some(block) = blocks
@@ -1978,16 +1978,14 @@ impl App {
                     .block_id
                     .strip_prefix("note:")
                     .and_then(|id| id.parse::<u64>().ok())
-                {
-                    if let Some(note) = self
+                    && let Some(note) = self
                         .session
                         .notes
                         .iter()
                         .find(|note| note.id == note_id)
                         .cloned()
-                    {
-                        self.open_existing_note_editor(note, code);
-                    }
+                {
+                    self.open_existing_note_editor(note, code);
                 }
                 true
             }
@@ -2140,7 +2138,7 @@ impl App {
                 self.revalidate_selected_semantic_diff();
                 self.revalidate_queue();
             }
-            Command::LoginForge => self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin),
+            Command::_LoginForge => self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin),
             Command::PullBranch => self.run_selected_branch_operation(BranchOperation::Pull),
             Command::PushBranch => self.run_selected_branch_operation(BranchOperation::Push),
             Command::FetchBranch => self.run_selected_branch_operation(BranchOperation::Fetch),
@@ -2609,7 +2607,7 @@ impl App {
         ))
     }
 
-    pub(crate) fn theme_variant(&self) -> crate::design_system::ThemeVariant {
+    pub(crate) fn _theme_variant(&self) -> crate::design_system::ThemeVariant {
         self.theme_variant
     }
 
@@ -2659,7 +2657,7 @@ impl App {
         Some(lines)
     }
 
-    pub(crate) fn home_selection_is_settled(&self) -> bool {
+    pub(crate) fn _home_selection_is_settled(&self) -> bool {
         self.home_selection_changed_at.elapsed() >= Duration::from_millis(120)
     }
 
@@ -2679,10 +2677,10 @@ impl App {
     }
 
     fn project_label_from_env() -> Option<String> {
-        if let Ok(value) = std::env::var("LAZYDIFF_PROJECT") {
-            if !value.trim().is_empty() {
-                return Some(normalize_project_label(&value));
-            }
+        if let Ok(value) = std::env::var("LAZYDIFF_PROJECT")
+            && !value.trim().is_empty()
+        {
+            return Some(normalize_project_label(&value));
         }
         None
     }
@@ -3259,14 +3257,12 @@ impl App {
             .args(["config", "--get", "core.editor"])
             .current_dir(repo_path)
             .output()
+            && output.status.success()
+            && let Ok(editor) = String::from_utf8(output.stdout)
         {
-            if output.status.success() {
-                if let Ok(editor) = String::from_utf8(output.stdout) {
-                    let editor = editor.trim();
-                    if !editor.is_empty() {
-                        return editor.to_string();
-                    }
-                }
+            let editor = editor.trim();
+            if !editor.is_empty() {
+                return editor.to_string();
             }
         }
 
@@ -3458,7 +3454,7 @@ impl App {
 
     pub(super) fn trigger_transient_focus(&mut self, path: String, row: usize) {
         self.transient_focus = Some(TransientFocus {
-            path,
+            _path: path,
             row,
             started_at: Instant::now(),
         });
@@ -3607,17 +3603,17 @@ impl App {
             .diff_buffer
             .viewer()
             .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let block_indices = visual_rows.iter().enumerate().filter_map(|(index, row)| {
+        let mut block_indices = visual_rows.iter().enumerate().filter_map(|(index, row)| {
             matches!(row, DiffVisualRow::InlineBlock { index: inline_index, .. } if *inline_index == block_index)
                 .then_some(index)
         });
         let target_index = if delta > 0 {
-            let Some(last_block_index) = block_indices.last() else {
+            let Some(last_block_index) = block_indices.next_back() else {
                 return false;
             };
             last_block_index.saturating_add(1)
         } else {
-            let Some(first_block_index) = block_indices.into_iter().next() else {
+            let Some(first_block_index) = block_indices.next() else {
                 return false;
             };
             let Some(target_index) = first_block_index.checked_sub(1) else {
@@ -3641,19 +3637,18 @@ impl App {
         visual_rows: &[DiffVisualRow],
         inline_blocks: &[DiffInlineBlock],
     ) -> Option<usize> {
-        if let Some(focus) = &self.inline_focus {
-            if let Some(block_index) = inline_blocks
+        if let Some(focus) = &self.inline_focus
+            && let Some(block_index) = inline_blocks
                 .iter()
                 .position(|block| block.id == focus.block_id)
-            {
-                return visual_rows.iter().position(|visual_row| {
-                    matches!(
-                        visual_row,
-                        DiffVisualRow::InlineBlock { index, line, .. }
-                            if *index == block_index && *line == focus.line
-                    )
-                });
-            }
+        {
+            return visual_rows.iter().position(|visual_row| {
+                matches!(
+                    visual_row,
+                    DiffVisualRow::InlineBlock { index, line, .. }
+                        if *index == block_index && *line == focus.line
+                )
+            });
         }
 
         let cursor = self.diff_buffer.viewer().cursor;
@@ -4214,7 +4209,7 @@ impl App {
             if let Some(changes) = changes {
                 rows.extend(changes.iter().map(|change| ReviewTreeRow::Entity {
                     key: Self::review_entity_key(&file.new_path, change),
-                    file_index,
+                    _file_index: file_index,
                     path: file.new_path.clone(),
                     depth: parts.len(),
                     entity_type: change.entity_type.clone(),
@@ -4575,13 +4570,12 @@ impl App {
     }
 
     fn active_review_target(&mut self) -> Option<DiffLineRangeTarget> {
-        if let Some(selection) = self.diff_buffer.viewer().selection {
-            if let Some(target) = self
+        if let Some(selection) = self.diff_buffer.viewer().selection
+            && let Some(target) = self
                 .document
                 .selection_target(self.diff_buffer.viewer().viewport.mode, selection)
-            {
-                return Some(target);
-            }
+        {
+            return Some(target);
         }
         self.focus_comment_target().map(DiffLineRangeTarget::single)
     }
@@ -5195,10 +5189,10 @@ fn comment_surface_rows(
             // body_preview_lines starts each line with a 1-col gutter; we
             // grow it to 3 cols so the comment text sits under the header
             // bullet's leading whitespace.
-            if let Some(first) = line.spans.first_mut() {
-                if first.content.as_ref() == " " {
-                    first.content = "   ".to_string().into();
-                }
+            if let Some(first) = line.spans.first_mut()
+                && first.content.as_ref() == " "
+            {
+                first.content = "   ".to_string().into();
             }
             rows.push(CommentSurfaceRow::Body {
                 line,

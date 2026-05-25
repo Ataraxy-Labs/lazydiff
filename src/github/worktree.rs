@@ -237,7 +237,7 @@ fn parse_commit_files(input: &str) -> Vec<CommitFile> {
         .filter_map(|line| {
             let mut parts = line.split('\t');
             let status = parts.next()?.trim();
-            let path = parts.last().unwrap_or(status).trim();
+            let path = parts.next_back().unwrap_or(status).trim();
             if status.is_empty() || path.is_empty() || status == path {
                 return None;
             }
