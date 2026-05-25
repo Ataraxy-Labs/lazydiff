@@ -240,10 +240,11 @@ impl AgentListFilter {
 
         if !include_all {
             if (repo_path.is_none() || branch.is_none())
-                && let Ok(metadata) = GitMetadata::detect() {
-                    repo_path.get_or_insert(metadata.repo_path);
-                    branch.get_or_insert(metadata.branch);
-                }
+                && let Ok(metadata) = GitMetadata::detect()
+            {
+                repo_path.get_or_insert(metadata.repo_path);
+                branch.get_or_insert(metadata.branch);
+            }
             if base_ref.is_none() {
                 base_ref = detect_base_ref().ok();
             }
@@ -262,17 +263,20 @@ impl AgentListFilter {
             return false;
         }
         if let Some(repo_path) = &self.repo_path
-            && &thread.session.repo_path != repo_path {
-                return false;
-            }
+            && &thread.session.repo_path != repo_path
+        {
+            return false;
+        }
         if let Some(branch) = &self.branch
-            && &thread.session.branch != branch {
-                return false;
-            }
+            && &thread.session.branch != branch
+        {
+            return false;
+        }
         if let Some(base_ref) = &self.base_ref
-            && &thread.session.base_ref != base_ref {
-                return false;
-            }
+            && &thread.session.base_ref != base_ref
+        {
+            return false;
+        }
         true
     }
 }
@@ -311,10 +315,7 @@ fn agent_reply(store: &ReviewStore, id: &str, body: String) -> Result<()> {
     if parent.kind == ReviewItemKind::Question {
         store.update_note_state(&session_id, note_id, ReviewItemState::Answered);
     }
-    println!(
-        "{}",
-        serde_json::json!({ "ok": true, "thread_id": id })
-    );
+    println!("{}", serde_json::json!({ "ok": true, "thread_id": id }));
     Ok(())
 }
 

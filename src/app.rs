@@ -1984,9 +1984,9 @@ impl App {
                         .iter()
                         .find(|note| note.id == note_id)
                         .cloned()
-                    {
-                        self.open_existing_note_editor(note, code);
-                    }
+                {
+                    self.open_existing_note_editor(note, code);
+                }
                 true
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -2678,9 +2678,10 @@ impl App {
 
     fn project_label_from_env() -> Option<String> {
         if let Ok(value) = std::env::var("LAZYDIFF_PROJECT")
-            && !value.trim().is_empty() {
-                return Some(normalize_project_label(&value));
-            }
+            && !value.trim().is_empty()
+        {
+            return Some(normalize_project_label(&value));
+        }
         None
     }
 
@@ -3257,12 +3258,13 @@ impl App {
             .current_dir(repo_path)
             .output()
             && output.status.success()
-                && let Ok(editor) = String::from_utf8(output.stdout) {
-                    let editor = editor.trim();
-                    if !editor.is_empty() {
-                        return editor.to_string();
-                    }
-                }
+            && let Ok(editor) = String::from_utf8(output.stdout)
+        {
+            let editor = editor.trim();
+            if !editor.is_empty() {
+                return editor.to_string();
+            }
+        }
 
         ["GIT_EDITOR", "VISUAL", "EDITOR"]
             .into_iter()
@@ -3639,15 +3641,15 @@ impl App {
             && let Some(block_index) = inline_blocks
                 .iter()
                 .position(|block| block.id == focus.block_id)
-            {
-                return visual_rows.iter().position(|visual_row| {
-                    matches!(
-                        visual_row,
-                        DiffVisualRow::InlineBlock { index, line, .. }
-                            if *index == block_index && *line == focus.line
-                    )
-                });
-            }
+        {
+            return visual_rows.iter().position(|visual_row| {
+                matches!(
+                    visual_row,
+                    DiffVisualRow::InlineBlock { index, line, .. }
+                        if *index == block_index && *line == focus.line
+                )
+            });
+        }
 
         let cursor = self.diff_buffer.viewer().cursor;
         visual_rows
@@ -4572,9 +4574,9 @@ impl App {
             && let Some(target) = self
                 .document
                 .selection_target(self.diff_buffer.viewer().viewport.mode, selection)
-            {
-                return Some(target);
-            }
+        {
+            return Some(target);
+        }
         self.focus_comment_target().map(DiffLineRangeTarget::single)
     }
 
@@ -5188,9 +5190,10 @@ fn comment_surface_rows(
             // grow it to 3 cols so the comment text sits under the header
             // bullet's leading whitespace.
             if let Some(first) = line.spans.first_mut()
-                && first.content.as_ref() == " " {
-                    first.content = "   ".to_string().into();
-                }
+                && first.content.as_ref() == " "
+            {
+                first.content = "   ".to_string().into();
+            }
             rows.push(CommentSurfaceRow::Body {
                 line,
                 comment_index: idx,

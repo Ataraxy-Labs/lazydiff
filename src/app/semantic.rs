@@ -1135,11 +1135,12 @@ impl App {
             y = y.saturating_add(2);
         }
         if let Some(pull_request) = pull_request
-            && !pull_request.checks.is_empty() {
-                y = y.saturating_add(1);
-                y = y.saturating_add(pull_request.checks.iter().take(8).count().div_ceil(2) as u16);
-                y = y.saturating_add(1);
-            }
+            && !pull_request.checks.is_empty()
+        {
+            y = y.saturating_add(1);
+            y = y.saturating_add(pull_request.checks.iter().take(8).count().div_ceil(2) as u16);
+            y = y.saturating_add(1);
+        }
         y
     }
 
