@@ -738,7 +738,8 @@ pub(crate) struct HomePalette {
 }
 
 impl HomePalette {
-    pub(crate) fn _quiver() -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn quiver() -> Self {
         Self::for_variant(ThemeVariant::DefaultDark)
     }
 

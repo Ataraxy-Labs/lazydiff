@@ -47,7 +47,8 @@ where
         self.map.get(key)
     }
 
-    pub(crate) fn _contains_key(&self, key: &K) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
         self.map.contains_key(key)
     }
 
@@ -76,7 +77,8 @@ where
         self.order.retain(|k| self.map.contains_key(k));
     }
 
-    pub(crate) fn _len(&self) -> usize {
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
 }

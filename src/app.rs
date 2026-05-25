@@ -1978,8 +1978,7 @@ impl App {
                     .block_id
                     .strip_prefix("note:")
                     .and_then(|id| id.parse::<u64>().ok())
-                {
-                    if let Some(note) = self
+                    && let Some(note) = self
                         .session
                         .notes
                         .iter()
@@ -1988,7 +1987,6 @@ impl App {
                     {
                         self.open_existing_note_editor(note, code);
                     }
-                }
                 true
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -2679,11 +2677,10 @@ impl App {
     }
 
     fn project_label_from_env() -> Option<String> {
-        if let Ok(value) = std::env::var("LAZYDIFF_PROJECT") {
-            if !value.trim().is_empty() {
+        if let Ok(value) = std::env::var("LAZYDIFF_PROJECT")
+            && !value.trim().is_empty() {
                 return Some(normalize_project_label(&value));
             }
-        }
         None
     }
 
@@ -3259,16 +3256,13 @@ impl App {
             .args(["config", "--get", "core.editor"])
             .current_dir(repo_path)
             .output()
-        {
-            if output.status.success() {
-                if let Ok(editor) = String::from_utf8(output.stdout) {
+            && output.status.success()
+                && let Ok(editor) = String::from_utf8(output.stdout) {
                     let editor = editor.trim();
                     if !editor.is_empty() {
                         return editor.to_string();
                     }
                 }
-            }
-        }
 
         ["GIT_EDITOR", "VISUAL", "EDITOR"]
             .into_iter()
@@ -3607,17 +3601,17 @@ impl App {
             .diff_buffer
             .viewer()
             .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let block_indices = visual_rows.iter().enumerate().filter_map(|(index, row)| {
+        let mut block_indices = visual_rows.iter().enumerate().filter_map(|(index, row)| {
             matches!(row, DiffVisualRow::InlineBlock { index: inline_index, .. } if *inline_index == block_index)
                 .then_some(index)
         });
         let target_index = if delta > 0 {
-            let Some(last_block_index) = block_indices.last() else {
+            let Some(last_block_index) = block_indices.next_back() else {
                 return false;
             };
             last_block_index.saturating_add(1)
         } else {
-            let Some(first_block_index) = block_indices.into_iter().next() else {
+            let Some(first_block_index) = block_indices.next() else {
                 return false;
             };
             let Some(target_index) = first_block_index.checked_sub(1) else {
@@ -3641,8 +3635,8 @@ impl App {
         visual_rows: &[DiffVisualRow],
         inline_blocks: &[DiffInlineBlock],
     ) -> Option<usize> {
-        if let Some(focus) = &self.inline_focus {
-            if let Some(block_index) = inline_blocks
+        if let Some(focus) = &self.inline_focus
+            && let Some(block_index) = inline_blocks
                 .iter()
                 .position(|block| block.id == focus.block_id)
             {
@@ -3654,7 +3648,6 @@ impl App {
                     )
                 });
             }
-        }
 
         let cursor = self.diff_buffer.viewer().cursor;
         visual_rows
@@ -4575,14 +4568,13 @@ impl App {
     }
 
     fn active_review_target(&mut self) -> Option<DiffLineRangeTarget> {
-        if let Some(selection) = self.diff_buffer.viewer().selection {
-            if let Some(target) = self
+        if let Some(selection) = self.diff_buffer.viewer().selection
+            && let Some(target) = self
                 .document
                 .selection_target(self.diff_buffer.viewer().viewport.mode, selection)
             {
                 return Some(target);
             }
-        }
         self.focus_comment_target().map(DiffLineRangeTarget::single)
     }
 
@@ -5195,11 +5187,10 @@ fn comment_surface_rows(
             // body_preview_lines starts each line with a 1-col gutter; we
             // grow it to 3 cols so the comment text sits under the header
             // bullet's leading whitespace.
-            if let Some(first) = line.spans.first_mut() {
-                if first.content.as_ref() == " " {
+            if let Some(first) = line.spans.first_mut()
+                && first.content.as_ref() == " " {
                     first.content = "   ".to_string().into();
                 }
-            }
             rows.push(CommentSurfaceRow::Body {
                 line,
                 comment_index: idx,

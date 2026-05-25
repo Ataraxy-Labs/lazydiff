@@ -1401,16 +1401,14 @@ fn parse_diff_side(value: &str) -> DiffSide {
 }
 
 fn xdg_data_home() -> PathBuf {
-    if let Ok(value) = env::var("XDG_DATA_HOME") {
-        if !value.trim().is_empty() {
+    if let Ok(value) = env::var("XDG_DATA_HOME")
+        && !value.trim().is_empty() {
             return PathBuf::from(value);
         }
-    }
-    if let Ok(value) = env::var("HOME") {
-        if !value.trim().is_empty() {
+    if let Ok(value) = env::var("HOME")
+        && !value.trim().is_empty() {
             return PathBuf::from(value).join(".local").join("share");
         }
-    }
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 

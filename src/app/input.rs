@@ -77,11 +77,9 @@ impl App {
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             self.focus_pane_at_mouse(mouse.column, mouse.row, terminal_width, terminal_height);
         }
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && scrollbar_target.is_some()
-        {
+        if let Some(target) = scrollbar_target.filter(|_| matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))) {
             self.start_scrollbar_drag(
-                scrollbar_target.expect("checked is_some"),
+                target,
                 mouse.row,
                 terminal_width,
                 terminal_height,
@@ -93,19 +91,15 @@ impl App {
         {
             return;
         }
-        if matches!(mouse.kind, MouseEventKind::Moved) {
-            if let Some((route, semantic_area)) =
+        if matches!(mouse.kind, MouseEventKind::Moved)
+            && let Some((route, semantic_area)) =
                 self.semantic_mouse_target_area(terminal_width, terminal_height)
-            {
-                if self.select_semantic_node_at(&route, semantic_area, mouse.column, mouse.row) {
+                && self.select_semantic_node_at(&route, semantic_area, mouse.column, mouse.row) {
                     return;
                 }
-            }
-        }
         if let Some((_route, semantic_area)) =
             self.semantic_mouse_target_area(terminal_width, terminal_height)
-        {
-            if contains_point(semantic_area, mouse.column, mouse.row) {
+            && contains_point(semantic_area, mouse.column, mouse.row) {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         self.zoom_semantic_map_at(semantic_area, mouse.column, mouse.row, 1);
@@ -126,7 +120,6 @@ impl App {
                     _ => {}
                 }
             }
-        }
         match (self.surface, mouse.kind) {
             (AppSurface::Queue, MouseEventKind::Down(MouseButton::Left)) => {
                 if self.handle_home_queue_click(mouse, terminal_width, terminal_height) {
@@ -235,7 +228,6 @@ impl App {
                     && self.diff_buffer.viewer().selection.is_some() =>
             {
                 if self.extend_diff_mouse_selection(mouse, terminal_width, terminal_height) {
-                    return;
                 }
             }
             MouseEventKind::Drag(MouseButton::Left)
@@ -343,7 +335,8 @@ impl App {
             return false;
         }
         let inline_blocks = self.diff_inline_blocks();
-        let extended = self
+        
+        self
             .diff_buffer
             .viewer_mut()
             .extend_mouse_selection_with_inline_blocks(
@@ -352,8 +345,7 @@ impl App {
                 area,
                 mouse.column,
                 mouse.row,
-            );
-        extended
+            )
     }
 
     fn finish_diff_mouse_selection(&mut self) {
@@ -483,11 +475,10 @@ impl App {
                     start,
                     filtered_len,
                 );
-                if let Some(hit) = list_row_at(&rows, mouse.column, mouse.row) {
-                    if let ListRowKind::Item(index) = hit.kind {
+                if let Some(hit) = list_row_at(&rows, mouse.column, mouse.row)
+                    && let ListRowKind::Item(index) = hit.kind {
                         self.file_picker_selection = index.min(filtered_len.saturating_sub(1));
                     }
-                }
                 self.file_picker_preview_scroll = 0;
                 true
             }
@@ -925,16 +916,14 @@ impl App {
         }
         match self.surface {
             AppSurface::Queue => {
-                if let Some(details) = self.home_detail_area(terminal_width, terminal_height) {
-                    if contains_point(details, mouse.column, mouse.row) {
+                if let Some(details) = self.home_detail_area(terminal_width, terminal_height)
+                    && contains_point(details, mouse.column, mouse.row) {
                         return details;
                     }
-                }
-                if let Some(queue) = self.home_wide_queue_area(terminal_width, terminal_height) {
-                    if contains_point(queue, mouse.column, mouse.row) {
+                if let Some(queue) = self.home_wide_queue_area(terminal_width, terminal_height)
+                    && contains_point(queue, mouse.column, mouse.row) {
                         return queue;
                     }
-                }
                 full
             }
             AppSurface::Diff => {
@@ -947,11 +936,10 @@ impl App {
                 ])
                 .areas(area);
                 let (sidebar, _sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
-                if let Some(sidebar) = sidebar {
-                    if contains_point(sidebar, mouse.column, mouse.row) {
+                if let Some(sidebar) = sidebar
+                    && contains_point(sidebar, mouse.column, mouse.row) {
                         return sidebar;
                     }
-                }
                 if contains_point(diff_body, mouse.column, mouse.row) {
                     return diff_body;
                 }
@@ -984,18 +972,12 @@ impl App {
         terminal_width: u16,
         terminal_height: u16,
     ) -> Option<ScrollbarTarget> {
-        for target in [
+        [
             ScrollbarTarget::DetailDescription,
             ScrollbarTarget::Comments,
-        ] {
-            if self
+        ].into_iter().find(|&target| self
                 .scrollbar_for_target(target, terminal_width, terminal_height)
-                .is_some_and(|scrollbar| scrollbar.hit(column, row))
-            {
-                return Some(target);
-            }
-        }
-        None
+                .is_some_and(|scrollbar| scrollbar.hit(column, row)))
     }
 
     fn start_scrollbar_drag(
@@ -1166,9 +1148,7 @@ impl App {
         rows.get(value)
             .map(CommentSurfaceRow::comment_index)
             .or_else(|| {
-                rows.iter()
-                    .skip(value)
-                    .next()
+                rows.get(value)
                     .map(CommentSurfaceRow::comment_index)
             })
             .or_else(|| {

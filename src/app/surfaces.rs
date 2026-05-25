@@ -1039,8 +1039,8 @@ impl App {
             y = last.area().bottom();
         }
 
-        if let Some(notice) = self.github_notice() {
-            if y + 1 < content.bottom() {
+        if let Some(notice) = self.github_notice()
+            && y + 1 < content.bottom() {
                 y += 1;
                 frame.render_widget(
                     Line::from(vec![
@@ -1053,7 +1053,6 @@ impl App {
                     Rect::new(content.x, y, content.width, 1),
                 );
             }
-        }
 
         render_home_rule(frame, content, content.bottom().saturating_sub(1), rule);
         frame.render_widget(
@@ -1143,8 +1142,8 @@ impl App {
             y = last.area().bottom();
         }
 
-        if let Some(notice) = self.github_notice() {
-            if y + 1 < queue.bottom() {
+        if let Some(notice) = self.github_notice()
+            && y + 1 < queue.bottom() {
                 y += 1;
                 frame.render_widget(
                     Line::from(vec![
@@ -1157,7 +1156,6 @@ impl App {
                     Rect::new(queue.x, y, queue.width.saturating_sub(1), 1),
                 );
             }
-        }
 
         self.render_home_detail_pane(frame, details, selected, palette);
         // No vertical divider, no connector glyphs, no bottom rule. Amp-style:
@@ -1833,11 +1831,10 @@ impl App {
     }
 
     fn detail_markdown_line(&self, mut line: Line<'static>, bg: Color) -> Line<'static> {
-        if let Some(first) = line.spans.first_mut() {
-            if let Some(stripped) = first.content.strip_prefix(' ') {
+        if let Some(first) = line.spans.first_mut()
+            && let Some(stripped) = first.content.strip_prefix(' ') {
                 first.content = stripped.to_string().into();
             }
-        }
         if line
             .spans
             .first()
@@ -3055,11 +3052,10 @@ impl App {
             let line = render_finder_row(file, result, row_width, selected, palette);
             frame.render_widget(line, geometry.area);
         }
-        if let Some(preview_area) = preview_area {
-            if let Some(result) = filtered.get(self.file_picker_selection) {
+        if let Some(preview_area) = preview_area
+            && let Some(result) = filtered.get(self.file_picker_selection) {
                 self.render_file_preview(frame, preview_area, result.index, palette);
             }
-        }
     }
 
     pub(super) fn render_command_palette_shell(
@@ -3225,11 +3221,10 @@ impl App {
                 Rect::new(list_area.x, y, list_area.width.saturating_sub(1), 1),
             );
         }
-        if let Some(preview_area) = preview_area {
-            if let Some(result) = results.get(self.file_picker_selection) {
+        if let Some(preview_area) = preview_area
+            && let Some(result) = results.get(self.file_picker_selection) {
                 self.render_text_search_preview(frame, preview_area, result, palette);
             }
-        }
     }
 
     pub(super) fn render_root_command_palette(&self, frame: &mut Frame) {

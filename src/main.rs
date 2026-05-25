@@ -239,12 +239,11 @@ impl AgentListFilter {
         }
 
         if !include_all {
-            if repo_path.is_none() || branch.is_none() {
-                if let Ok(metadata) = GitMetadata::detect() {
+            if (repo_path.is_none() || branch.is_none())
+                && let Ok(metadata) = GitMetadata::detect() {
                     repo_path.get_or_insert(metadata.repo_path);
                     branch.get_or_insert(metadata.branch);
                 }
-            }
             if base_ref.is_none() {
                 base_ref = detect_base_ref().ok();
             }
@@ -262,21 +261,18 @@ impl AgentListFilter {
         if !self.include_all && !thread.note.state.is_open() {
             return false;
         }
-        if let Some(repo_path) = &self.repo_path {
-            if &thread.session.repo_path != repo_path {
+        if let Some(repo_path) = &self.repo_path
+            && &thread.session.repo_path != repo_path {
                 return false;
             }
-        }
-        if let Some(branch) = &self.branch {
-            if &thread.session.branch != branch {
+        if let Some(branch) = &self.branch
+            && &thread.session.branch != branch {
                 return false;
             }
-        }
-        if let Some(base_ref) = &self.base_ref {
-            if &thread.session.base_ref != base_ref {
+        if let Some(base_ref) = &self.base_ref
+            && &thread.session.base_ref != base_ref {
                 return false;
             }
-        }
         true
     }
 }
@@ -317,7 +313,7 @@ fn agent_reply(store: &ReviewStore, id: &str, body: String) -> Result<()> {
     }
     println!(
         "{}",
-        serde_json::json!({ "ok": true, "thread_id": id }).to_string()
+        serde_json::json!({ "ok": true, "thread_id": id })
     );
     Ok(())
 }
@@ -329,7 +325,7 @@ fn agent_set_state(store: &ReviewStore, id: &str, state: ReviewItemState) -> Res
     }
     println!(
         "{}",
-        serde_json::json!({ "ok": true, "thread_id": id, "state": state.label() }).to_string()
+        serde_json::json!({ "ok": true, "thread_id": id, "state": state.label() })
     );
     Ok(())
 }

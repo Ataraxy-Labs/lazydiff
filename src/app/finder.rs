@@ -1153,12 +1153,11 @@ pub(crate) fn preview_syntax_style(base: Style, span: &SyntaxSpan, theme: DiffTh
 }
 
 pub(crate) fn push_preview_span(spans: &mut Vec<Span<'static>>, ch: char, style: Style) {
-    if let Some(last) = spans.last_mut() {
-        if last.style == style {
+    if let Some(last) = spans.last_mut()
+        && last.style == style {
             last.content.to_mut().push(ch);
             return;
         }
-    }
     spans.push(Span::styled(ch.to_string(), style));
 }
 
