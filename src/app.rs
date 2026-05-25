@@ -17,8 +17,8 @@ use color_eyre::Result;
 use crossterm::{
     cursor::{MoveTo, SetCursorStyle, Show},
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{
@@ -598,7 +598,7 @@ impl App {
                 let mut coalesced_diff_scroll_cols = 0isize;
                 loop {
                     match event::read()? {
-                        Event::Key(key) => {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
                             Self::debug_key_event(key);
                             self.handle_key(key);
                             if let Some(flow) = self.pending_terminal_flow.take() {
