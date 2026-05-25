@@ -108,8 +108,15 @@ fn main() -> Result<()> {
     if bench_scroll {
         return bench_scroll_render(path, patch.len(), document);
     }
-    let mut terminal = init_terminal()?;
     let forge = detect_forge();
+    if forge.auth_status() != forge::ForgeAuthStatus::Authenticated {
+        eprintln!("lazydiff requires signing in to GitHub.");
+        let username = forge
+            .login()
+            .map_err(|error| color_eyre::eyre::eyre!(error))?;
+        eprintln!("Signed in as {username}.");
+    }
+    let mut terminal = init_terminal()?;
     let app = match launch {
         LaunchInput::Home => App::new(path, patch.len(), document, forge),
         LaunchInput::LocalDiff {
