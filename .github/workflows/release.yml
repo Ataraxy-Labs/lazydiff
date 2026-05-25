@@ -16,34 +16,57 @@ permissions:
 
 jobs:
   build:
-    name: release (${{ matrix.os }})
+    name: release (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             artifact: lazydiff-linux-x86_64.tar.gz
-            bin: target/release/lazydiff
+            cargo_flags: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: lazydiff-linux-x86_64-musl.tar.gz
+            cargo_flags: "--no-default-features"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: lazydiff-linux-aarch64.tar.gz
+            cargo_flags: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: lazydiff-linux-aarch64-musl.tar.gz
+            cargo_flags: "--no-default-features"
           - os: macos-latest
+            target: aarch64-apple-darwin
             artifact: lazydiff-macos-arm64.tar.gz
-            bin: target/release/lazydiff
+            cargo_flags: ""
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: lazydiff-macos-x86_64.tar.gz
+            cargo_flags: ""
           - os: windows-latest
+            target: x86_64-pc-windows-msvc
             artifact: lazydiff-windows-x86_64.zip
-            bin: target/release/lazydiff.exe
+            cargo_flags: ""
     steps:
       - uses: actions/checkout@v4
-      - if: runner.os == 'Linux'
+      - if: runner.os == 'Linux' && !endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev
+      - if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release
+      - run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
       - name: Package binary
         shell: bash
         run: |
           mkdir -p dist
           mkdir -p package
-          cp "${{ matrix.bin }}" package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }}
+          cp "target/${{ matrix.target }}/release/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }}" package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }}
           ./package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }} --version
           ./package/lazydiff${{ runner.os == 'Windows' && '.exe' || '' }} --help >/dev/null
           if [[ "${{ runner.os }}" == "Windows" ]]; then
