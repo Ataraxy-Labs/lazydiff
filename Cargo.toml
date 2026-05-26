@@ -1,6 +1,6 @@
 [package]
 name = "lazydiff"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 edition = "2024"
 description = "A fast terminal UI for reviewing Git diffs"
 license = "MIT"
@@ -29,6 +29,9 @@ sha2 = "0.10"
 sem-core = { git = "https://github.com/Ataraxy-Labs/sem.git", branch = "lazydiff-optional-grammars", default-features = false, features = ["lang-minimal"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Interactive development profile: much faster runtime than `dev`
 # without the slow fat-LTO/link-time work from `release`. Use with:
