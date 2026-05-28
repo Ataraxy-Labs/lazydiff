@@ -4,14 +4,6 @@ This is the agent's operating playbook for the in-flight Diff Workspace migratio
 
 For canonical vocabulary, see `CONTEXT.md`. For the always-on mission, see `docs/NORTH_STAR.md`. For accepted decisions, see `docs/adr/0001`…`0008`. For TUI verification, see `docs/TUI_VERIFICATION.md`. For the active work list, see `./issues.json` (or `bash scripts/work.sh next`). For this feature's plan checklist, see `./plan.md`. For this feature's framing, see `./spec.md`.
 
-## Product ambition and decision quality
-
-- Treat LazyDiff as a serious long-term product, not a demo or generated prototype. Optimize for maintainability, correctness, and reviewer trust.
-- Agents may write code, docs, tests, and migration mechanics, but **product and architecture decisions are human-owned**. Use agent speed for execution; use human judgment for direction.
-- For architectural decisions, ask the human owner one focused question at a time and explain the trade-off before changing direction.
-- Do not silently introduce major architecture, persistence, rendering, event-loop, or UX policy changes. Make the decision explicit in chat and document accepted decisions in `CONTEXT.md`, this feature's `./plan.md`, or `docs/adr/` as appropriate.
-- Prefer thoughtful, small, reviewable changes over broad rewrites. Every migration slice should make ownership clearer or reduce a known class of bugs.
-
 ## Where to learn the architecture before you touch code
 
 Before making architecture-shaped changes, read in this order:
@@ -27,21 +19,13 @@ Before making architecture-shaped changes, read in this order:
 
 If a request would surprise any of the above, stop and ask the human owner before changing direction.
 
-## Diff Workspace architecture
+## Diff Workspace architecture (the load-bearing bits)
 
-- Use `CONTEXT.md` for canonical language. Prefer **Diff Workspace**, **Visual Row**, **Visual-Row Stream**, **Fold**, **FoldStrategy**, **Inline Review Row**, **Diff Decoration**, **Surface Owner**, **Contribution**, **Chrome Slot**, **Generation Token**, and **Diff Workspace Owner** as defined there.
-- Treat Rust ownership as an architectural boundary: diff-screen interaction state has one mutable owner.
-- Do not add new `App`-side mutation of cursor, scroll, selection, inline review focus, draft editor focus, thread expansion/focus, or mouse selection.
-- Do not expose public mutable fields from the Diff Workspace owner. Prefer semantic operations such as user-meaningful intents/methods that update related state together.
-- Renderer code consumes workspace-produced visual rows, decorations, overlays, and view models; it does not mutate interaction state.
-- Product IO (persistence, clipboard, external navigation, review submission) is requested as explicit effects and executed by the app shell.
-
-## Migration rule
-
-- Build the clean `DiffWorkspace` core first, with private state and correct APIs.
-- Temporary adapter code is allowed only to bridge legacy `App` paths into the clean workspace API.
-- Do not add new behavior to adapter code or copy existing scattered patterns into the new core.
-- If you feel tempted to call `viewer_mut()` from `App`, stop and move the operation into the Diff Workspace owner instead.
+- One mutable owner for diff-screen interaction state. State changes go through `update(intent) -> Vec<Effect>`; no public mutable fields on the workspace.
+- App doesn't mutate cursor/scroll/selection/inline-focus/draft-editor/thread-expansion/mouse — those live in the workspace.
+- Renderer consumes workspace-produced visual rows, decorations, overlays, view models. It doesn't mutate interaction state.
+- IO (persistence, clipboard, navigation, review submission) is an explicit `Effect` the app shell executes.
+- Clean core first; temporary adapter only as a bridge — don't add new behavior to adapters or copy scattered patterns into the new core.
 
 ## Suggested checks during diff-workspace work
 
@@ -66,13 +50,11 @@ A migration slice is only reviewable if all five hold:
 
 A change that does any one of these without the others is a patch fix, not a slice. Patch fixes are how the codebase got into its current state — do not add more.
 
-## Engineering quality bar
+## Quality nudges
 
-- Be honest and precise in public-facing claims. For TUI performance, prefer input-to-render latency, draw time, event coalescing, and idle redraw behavior over vague "FPS" claims unless a frame-driven loop is truly intended.
-- Keep the TUI event loop event-driven by default. Redraw because state changed, input arrived, async work progressed, or a bounded animation/timer requires it; do not add continuous redraw loops for static screens.
-- Avoid giant unreviewable changes. Split migrations into narrow commits/PRs that state: what ownership improved, what old mutation disappeared, what tests protect it, and what grep/check shows progress.
-- Add regression tests for bug-prone behavior instead of relying on manual confidence. Visual-row navigation, side-filtered selection, search landing, inline editor movement, mouse selection, fold toggle, and redraw behavior should become testable contracts.
-- Treat docs as part of engineering quality. If a decision would surprise a future maintainer or agent, document the why, not just the what.
+- Event-driven redraw by default; no continuous redraw loops for static screens.
+- Regression tests for bug-prone behavior (visual-row nav, side-filtered selection, search landing, inline editor movement, mouse, fold toggle) — write the failing termwright first.
+- If a decision would surprise a future maintainer, document the *why* in `DECISIONS.md` or an ADR amendment, not just the *what* in code.
 
 ## Operating rule — finishing the work
 

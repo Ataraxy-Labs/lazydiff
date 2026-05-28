@@ -43,11 +43,11 @@ Out:
 - `bash scripts/tui-verify.sh` passes every suite.
 - A second person (or a fresh agent session) can add a new contribution kind (e.g. an AI-risk-driven `FoldStrategy`) by writing pure Rust against the contribution traits, without modifying `DiffWorkspace` internals or `App`.
 
-## Non-goals
+## Out of scope for this feature (file as future work if surfaced)
 
-- Performance optimization beyond what falls out of having one cached row list. No FPS claims.
-- API stability for third-party consumers. Contribution traits are internal; signature changes are allowed within this feature.
-- Migration of any other surface in this feature. Other surfaces inherit the pattern; they don't piggyback on the slices here.
+- Performance optimization beyond what falls out of having one cached row list.
+- Stable contribution trait signatures for outside crates — trait shapes can still change inside this feature; stability comes later once a few real consumers exercise them.
+- Migration of any other surface. If a related cleanup tempts you, file a child issue or a future-feature note rather than expanding scope.
 
 ## Where to read more
 

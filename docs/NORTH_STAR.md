@@ -58,10 +58,10 @@ If the architecture succeeded, a future contributor should be able to add **each
 
 ## Engineering honesty (how we talk about it)
 
-- **TUI performance**: input-to-render latency, draw time, event coalescing, idle redraw behavior. Not "FPS." Not "60fps." Not "blazing fast."
-- **Public claims** about LazyDiff should be precise about what is implemented vs. planned. ADRs are decisions, the active feature's `plan.md` (under `docs/features/<feature>/`) is in-flight, NORTH_STAR is direction.
-- **Reviewable slices**: one concept moved, old path deleted, new workspace operation added, focused tests, grep proof. Anything else is a patch fix, not a slice.
-- **Humans own product/architecture decisions**; agents execute. For any major architecture/persistence/rendering/event-loop/UX policy change, the agent asks one focused question and waits.
+- **TUI performance**: prefer concrete signals (input-to-render latency, draw time, event coalescing, idle redraw) over vague FPS claims when they aren't the real signal.
+- **Public claims**: be precise about implemented vs. planned. ADRs are decisions; the active feature's `plan.md` is in-flight; NORTH_STAR is direction.
+- **Reviewable slices**: one concept moved, old path deleted, new workspace operation added, focused tests, grep proof. Anything else is a patch fix.
+- **Humans own product/architecture decisions**; agents execute. For architecture/persistence/rendering/event-loop/UX policy changes, ask one focused question and wait.
 
 ## The agent's done-check (run at end of every slice)
 
