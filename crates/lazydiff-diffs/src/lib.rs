@@ -801,6 +801,7 @@ pub struct DiffWidget<'a> {
     theme: DiffTheme,
     search_matches: &'a [DiffSearchMatch],
     inline_blocks: &'a [DiffInlineBlock],
+    visual_rows: Option<&'a [DiffVisualRow]>,
     show_diff_cursor: bool,
 }
 
@@ -811,6 +812,7 @@ impl<'a> DiffWidget<'a> {
             theme: DiffTheme::default(),
             search_matches: &[],
             inline_blocks: &[],
+            visual_rows: None,
             show_diff_cursor: true,
         }
     }
@@ -827,6 +829,11 @@ impl<'a> DiffWidget<'a> {
 
     pub fn inline_blocks(mut self, inline_blocks: &'a [DiffInlineBlock]) -> Self {
         self.inline_blocks = inline_blocks;
+        self
+    }
+
+    pub fn visual_rows(mut self, visual_rows: &'a [DiffVisualRow]) -> Self {
+        self.visual_rows = Some(visual_rows);
         self
     }
 
@@ -847,7 +854,11 @@ impl StatefulWidget for DiffWidget<'_> {
 
         let rows = self.document.rows(state.viewport.mode);
         let now = Instant::now();
-        let model = state.render_model(self.document, self.inline_blocks, area);
+        let model = if let Some(visual_rows) = self.visual_rows {
+            state.render_model_from_visual_rows(self.document, visual_rows, area)
+        } else {
+            state.render_model(self.document, self.inline_blocks, area)
+        };
 
         for (screen_y, visual_row) in model.visual_rows.iter().enumerate() {
             let y = model.content_area.y + screen_y as u16;

@@ -55,7 +55,7 @@
     {
       "id": 2,
       "title": "Move Visual-Row Stream into DiffWorkspace with dirty cache",
-      "status": "open",
+      "status": "done",
       "type": "AFK",
       "phase": "A",
       "parent_id": null,
@@ -67,26 +67,26 @@
       "acceptance_criteria": [
         {
           "text": "`WorkspaceVisualRow` enum exists with `DiffText`, `InlineReview`, `Spacer`, `FoldSummary` variants (per ADR 0005).",
-          "done": false
+          "done": true
         },
         {
           "text": "Two consecutive `frame()` calls without intervening mutation perform exactly one rebuild (verified by a build-counter in tests).",
-          "done": false
+          "done": true
         },
         {
           "text": "Renderer iterates `frame.rows` instead of calling `visual_rows_with_inline_blocks` directly.",
-          "done": false
+          "done": true
         },
         {
           "text": "Grep shows the renderer no longer calls `visual_rows_with_inline_blocks(...)`.",
-          "done": false
+          "done": true
         }
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::rows && rg \"visual_rows_with_inline_blocks\" src/render src/diff_render | wc -l",
       "north_star_check": "Is `frame.rows` the ONLY way the renderer learns about rows? Did the old per-consumer Vec disappear from the renderer path?",
-      "notes": "",
+      "notes": "[2026-05-28T08:29:05Z] Renderer now reads app-owned workspace frame rows; lazydiff-diffs keeps a temporary DiffWidget fallback for non-app/tests until later row-path deletion slices remove remaining legacy consumers.",
       "created_at": "2026-05-28T00:00:00Z",
-      "updated_at": "2026-05-28T00:00:00Z"
+      "updated_at": "2026-05-28T08:29:13Z"
     },
     {
       "id": 3,

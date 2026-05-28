@@ -869,16 +869,23 @@ impl App {
         let search_matches = self.diff_buffer.search_matches().to_vec();
         let content_area = diff_content_area(diff_viewport);
         let inline_blocks = self.diff_inline_blocks_for_area(Some(content_area));
-        StatefulWidget::render(
-            DiffWidget::new(&self.document)
-                .theme(palette.theme.diff_theme())
-                .search_matches(&search_matches)
-                .inline_blocks(&inline_blocks)
-                .show_diff_cursor(self.comment_modal.is_none() && self.inline_focus.is_none()),
-            diff_viewport,
-            frame.buffer_mut(),
-            self.diff_buffer.viewer_mut(),
-        );
+        {
+            let workspace = &mut self.workspace;
+            let diff_buffer = &mut self.diff_buffer;
+            let workspace_frame =
+                workspace.frame(&self.document, diff_buffer.viewer(), &inline_blocks);
+            StatefulWidget::render(
+                DiffWidget::new(&self.document)
+                    .theme(palette.theme.diff_theme())
+                    .search_matches(&search_matches)
+                    .inline_blocks(&inline_blocks)
+                    .visual_rows(workspace_frame.diff_rows)
+                    .show_diff_cursor(self.comment_modal.is_none() && self.inline_focus.is_none()),
+                diff_viewport,
+                frame.buffer_mut(),
+                diff_buffer.viewer_mut(),
+            );
+        }
         if let Some(sidebar) = sidebar {
             self.render_review_sidebar(frame, sidebar, palette);
         }

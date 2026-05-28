@@ -256,6 +256,36 @@ impl DiffViewerState {
         }
     }
 
+    pub fn render_model_from_visual_rows(
+        &mut self,
+        document: &DiffDocument,
+        visual_rows: &[DiffVisualRow],
+        area: Rect,
+    ) -> DiffRenderModel {
+        let content_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+        let scrollbar_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
+        let viewport_height = area.height as usize;
+        let visual_row_count = visual_rows.len();
+        let max_scroll = visual_row_count.saturating_sub(viewport_height);
+        self.viewport.scroll_y = self.viewport.scroll_y.min(max_scroll);
+        self.cursor.row = self
+            .cursor
+            .row
+            .min(document.rows(self.viewport.mode).len().saturating_sub(1));
+        let visible_end = self
+            .viewport
+            .scroll_y
+            .saturating_add(viewport_height)
+            .min(visual_row_count);
+        DiffRenderModel {
+            content_area,
+            scrollbar_area,
+            viewport_height,
+            visual_row_count,
+            visual_rows: visual_rows[self.viewport.scroll_y..visible_end].to_vec(),
+        }
+    }
+
     pub fn overlays_for_row_side(
         &self,
         document: &DiffDocument,
