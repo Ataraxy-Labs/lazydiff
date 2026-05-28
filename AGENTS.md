@@ -94,3 +94,60 @@ A change that does any one of these without the others is a patch fix, not a sli
 - Avoid giant unreviewable changes. Split migrations into narrow commits/PRs that state: what ownership improved, what old mutation disappeared, what tests protect it, and what grep/check shows progress.
 - Add regression tests for bug-prone behavior instead of relying on manual confidence. Visual-row navigation, side-filtered selection, search landing, inline editor movement, mouse selection, and redraw behavior should become testable contracts.
 - Treat docs as part of engineering quality. If a decision would surprise a future maintainer or agent, document the why, not just the what.
+
+## Operating rule — finishing the work
+
+This section governs how the agent finishes work. It is not optional. Re-read it before claiming any slice is done.
+
+### End-of-slice done-check
+
+After finishing any reviewable slice (per the five-rule definition above):
+
+1. Re-read `docs/NORTH_STAR.md` and answer all four done-check questions there. If any answer is "no" or "yes, oversight," fix it before continuing.
+2. Run the grep checks listed under "Suggested checks during diff-workspace work" and any grep gate the slice's issue specifies. Confirm the legacy counts went down, not up.
+3. Run the slice's `verification` command (typically `cargo test -p <crate> <focus>` and/or `cargo build --profile dev-fast`). Quote the result in the chat update.
+4. Update `docs/work/issues.json` via `bash scripts/work.sh tick <issue.criterion>` for each acceptance criterion completed, and `bash scripts/work.sh done <issue>` only when all of that issue's criteria are ticked AND verification ran.
+5. If the slice surfaced work that doesn't belong in this issue, file a child issue with `bash scripts/work.sh add-child <parent_id> "<title>"`. Do not silently expand the current slice.
+6. Commit immediately after the slice passes the done-check. One slice = one commit (see "Detailed commits" below).
+
+### Detailed commits per task
+
+- Use one commit per finished issue (or per logically-coherent sub-step inside an issue, when the sub-step is independently revertible).
+- Commit subject line: `<area>: <what changed in one line>` (e.g. `workspace: move inline draft editor into DiffWorkspace modal enum`).
+- Commit body must include:
+  - **Issue id**: which issue in `docs/work/issues.json` this closes or advances.
+  - **What ownership improved**: which field or path is now private to the right owner.
+  - **What old mutation disappeared**: the deleted `App` field, the deleted scatter, the deleted parallel computation.
+  - **Test/check that protects it**: the test name(s) and any grep gate result.
+  - **North-Star check**: one-line note on which invariant or proof-of-architecture feature this slice moved forward, and confirmation that the four done-check answers all pass.
+- Never amend a published commit and never `git push --force`. If a slice was wrong, file a child issue and ship a corrective slice.
+- Run `git commit` and `git push` only when explicitly approved by the user, per the global instruction. The default is local commits.
+
+### When the agent stops
+
+Stop only when one of these is true:
+
+1. All compulsory items in `plan.md` are checked, AND every open issue in `docs/work/issues.json` is `done` or `blocked` with a recorded reason.
+2. A HITL decision blocks progress: file or update the issue with the precise question for the human and stop.
+3. A verification failure cannot be resolved within the slice's scope: file a child issue documenting the failure, leave the worktree in a state the human can read, and stop.
+
+Otherwise, the agent **does not stop**. The next action is:
+
+```sh
+bash scripts/work.sh next
+```
+
+Take the returned issue, repeat the slice loop. Do not declare victory because the previous slice felt large, because tests in *this* slice passed, or because the conversation has been long. Those are not stop conditions.
+
+This rule exists because of the failure mode named in the Anthropic long-running-harness paper (Nov 2025): agents tend to declare partial progress as completion. The remedy is an externalized work list (`docs/work/issues.json`), explicit done-checks, and a single trivial "what's next" command. Use them.
+
+### Before final response of any turn
+
+The final response of any turn must include:
+
+- Completed work this turn (issues ticked or closed, with ids).
+- Verification quoted or summarized faithfully (test pass/fail, grep counts before/after).
+- Next unchecked compulsory `plan.md` item AND next `bash scripts/work.sh next` result.
+- Any HITL question that blocks further progress, stated precisely.
+
+Per `plan.md` operating rule, re-read `plan.md` itself before composing this section; if any compulsory item is still unchecked and unblocked, the agent has not finished its turn.
