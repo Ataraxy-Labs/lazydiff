@@ -49,9 +49,26 @@ A fresh agent session must read these before touching code, in this order, so it
 | `docs/features/001-diff-workspace/plan.md` | Compulsory checklist + operating rule; the source of truth for "is this feature done." |
 | `docs/features/001-diff-workspace/RULES.md` | Migration playbook: slice rule, grep checks, engineering quality bar, end-of-slice done-check, detailed commit format, stop conditions. |
 | `docs/features/001-diff-workspace/issues.json` | Tickets with acceptance criteria, verification, north-star check. Driven via `bash scripts/work.sh`. |
+| `docs/features/001-diff-workspace/DECISIONS.md` | Append-only deviation log for in-flight decisions that diverge from plan/RULES/ADRs but are too small to deserve an ADR amendment. See "When you deviate from the plan" below. |
 | `docs/features/001-diff-workspace/README.md` | How the tracker fits the operating rule and the per-slice TDD loop. |
 
 Future features will live in sibling folders (`docs/features/002-…/`, etc.) following the same shape. Index: `docs/features/README.md`.
+
+## When you deviate from the plan
+
+Any time you (the agent) make a decision that does **not** exactly follow `plan.md`, `RULES.md`, an ADR, or the issue's stated `what_to_build` — record it. Pick the smallest tier that fits:
+
+| Deviation size | Where it goes | How |
+|---|---|---|
+| Small / in-slice (e.g. picked option B over A inside one issue, renamed a private helper, deferred a sub-goal until next slice) | The issue's `notes` field in `issues.json` | `bash scripts/work.sh note <id> "<one-line reason>"` |
+| Cross-slice, not ADR-worthy (e.g. renamed a contribution trait, chose lib X over Y, sequenced two slices in a different order, broadened a `FoldStrategy` signature) | The active feature's `DECISIONS.md` (currently `docs/features/001-diff-workspace/DECISIONS.md`) | Append one dated bullet at the top: `- YYYY-MM-DD — <what> — <why> — <issue id or "no issue">` |
+| Architecture-shaped (e.g. new contribution kind, ownership-boundary change, persistence/event-loop policy change) | `docs/adr/` as an ADR amendment | **Ask the human owner one focused question first**, then file the amendment. Do not silently land it. |
+
+Rules of thumb:
+
+- If you find yourself writing more than two lines to explain a deviation, it is probably ADR-shaped, not `DECISIONS.md`-shaped.
+- A `DECISIONS.md` entry that recurs across three or more slices is signalling an ADR. Promote it and remove the entry with a one-line pointer.
+- Every commit body should still name the `Issue id` and `North-Star check` — the deviation log does not replace the commit-body rules in `RULES.md`.
 
 ## Hard rules
 

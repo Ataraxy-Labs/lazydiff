@@ -8,11 +8,12 @@ This shape mirrors current (2026) AI-assisted-engineering practice: always-on ru
 
 ```
 docs/features/<NNN>-<slug>/
-  ├─ spec.md       # what this feature is, why, scope, non-goals, success criteria
-  ├─ plan.md       # compulsory checklist + operating rule for this feature
-  ├─ RULES.md      # migration playbook: slice rule, done-check, commit format, stop conditions
-  ├─ issues.json   # work-tracker tickets (driven via `bash scripts/work.sh`)
-  └─ README.md     # how the tracker fits the operating rule; per-slice TDD loop
+  ├─ spec.md         # what this feature is, why, scope, non-goals, success criteria
+  ├─ plan.md         # compulsory checklist + operating rule for this feature
+  ├─ RULES.md        # migration playbook: slice rule, done-check, commit format, stop conditions
+  ├─ issues.json     # work-tracker tickets (driven via `bash scripts/work.sh`)
+  ├─ DECISIONS.md    # append-only deviation log (cross-slice, not-ADR-worthy decisions)
+  └─ README.md       # how the tracker fits the operating rule; per-slice TDD loop
 ```
 
 ## Active feature
