@@ -91,7 +91,7 @@
     {
       "id": 3,
       "title": "Migrate scroll consumer to Visual-Row Stream",
-      "status": "open",
+      "status": "done",
       "type": "AFK",
       "phase": "A",
       "parent_id": null,
@@ -103,26 +103,26 @@
       "acceptance_criteria": [
         {
           "text": "All scroll math in `App` reads `frame.rows.len()` (no parallel count).",
-          "done": false
+          "done": true
         },
         {
           "text": "Scroll mutations go through `DiffWorkspaceIntent::Scroll`.",
-          "done": false
+          "done": true
         },
         {
           "text": "Grep proof: zero `row_count_for_mode` calls remain on the scroll path in `src/app.rs`.",
-          "done": false
+          "done": true
         },
         {
           "text": "Test: scrolling past inline rows lands on the correct visual row (no off-by-one).",
-          "done": false
+          "done": true
         }
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::scroll && rg \"row_count_for_mode\" src/app.rs",
       "north_star_check": "Does navigation and scroll now agree on row totals by construction? Did the parallel computation disappear?",
       "notes": "",
       "created_at": "2026-05-28T00:00:00Z",
-      "updated_at": "2026-05-28T00:00:00Z"
+      "updated_at": "2026-05-28T09:12:40Z"
     },
     {
       "id": 4,

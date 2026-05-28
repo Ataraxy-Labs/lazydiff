@@ -129,7 +129,7 @@ mod selection;
 use selection::{ScreenPoint, ScreenTextSelection};
 mod surfaces;
 mod workspace;
-use workspace::DiffWorkspace;
+use workspace::{DiffWorkspace, DiffWorkspaceContext, DiffWorkspaceEffect, DiffWorkspaceIntent};
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -693,9 +693,7 @@ impl App {
                     self.scroll_active_pane_horizontally(coalesced_diff_scroll_cols * 8);
                 }
                 if coalesced_diff_scroll_rows != 0 {
-                    let rows =
-                        row_count_for_mode(&self.document, self.diff_buffer.viewer().viewport.mode);
-                    self.scroll_relative(coalesced_diff_scroll_rows, rows);
+                    self.scroll_relative(coalesced_diff_scroll_rows);
                 }
             }
         }
@@ -2079,22 +2077,16 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.move_active_relative(1, rows),
             KeyCode::Char('k') | KeyCode::Up => self.move_active_relative(-1, rows),
-            KeyCode::PageDown => self.scroll_relative(self.viewport_height as isize, rows),
-            KeyCode::PageUp => self.scroll_relative(-(self.viewport_height as isize), rows),
+            KeyCode::PageDown => self.scroll_relative(self.viewport_height as isize),
+            KeyCode::PageUp => self.scroll_relative(-(self.viewport_height as isize)),
             KeyCode::Char('g') => {
                 if self.surface == AppSurface::Diff {
-                    self.diff_buffer.viewer_mut().viewport.scroll_y = 0;
+                    self.scroll_to_visual_row(0);
                 }
             }
             KeyCode::Char('G') => {
                 if self.surface == AppSurface::Diff {
-                    let inline_blocks = self.diff_inline_blocks();
-                    let visual_row_count = self
-                        .diff_buffer
-                        .viewer()
-                        .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
-                    self.diff_buffer.viewer_mut().viewport.scroll_y =
-                        visual_row_count.saturating_sub(self.viewport_height);
+                    self.scroll_to_visual_row(usize::MAX);
                 }
             }
             KeyCode::Char('v') => self.toggle_visual_selection(rows, false),
@@ -2459,7 +2451,7 @@ impl App {
         }
     }
 
-    fn page_surface(&mut self, direction: isize, rows: usize) {
+    fn page_surface(&mut self, direction: isize, _rows: usize) {
         match self.surface {
             AppSurface::CommitList => {
                 self.move_commit_focused(direction * self.viewport_height.max(1) as isize)
@@ -2478,9 +2470,7 @@ impl App {
                         .saturating_add_signed(direction * self.viewport_height.max(1) as isize)
                 }
             }
-            AppSurface::Diff => {
-                self.scroll_relative(direction * self.viewport_height as isize, rows)
-            }
+            AppSurface::Diff => self.scroll_relative(direction * self.viewport_height as isize),
             AppSurface::Queue => {
                 self.move_queue_focused(direction * self.viewport_height.max(1) as isize)
             }
@@ -3549,30 +3539,43 @@ impl App {
         }
     }
 
-    fn scroll_relative(&mut self, delta: isize, rows: usize) {
+    fn scroll_relative(&mut self, delta: isize) {
         if self.surface == AppSurface::Diff {
-            let inline_blocks = self.diff_inline_blocks();
-            let visual_row_count = self
-                .diff_buffer
-                .viewer()
-                .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
-            let max_scroll = visual_row_count.saturating_sub(self.viewport_height);
-            self.diff_buffer.viewer_mut().viewport.scroll_y = self
-                .diff_buffer
-                .viewer()
-                .viewport
-                .scroll_y
-                .saturating_add_signed(delta)
-                .min(max_scroll);
-            return;
+            self.update_diff_workspace(DiffWorkspaceIntent::Scroll { delta });
         }
-        self.diff_buffer.viewer_mut().viewport.scroll_y = self
-            .diff_buffer
-            .viewer()
-            .viewport
-            .scroll_y
-            .saturating_add_signed(delta)
-            .min(rows.saturating_sub(self.viewport_height));
+    }
+
+    fn scroll_to_visual_row(&mut self, row: usize) {
+        self.update_diff_workspace(DiffWorkspaceIntent::ScrollTo { row });
+    }
+
+    fn update_diff_workspace(&mut self, intent: DiffWorkspaceIntent) {
+        let visual_row_count = self.diff_visual_row_count();
+        let ctx = DiffWorkspaceContext {
+            viewport_height: self.viewport_height,
+            scroll_y: self.diff_buffer.viewer().viewport.scroll_y,
+            visual_row_count,
+        };
+        let effects = self.workspace.update(intent, ctx);
+        self.apply_diff_workspace_effects(effects);
+    }
+
+    fn apply_diff_workspace_effects(&mut self, effects: Vec<DiffWorkspaceEffect>) {
+        for effect in effects {
+            match effect {
+                DiffWorkspaceEffect::SetScrollY(scroll_y) => {
+                    self.diff_buffer.viewer_mut().viewport.scroll_y = scroll_y;
+                }
+            }
+        }
+    }
+
+    fn diff_visual_row_count(&mut self) -> usize {
+        let inline_blocks = self.diff_inline_blocks();
+        self.workspace
+            .frame(&self.document, self.diff_buffer.viewer(), &inline_blocks)
+            .rows
+            .len()
     }
 
     fn move_diff_cursor_rows(&mut self, delta: isize, rows: usize) {

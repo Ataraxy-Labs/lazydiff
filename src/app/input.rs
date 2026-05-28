@@ -10,7 +10,6 @@ impl App {
         terminal_width: u16,
         terminal_height: u16,
     ) {
-        let rows = row_count_for_mode(&self.document, self.diff_buffer.viewer().viewport.mode);
         if self.comment_modal.is_some() || self.thread_modal.is_some() {
             return;
         }
@@ -60,11 +59,11 @@ impl App {
                     return;
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_relative(1, rows);
+                    self.scroll_relative(1);
                     return;
                 }
                 MouseEventKind::ScrollUp => {
-                    self.scroll_relative(-1, rows);
+                    self.scroll_relative(-1);
                     return;
                 }
                 _ => {}
@@ -74,6 +73,7 @@ impl App {
             self.is_on_main_scrollbar(mouse.column, mouse.row, terminal_width, terminal_height);
         let scrollbar_target =
             self.scrollbar_target_at(mouse.column, mouse.row, terminal_width, terminal_height);
+        let rows = self.diff_visual_row_count();
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             self.focus_pane_at_mouse(mouse.column, mouse.row, terminal_width, terminal_height);
         }
@@ -205,10 +205,10 @@ impl App {
                 self.scroll_active_pane_horizontally(8);
             }
             MouseEventKind::ScrollDown => {
-                self.scroll_relative(1, rows);
+                self.scroll_relative(1);
             }
             MouseEventKind::ScrollUp => {
-                self.scroll_relative(-1, rows);
+                self.scroll_relative(-1);
             }
             MouseEventKind::Down(MouseButton::Left) if over_main_scrollbar => {
                 self.selecting_text = false;
@@ -1274,14 +1274,14 @@ impl App {
         } else {
             body_row.min(height.saturating_sub(1)) * max_scroll / height.saturating_sub(1).max(1)
         };
-        self.diff_buffer.viewer_mut().viewport.scroll_y = scroll;
+        self.scroll_to_visual_row(scroll);
     }
 
     pub(super) fn drag_scrollbar_to(&mut self, row: u16, rows: usize) {
         let height = self.viewport_height.max(1);
         let slider = self.scrollbar_slider_state(rows);
         if slider.max == 0 {
-            self.diff_buffer.viewer_mut().viewport.scroll_y = 0;
+            self.scroll_to_visual_row(0);
             return;
         }
 
@@ -1294,9 +1294,11 @@ impl App {
         let desired_thumb_start = virtual_mouse
             .saturating_sub(self.scrollbar_drag_offset_virtual)
             .min(max_thumb_start);
-        self.diff_buffer.viewer_mut().viewport.scroll_y = slider
-            .value_from_virtual_thumb_start(height, desired_thumb_start)
-            .min(slider.max);
+        self.scroll_to_visual_row(
+            slider
+                .value_from_virtual_thumb_start(height, desired_thumb_start)
+                .min(slider.max),
+        );
     }
 
     pub(super) fn is_in_scrollbar_thumb(&self, body_row: usize, rows: usize) -> bool {
