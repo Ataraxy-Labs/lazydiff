@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# work.sh — tiny issue tracker for docs/work/issues.json
+# work.sh — tiny issue tracker for the active feature's issues.json
+#
+# Active feature folder is resolved from $LAZYDIFF_FEATURE (default: 001-diff-workspace).
+# Per-feature layout: docs/features/<slug>/{spec.md,plan.md,RULES.md,issues.json,README.md}
 #
 # Commands:
 #   work list                  open issues, grouped by phase
@@ -16,13 +19,14 @@
 #   work note <id> "<text>"    append a note
 #   work stats                 quick counts
 #
-# Storage: docs/work/issues.json (atomic write via temp file).
+# Storage: docs/features/<feature>/issues.json (atomic write via temp file).
 # Requires: jq.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FILE="$ROOT/docs/work/issues.json"
+FEATURE="${LAZYDIFF_FEATURE:-001-diff-workspace}"
+FILE="$ROOT/docs/features/$FEATURE/issues.json"
 TMP="$FILE.tmp"
 
 if ! command -v jq >/dev/null 2>&1; then

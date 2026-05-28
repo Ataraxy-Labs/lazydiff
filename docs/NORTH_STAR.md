@@ -59,7 +59,7 @@ If the architecture succeeded, a future contributor should be able to add **each
 ## Engineering honesty (how we talk about it)
 
 - **TUI performance**: input-to-render latency, draw time, event coalescing, idle redraw behavior. Not "FPS." Not "60fps." Not "blazing fast."
-- **Public claims** about LazyDiff should be precise about what is implemented vs. planned. ADRs are decisions, plan.md is in-flight, NORTH_STAR is direction.
+- **Public claims** about LazyDiff should be precise about what is implemented vs. planned. ADRs are decisions, the active feature's `plan.md` (under `docs/features/<feature>/`) is in-flight, NORTH_STAR is direction.
 - **Reviewable slices**: one concept moved, old path deleted, new workspace operation added, focused tests, grep proof. Anything else is a patch fix, not a slice.
 - **Humans own product/architecture decisions**; agents execute. For any major architecture/persistence/rendering/event-loop/UX policy change, the agent asks one focused question and waits.
 
@@ -79,7 +79,7 @@ If any answer is "no" or "yes, oversight," the slice is not done. Fix it before 
 
 Stop only when one of:
 
-- All compulsory items in `plan.md` are checked, AND all in-flight issues are done, blocked, or have explicit human follow-up filed.
+- All compulsory items in the active feature's `plan.md` (under `docs/features/<feature>/`) are checked, AND all in-flight issues are done, blocked, or have explicit human follow-up filed.
 - A human decision is blocking and you have recorded it as a HITL issue with the question stated.
 - A verification failure that you have documented and surfaced for human resolution.
 

@@ -148,7 +148,7 @@ Each slice should record:
 ## Where to go from here
 
 - `docs/adr/0001` through `0004` — the formal decisions.
-- `plan.md` — the migration checklist and operating rule.
+- `docs/features/<feature>/plan.md` — the active feature's migration checklist and operating rule (currently `docs/features/001-diff-workspace/plan.md`).
 - `AGENTS.md` — the rules future agents (and you) follow when touching this code.
 - `CONTEXT.md` — vocabulary used everywhere.
 - Per-source notes in this folder — depth on the lessons summarized above.

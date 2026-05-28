@@ -1,15 +1,15 @@
 # LazyDiff migration playbook
 
-This is the agent's operating playbook for the in-flight Diff Workspace migration and the follow-on whole-TUI work. It is referenced from `AGENTS.md` and should be re-read at the end of every slice.
+This is the agent's operating playbook for the in-flight Diff Workspace migration and the follow-on whole-TUI work. It is referenced from `AGENTS.md` (which routes new sessions to the active feature folder) and should be re-read at the end of every slice.
 
-For canonical vocabulary, see `CONTEXT.md`. For the always-on mission, see `docs/NORTH_STAR.md`. For accepted decisions, see `docs/adr/0001`…`0008`. For TUI verification, see `docs/TUI_VERIFICATION.md`. For the active work list, see `docs/work/issues.json` and `scripts/work.sh`.
+For canonical vocabulary, see `CONTEXT.md`. For the always-on mission, see `docs/NORTH_STAR.md`. For accepted decisions, see `docs/adr/0001`…`0008`. For TUI verification, see `docs/TUI_VERIFICATION.md`. For the active work list, see `./issues.json` (or `bash scripts/work.sh next`). For this feature's plan checklist, see `./plan.md`. For this feature's framing, see `./spec.md`.
 
 ## Product ambition and decision quality
 
 - Treat LazyDiff as a serious long-term product, not a demo or generated prototype. Optimize for maintainability, correctness, and reviewer trust.
 - Agents may write code, docs, tests, and migration mechanics, but **product and architecture decisions are human-owned**. Use agent speed for execution; use human judgment for direction.
 - For architectural decisions, ask the human owner one focused question at a time and explain the trade-off before changing direction.
-- Do not silently introduce major architecture, persistence, rendering, event-loop, or UX policy changes. Make the decision explicit in chat and document accepted decisions in `CONTEXT.md`, `plan.md`, or `docs/adr/` as appropriate.
+- Do not silently introduce major architecture, persistence, rendering, event-loop, or UX policy changes. Make the decision explicit in chat and document accepted decisions in `CONTEXT.md`, this feature's `./plan.md`, or `docs/adr/` as appropriate.
 - Prefer thoughtful, small, reviewable changes over broad rewrites. Every migration slice should make ownership clearer or reduce a known class of bugs.
 
 ## Where to learn the architecture before you touch code
@@ -22,7 +22,7 @@ Before making architecture-shaped changes, read in this order:
 3. `docs/research/synthesis.md` — one-page map of how external research translates into LazyDiff's architecture.
 4. `docs/research/{prosemirror,xstate,pi-mono,pierre}.md` — depth on each source's specific lessons. `docs/research/rust-modules-and-visibility.md` covers Rust crate/module/visibility basics.
 5. `docs/learning/ownership-walkthrough.md` — guided product-flow walkthrough of why Rust ownership matters for LazyDiff's bug classes.
-6. `plan.md` — current migration checklist and compulsory order.
+6. `./plan.md` — this feature's migration checklist and compulsory order.
 7. `docs/TUI_VERIFICATION.md` — how to verify TUI changes (Modes A/B/C; Mode B / termwright is the default).
 
 If a request would surprise any of the above, stop and ask the human owner before changing direction.
@@ -86,7 +86,7 @@ After finishing any reviewable slice (per the five-rule definition above):
 2. Run the grep checks listed above and any grep gate the slice's issue specifies. Confirm the legacy counts went down, not up.
 3. Run the slice's `verification` command (typically `cargo test -p <crate> <focus>` and/or `cargo build --profile dev-fast`). Quote the result in the chat update.
 4. **If the slice touched TUI behavior, run Mode B from `docs/TUI_VERIFICATION.md`.** Compile-only is not sufficient. The slice must ship a `scripts/test-<slice>-termwright.sh` that fails on the current code, passes after the slice, and is included in `scripts/tui-verify.sh`. Run `bash scripts/tui-verify.sh` and confirm every suite passes.
-5. Update `docs/work/issues.json` via `bash scripts/work.sh tick <issue.criterion>` for each acceptance criterion completed, and `bash scripts/work.sh done <issue>` only when all of that issue's criteria are ticked AND verification ran.
+5. Update `./issues.json` via `bash scripts/work.sh tick <issue.criterion>` for each acceptance criterion completed, and `bash scripts/work.sh done <issue>` only when all of that issue's criteria are ticked AND verification ran.
 6. If the slice surfaced work that doesn't belong in this issue, file a child issue with `bash scripts/work.sh add-child <parent_id> "<title>"`. Do not silently expand the current slice.
 7. Commit immediately after the slice passes the done-check. One slice = one commit.
 
@@ -95,7 +95,7 @@ After finishing any reviewable slice (per the five-rule definition above):
 - Use one commit per finished issue (or per logically-coherent sub-step inside an issue, when the sub-step is independently revertible).
 - Commit subject line: `<area>: <what changed in one line>` (e.g. `workspace: move inline draft editor into DiffWorkspace modal enum`).
 - Commit body must include:
-  - **Issue id**: which issue in `docs/work/issues.json` this closes or advances.
+  - **Issue id**: which issue in `./issues.json` this closes or advances.
   - **What ownership improved**: which field or path is now private to the right owner.
   - **What old mutation disappeared**: the deleted `App` field, the deleted scatter, the deleted parallel computation.
   - **Test/check that protects it**: the test name(s) and any grep gate result.
@@ -107,7 +107,7 @@ After finishing any reviewable slice (per the five-rule definition above):
 
 Stop only when one of these is true:
 
-1. All compulsory items in `plan.md` are checked, AND every open issue in `docs/work/issues.json` is `done` or `blocked` with a recorded reason.
+1. All compulsory items in `./plan.md` are checked, AND every open issue in `./issues.json` is `done` or `blocked` with a recorded reason.
 2. A HITL decision blocks progress: file or update the issue with the precise question for the human and stop.
 3. A verification failure cannot be resolved within the slice's scope: file a child issue documenting the failure, leave the worktree in a state the human can read, and stop.
 
@@ -119,7 +119,7 @@ bash scripts/work.sh next
 
 Take the returned issue, repeat the slice loop. Do not declare victory because the previous slice felt large, because tests in *this* slice passed, or because the conversation has been long. Those are not stop conditions.
 
-This rule exists because of the failure mode named in the Anthropic long-running-harness paper (Nov 2025): agents tend to declare partial progress as completion. The remedy is an externalized work list (`docs/work/issues.json`), explicit done-checks, and a single trivial "what's next" command. Use them.
+This rule exists because of the failure mode named in the Anthropic long-running-harness paper (Nov 2025): agents tend to declare partial progress as completion. The remedy is an externalized work list (`./issues.json`), explicit done-checks, and a single trivial "what's next" command. Use them.
 
 ### Before final response of any turn
 
@@ -127,7 +127,7 @@ The final response of any turn must include:
 
 - Completed work this turn (issues ticked or closed, with ids).
 - Verification quoted or summarized faithfully (test pass/fail, grep counts before/after).
-- Next unchecked compulsory `plan.md` item AND next `bash scripts/work.sh next` result.
+- Next unchecked compulsory `./plan.md` item AND next `bash scripts/work.sh next` result.
 - Any HITL question that blocks further progress, stated precisely.
 
-Per the `plan.md` operating rule, re-read `plan.md` itself before composing this section; if any compulsory item is still unchecked and unblocked, the agent has not finished its turn.
+Per the `./plan.md` operating rule, re-read `./plan.md` itself before composing this section; if any compulsory item is still unchecked and unblocked, the agent has not finished its turn.
