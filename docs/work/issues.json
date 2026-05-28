@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "schema": {
+    "id": "integer, unique, monotonically allocated by scripts/work.sh",
+    "title": "short descriptive name",
+    "status": "open | in_progress | done | blocked",
+    "type": "AFK (no human needed) | HITL (needs human decision)",
+    "phase": "A | B | C | D | E | F (matches plan.md phases) | X (uncategorized)",
+    "parent_id": "integer | null — for split-out child issues",
+    "discovered_during": "integer | null — which issue surfaced this one",
+    "blocked_by": "integer[] of issue ids that must be done first",
+    "what_to_build": "end-to-end behavior, not layer-by-layer implementation",
+    "acceptance_criteria": "array of { text, done } — tickable via `work tick <id>.<n>`",
+    "verification": "shell command to prove the slice works (cargo test ..., grep, etc.)",
+    "north_star_check": "behavioral question the agent re-asks at the end of the slice (see docs/NORTH_STAR.md)",
+    "notes": "free-form notes appended over time via `work note`",
+    "created_at": "ISO-8601 UTC",
+    "updated_at": "ISO-8601 UTC"
+  },
+  "issues": []
+}
