@@ -128,6 +128,8 @@ pub(crate) use semantic::{
 mod selection;
 use selection::{ScreenPoint, ScreenTextSelection};
 mod surfaces;
+mod workspace;
+use workspace::DiffWorkspace;
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -160,6 +162,7 @@ pub(crate) struct App {
     detail_tab: DetailTab,
     queue_focus: QueuePane,
     commit_focus: CommitPane,
+    workspace: DiffWorkspace,
     diff_buffer: DiffBufferState,
     /// Index of the currently selected comment in the Comments reader.
     /// j/k step between comments (not lines); selected comment renders
@@ -465,6 +468,7 @@ impl App {
             detail_tab: DetailTab::Semantic,
             queue_focus: QueuePane::List,
             commit_focus: CommitPane::List,
+            workspace: DiffWorkspace::default(),
             diff_buffer: DiffBufferState::default(),
             comments_selection: 0,
             dragging_scrollbar: false,

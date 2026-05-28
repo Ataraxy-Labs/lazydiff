@@ -21,7 +21,7 @@
     {
       "id": 1,
       "title": "Create DiffWorkspace module skeleton (private state + intent/effect API)",
-      "status": "open",
+      "status": "done",
       "type": "AFK",
       "phase": "A",
       "parent_id": null,
@@ -31,26 +31,26 @@
       "acceptance_criteria": [
         {
           "text": "`DiffWorkspace` struct exists with private fields only (no `pub` on data fields).",
-          "done": false
+          "done": true
         },
         {
           "text": "`DiffWorkspaceIntent`, `DiffWorkspaceEffect`, `DiffWorkspaceContext`, `DiffWorkspaceFrame<'_>` types exist.",
-          "done": false
+          "done": true
         },
         {
           "text": "A unit test in `src/app/workspace.rs` constructs a workspace, dispatches a no-op intent, and reads `frame()` round-trip.",
-          "done": false
+          "done": true
         },
         {
           "text": "`App` holds `workspace: DiffWorkspace` but does not yet route anything through it.",
-          "done": false
+          "done": true
         }
       ],
       "verification": "cargo test -p lazydiff workspace::skeleton && cargo build --profile dev-fast",
       "north_star_check": "Did this slice make any new App-side mutation possible? (It should not.) Can a contributor see exactly one door into workspace state? (`update`.)",
       "notes": "",
       "created_at": "2026-05-28T00:00:00Z",
-      "updated_at": "2026-05-28T00:00:00Z"
+      "updated_at": "2026-05-28T08:12:39Z"
     },
     {
       "id": 2,
