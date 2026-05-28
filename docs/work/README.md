@@ -18,15 +18,15 @@ When the work list outgrows ~200 active items or we need concurrent multi-machin
 
 ## How it fits the operating rule
 
-`AGENTS.md` "Operating rule — finishing the work" mandates that the agent:
+`docs/MIGRATION.md` "Operating rule — finishing the work" mandates that the agent:
 
 1. Runs `bash scripts/work.sh next` to find the next unblocked open issue.
 2. Runs the slice (per the five-rule reviewable-slice definition).
 3. Ticks acceptance criteria with `bash scripts/work.sh tick <id>.<n>`.
 4. Closes the issue with `bash scripts/work.sh done <id>` only when all criteria are ticked AND verification ran.
 5. Files child issues for surfaced work with `bash scripts/work.sh add-child <parent_id> "<title>"`.
-6. Commits per the "Detailed commits" rules in AGENTS.md.
-7. Does not stop unless one of the three stop conditions in AGENTS.md is true.
+6. Commits per the "Detailed commits" rules in `docs/MIGRATION.md`.
+7. Does not stop unless one of the three stop conditions in `docs/MIGRATION.md` is true.
 
 ## Anatomy of one issue
 
@@ -45,4 +45,4 @@ The TDD loop per slice:
 5. Run `bash scripts/tui-verify.sh` and confirm every suite still passes.
 6. `chmod +x` the new test so it joins the regression suite forever.
 
-The issue's `verification` field should call `bash scripts/tui-verify.sh` (or the slice-specific test) for TUI slices; `cargo test ...` alone is not sufficient for anything TUI-observable. See `AGENTS.md` end-of-slice done-check rule #4 and `docs/NORTH_STAR.md` done-check question #5.
+The issue's `verification` field should call `bash scripts/tui-verify.sh` (or the slice-specific test) for TUI slices; `cargo test ...` alone is not sufficient for anything TUI-observable. See `docs/MIGRATION.md` end-of-slice done-check rule #4 and `docs/NORTH_STAR.md` done-check question #5.

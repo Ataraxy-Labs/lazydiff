@@ -2,7 +2,7 @@
 
 LazyDiff is a TUI. Compile-only verification (`cargo build`) is **not sufficient** for any slice that touches cursor, scroll, selection, search, inline rows, folds, mouse, side filtering, modal subflows, or rendering output. This doc names the three verification modes, when to use which, and how to drive them.
 
-This is referenced from `AGENTS.md` "Operating rule — finishing the work" and from each issue's `verification` field in `docs/work/issues.json`. Do not skip it.
+This is referenced from `docs/MIGRATION.md` "Operating rule — finishing the work" and from each issue's `verification` field in `docs/work/issues.json`. Do not skip it.
 
 ## Three modes
 
@@ -104,7 +104,7 @@ Recipe for Mode C from the agent:
 5. Run `bash scripts/tui-verify.sh` to confirm no other suite regressed.
 6. `bash scripts/work.sh tick <id>.<n>` for each acceptance criterion.
 7. `bash scripts/work.sh done <id>` when all ticked + verification ran.
-8. Commit per AGENTS.md "Detailed commits per task."
+8. Commit per `docs/MIGRATION.md` "Detailed commits per task."
 ```
 
 If step 2 cannot be made to fail on current code, the slice is either already done or the acceptance criterion is wrong. Stop and ask.

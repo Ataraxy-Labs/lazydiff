@@ -296,4 +296,4 @@ These follow-on slices apply the same Surface Owner / reducer / effects / contri
 - [ ] **Commit list + Queue/Home surfaces.** Move forge/auth coupling behind effects; surfaces consume cached results only.
 - [ ] **Persistence + forge as effects.** All writes (notes, drafts, settings) and forge calls flow through the effect runner; no surface performs IO inline.
 
-Each slice obeys the AGENTS.md reviewable-slice rule (one concept, deletes the old path, adds a workspace operation, focused tests, grep proof of decreased scatter).
+Each slice obeys the `docs/MIGRATION.md` reviewable-slice rule (one concept, deletes the old path, adds a workspace operation, focused tests, grep proof of decreased scatter).
