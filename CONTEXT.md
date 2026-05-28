@@ -65,8 +65,20 @@ A `(surface, kind, value)` token attached to every async effect. When the result
 _Avoid_: Applying async results without a token check; relying solely on cooperative cancellation.
 
 **Visual-Row Stream**:
-The single cached list of **Visual Rows** the **Diff Workspace Owner** rebuilds on demand and lends to all consumers (navigation, scrolling, mouse mapping, renderer iteration) for one frame. Backed by a dirty flag; sparse row-height overrides keep it cheap.
+The single cached list of **Visual Rows** the **Diff Workspace Owner** rebuilds on demand and lends to all consumers (navigation, scrolling, mouse mapping, renderer iteration) for one frame. Backed by a dirty flag; sparse row-height overrides keep it cheap. Fold-aware: when a **Fold** is collapsed, its hidden rows are removed from the stream and replaced by a single **Fold Summary Row**.
 _Avoid_: Recomputing rows per-consumer; storing parallel row counts; renderer asking the document directly.
+
+**Fold**:
+A collapsed range of **Visual Rows** in the **Diff Workspace** represented by a single **Fold Summary Row** in the **Visual-Row Stream**. Folds change *what rows exist*, not just how they are decorated, which is why they are first-class on the stream rather than a kind of **Diff Decoration**.
+_Avoid_: Modeling collapse as a render-time hack; storing fold state outside the workspace owner.
+
+**Fold Summary Row**:
+The single **Visual Row** that stands in for a collapsed **Fold**. Carries the fold's label, the count of hidden rows, the fold's `FoldStrategy` id, and any contributed summary text (e.g., "12 lines of imports", "auto-folded: package-lock.json").
+_Avoid_: Multiple summary rows per fold; rendering hidden rows behind the summary; placing the summary outside the stream.
+
+**FoldStrategy**:
+A **Contribution** that produces candidate **Folds** for a Diff Workspace. Examples: unchanged-context fold, generated-file fold (lockfiles, snapshots), imports fold, whitespace-only-hunk fold, reformatting fold, AI-risk-driven fold. A FoldStrategy is a pure function from `(workspace frame, contribution state) -> Vec<FoldCandidate>`; the workspace owner decides which candidates apply and what default state (collapsed/expanded) they have.
+_Avoid_: FoldStrategies that mutate workspace state; folds that bypass the **Visual-Row Stream**; per-strategy renderer code.
 
 ## Relationships
 
@@ -81,6 +93,8 @@ _Avoid_: Recomputing rows per-consumer; storing parallel row counts; renderer as
 - A **Contribution** is consumed by a **Surface Owner** or the **App Shell** to fill a **Chrome Slot**, register a command/keymap entry, or produce inline rows/decorations for the **Visual-Row Stream**.
 - Every async **Surface Effect** carries a **Generation Token**; results return as intents and are dropped when the surface's generation has moved on.
 - All four diff consumers (navigation, scrolling, mouse mapping, renderer iteration) read the same **Visual-Row Stream** from the **Diff Workspace Owner**.
+- A **Fold** is a first-class operation on the **Visual-Row Stream**, not a **Diff Decoration**; toggling it dirties the cache so the stream rebuilds with hidden rows replaced by a **Fold Summary Row**.
+- A **FoldStrategy** is a **Contribution** that proposes **Folds**; the **Diff Workspace Owner** accepts, rejects, or merges proposals and is the only thing that mutates fold state.
 
 ## Example dialogue
 

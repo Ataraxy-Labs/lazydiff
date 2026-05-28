@@ -12,7 +12,8 @@
 
 Before making architecture-shaped changes, read in this order:
 
-1. `CONTEXT.md` — canonical vocabulary (Diff Workspace, Surface Owner, Visual-Row Stream, Generation Token, Contribution, Chrome Slot, …).
+0. `docs/NORTH_STAR.md` — the always-on mission, preserved strengths, bug classes we exist to kill, architecture invariants, proof-of-architecture features, and the agent's end-of-slice done-check. Re-read at the end of every reviewable slice.
+1. `CONTEXT.md` — canonical vocabulary (Diff Workspace, Surface Owner, Visual-Row Stream, Fold, FoldStrategy, Generation Token, Contribution, Chrome Slot, …).
 2. `docs/adr/0001` … `docs/adr/0008` — accepted decisions:
    - `0001` Diff Workspace + generic decorations.
    - `0002` Extension-shaped internals before public plugin API.

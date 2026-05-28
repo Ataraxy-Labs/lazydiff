@@ -17,10 +17,24 @@ enum WorkspaceVisualRow {
     DiffText      { side, doc_row, … },
     InlineReview  { block_id, line, side, … },
     Spacer        { side },
+    FoldSummary   { fold_id, hidden_count, label, side, … },
     // future kinds added here; compiler ratchet forces every consumer
     // to handle them
 }
 ```
+
+### Folds are first-class on the stream
+
+A **Fold** is a collapsed range of underlying rows. When a fold is collapsed, its hidden rows are **removed from the stream** during rebuild and replaced by a single `FoldSummary` row carrying the label, hidden count, and originating `FoldStrategy` id. When a fold is expanded, the hidden rows reappear in the next rebuild.
+
+This means folds change *what rows exist*, not just what rows look like. They are therefore part of the stream — not a `DiffDecoration`. The workspace owner holds:
+
+- `folds: BTreeMap<FoldId, FoldState>` — declared folds and their collapsed/expanded state. Private.
+- `fold_candidates: Vec<FoldCandidate>` — last-sampled output from registered `FoldStrategy` contributions; refreshed when the document or fold-relevant inputs change.
+
+Toggling a fold dirties `rows_dirty`; the next `frame()` rebuild produces a stream with the affected range collapsed or expanded. Navigation, scrolling, mouse mapping, and renderer iteration are unaware of folds beyond seeing `FoldSummary` as one more row kind, which the compiler ratchet forces every consumer to handle.
+
+Coordinate mapping from a `FoldSummary` row to underlying document coordinates is the workspace owner's job (e.g., for clicking a fold summary to expand it, the renderer dispatches a `ToggleFold(fold_id)` intent; it does not compute doc rows).
 
 Public API:
 

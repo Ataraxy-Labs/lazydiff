@@ -4,7 +4,7 @@ LazyDiff's extensibility ambition ("build your own diff / build your own code re
 
 ## Decision
 
-### Five contribution kinds for the first migration
+### Six contribution kinds for the first migration
 
 Every surface owner participates in a shared contribution model with these kinds:
 
@@ -17,6 +17,8 @@ Every surface owner participates in a shared contribution model with these kinds
 4. **Inline row producer / decoration producer** — per ADR 0001, surfaces accept generic decorations and inline rows from contributions. A producer is a pure function from `(workspace frame, contribution state) -> Vec<Decoration | InlineRow>`. Producers do not mutate; they are sampled when the visual-row stream is rebuilt (ADR 0005).
 
 5. **Chrome slot** — named regions of the screen a contribution can fill: status line segments, header chips, side panels' tabs, footer hints. Each slot has a fixed type signature (e.g. status segment = text + style + width hint). The renderer composes registered slot contributions in a defined order.
+
+6. **Fold strategy** — produces candidate folds for a Diff Workspace (per ADR 0005, folds are first-class on the Visual-Row Stream because they change *what rows exist*). A `FoldStrategy` is a pure function `(workspace frame, contribution state) -> Vec<FoldCandidate>`. Each candidate declares a row range, label, default state (collapsed/expanded), and reason tag. Examples shipped as built-in strategies: unchanged-context, generated-file (lockfiles, snapshots), imports, whitespace-only-hunk, reformatting-only. The workspace owner is the only thing that mutates fold state; strategies only propose.
 
 ### Contributions are registered, not subclassed
 
