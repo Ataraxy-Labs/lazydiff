@@ -65,12 +65,13 @@ If the architecture succeeded, a future contributor should be able to add **each
 
 ## The agent's done-check (run at end of every slice)
 
-After finishing any slice, re-read this file and answer all four:
+After finishing any slice, re-read this file and answer all five:
 
 1. **Did this slice move toward a *simpler* codebase**, or did it add scatter — more fields on `App`, more parallel row computations, more direct mutation paths, more "patch fix" shaped code? If scatter increased, it is not done.
 2. **Did the slice delete the old path it replaced?** A duplicate left behind for "safety" is a patch fix in disguise. Delete or document why it stayed (must be temporary adapter only).
 3. **Could a future contributor add the equivalent feature as a Contribution** (Command, Keymap, Palette, InlineRow, Decoration, Chrome, FoldStrategy) instead of editing the surface owner? If no, is that a deliberate scope decision or an oversight?
 4. **Did anything in the slice silently change persistence, rendering, event-loop, or UX policy?** If yes, stop — that is a human-owned decision and was not approved.
+5. **If the slice touched TUI behavior, did I verify it via Mode B (termwright)** per `docs/TUI_VERIFICATION.md` — write the failing test first, make it pass, run `bash scripts/tui-verify.sh` clean? Compile-only is not enough. Watching tmux without committing a test is not enough. The slice must leave a regression test behind.
 
 If any answer is "no" or "yes, oversight," the slice is not done. Fix it before ticking the issue, before committing, and before moving on. If you cannot fix it within scope, file a child issue (`work add-child <id> "..."`) and explicitly note the regression so it is not lost.
 

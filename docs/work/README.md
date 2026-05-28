@@ -31,3 +31,18 @@ When the work list outgrows ~200 active items or we need concurrent multi-machin
 ## Anatomy of one issue
 
 Every issue carries a `north_star_check` field — a behavioral question the agent answers at the end of the slice (see `docs/NORTH_STAR.md`). This makes the goal travel with the work item; a sub-agent picking up the issue mid-stream re-anchors on the same invariants the parent did.
+
+## TUI slices require a termwright test (Mode B)
+
+If an issue's behavior is observable in the TUI (cursor, scroll, selection, search, inline rows, folds, mouse, side filtering, modal subflows, chrome, palette, fold-summary rendering), the slice **must** ship a `scripts/test-<slice>-termwright.sh` regression test per `docs/TUI_VERIFICATION.md`.
+
+The TDD loop per slice:
+
+1. Read the issue's `acceptance_criteria` and `north_star_check`.
+2. Write `scripts/test-<slice>-termwright.sh` asserting the new behavior. Run it. It must fail or error on current code.
+3. Implement the slice per the ADRs.
+4. Re-run the new test until it passes.
+5. Run `bash scripts/tui-verify.sh` and confirm every suite still passes.
+6. `chmod +x` the new test so it joins the regression suite forever.
+
+The issue's `verification` field should call `bash scripts/tui-verify.sh` (or the slice-specific test) for TUI slices; `cargo test ...` alone is not sufficient for anything TUI-observable. See `AGENTS.md` end-of-slice done-check rule #4 and `docs/NORTH_STAR.md` done-check question #5.

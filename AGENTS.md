@@ -27,6 +27,7 @@ Before making architecture-shaped changes, read in this order:
 4. `docs/research/{prosemirror,xstate,pi-mono,pierre}.md` — depth on each source's specific lessons. `docs/research/rust-modules-and-visibility.md` covers Rust crate/module/visibility basics for newer-to-Rust contributors.
 5. `docs/learning/ownership-walkthrough.md` — guided product-flow walkthrough of why Rust ownership matters for LazyDiff's bug classes.
 6. `plan.md` — current migration checklist, operating rule, and whole-TUI follow-on slices.
+7. `docs/TUI_VERIFICATION.md` — how the agent proves a TUI slice works. Three modes (compile-only, headless termwright, live tmux). Mode B (termwright) is the agent's default and produces committed regression tests.
 
 If a request would surprise any of the above, stop and ask the human owner before changing direction.
 
@@ -103,12 +104,13 @@ This section governs how the agent finishes work. It is not optional. Re-read it
 
 After finishing any reviewable slice (per the five-rule definition above):
 
-1. Re-read `docs/NORTH_STAR.md` and answer all four done-check questions there. If any answer is "no" or "yes, oversight," fix it before continuing.
+1. Re-read `docs/NORTH_STAR.md` and answer all five done-check questions there. If any answer is "no" or "yes, oversight," fix it before continuing.
 2. Run the grep checks listed under "Suggested checks during diff-workspace work" and any grep gate the slice's issue specifies. Confirm the legacy counts went down, not up.
 3. Run the slice's `verification` command (typically `cargo test -p <crate> <focus>` and/or `cargo build --profile dev-fast`). Quote the result in the chat update.
-4. Update `docs/work/issues.json` via `bash scripts/work.sh tick <issue.criterion>` for each acceptance criterion completed, and `bash scripts/work.sh done <issue>` only when all of that issue's criteria are ticked AND verification ran.
-5. If the slice surfaced work that doesn't belong in this issue, file a child issue with `bash scripts/work.sh add-child <parent_id> "<title>"`. Do not silently expand the current slice.
-6. Commit immediately after the slice passes the done-check. One slice = one commit (see "Detailed commits" below).
+4. **If the slice touched TUI behavior, run Mode B from `docs/TUI_VERIFICATION.md`.** Compile-only is not sufficient. The slice must ship a `scripts/test-<slice>-termwright.sh` that fails on the current code, passes after the slice, and is included in `scripts/tui-verify.sh`. Run `bash scripts/tui-verify.sh` and confirm every suite passes.
+5. Update `docs/work/issues.json` via `bash scripts/work.sh tick <issue.criterion>` for each acceptance criterion completed, and `bash scripts/work.sh done <issue>` only when all of that issue's criteria are ticked AND verification ran.
+6. If the slice surfaced work that doesn't belong in this issue, file a child issue with `bash scripts/work.sh add-child <parent_id> "<title>"`. Do not silently expand the current slice.
+7. Commit immediately after the slice passes the done-check. One slice = one commit (see "Detailed commits" below).
 
 ### Detailed commits per task
 
