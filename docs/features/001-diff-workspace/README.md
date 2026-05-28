@@ -5,7 +5,7 @@ This folder is the externalized issue tracker for the in-flight Diff Workspace m
 ## Files
 
 - `issues.json` — the single source of truth for all work items. Schema is documented at the top of the file.
-- `../../scripts/work.sh` — the CLI for adding, ticking, and closing issues. Run `bash scripts/work.sh help` from the repo root.
+- `scripts/work.sh` (at repo root) — the CLI for adding, ticking, and closing issues. Run `bash scripts/work.sh help` from the repo root.
 
 ## Why JSON instead of GitHub Issues or SQLite
 
@@ -39,9 +39,9 @@ If an issue's behavior is observable in the TUI (cursor, scroll, selection, sear
 The TDD loop per slice:
 
 1. Read the issue's `acceptance_criteria` and `north_star_check`.
-2. Write `scripts/test-<slice>-termwright.sh` asserting the new behavior. Run it. It must fail or error on current code.
+2. For new behavior / bug fixes: write `scripts/test-<slice>-termwright.sh` asserting the new behavior, run it, it must fail or error on current code. For behavior-preserving refactors: pick or write a characterization test that passes today and document what it pins.
 3. Implement the slice per the ADRs.
-4. Re-run the new test until it passes.
+4. Re-run the test until it passes (new behavior) or still passes (refactor).
 5. Run `bash scripts/tui-verify.sh` and confirm every suite still passes.
 6. `chmod +x` the new test so it joins the regression suite forever.
 

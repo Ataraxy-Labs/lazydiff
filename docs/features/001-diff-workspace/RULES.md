@@ -17,7 +17,7 @@ Before making architecture-shaped changes, read in this order:
 6. `./plan.md` — this feature's migration checklist and compulsory order.
 7. `docs/TUI_VERIFICATION.md` — how to verify TUI changes (Modes A/B/C; Mode B / termwright is the default).
 
-If a request would surprise any of the above, stop and ask the human owner before changing direction.
+If your intended change contradicts an ADR/invariant or changes product, ownership, persistence, rendering, event-loop, or UX policy, ask the human owner one focused question before changing direction.
 
 ## Diff Workspace architecture (the load-bearing bits)
 
@@ -38,17 +38,19 @@ rg "row_count_for_mode|visual_rows_with_inline_blocks" src/app.rs src/render src
 
 Existing hits may remain during migration, but new work should reduce or isolate them rather than increase them.
 
-## What counts as a reviewable migration slice
+## What counts as a reviewable behavior-migration slice
 
-A migration slice is only reviewable if all five hold:
+A *behavior-migration* slice is reviewable if all five hold:
 
 1. It moves **one concept** (e.g., inline focus, mouse drag, search state) — not three at once.
 2. It **deletes the old field/path** the concept used to live in; no leaving a dead duplicate behind.
 3. It **adds a workspace operation** that the new code calls; no direct field pokes.
-4. It adds **focused tests** for the moved concept. For any TUI-observable behavior, a `scripts/test-<slice>-termwright.sh` regression test per `docs/TUI_VERIFICATION.md` is required.
+4. It adds **focused tests** for the moved concept. For new behavior or bug fixes, write a failing termwright test first (`docs/TUI_VERIFICATION.md`). For behavior-preserving refactors, ensure a characterization test passes before and after, and add it to `scripts/tui-verify.sh` if it's not already there.
 5. It includes a **grep check showing the old pattern decreased**.
 
-A change that does any one of these without the others is a patch fix, not a slice. Patch fixes are how the codebase got into its current state — do not add more.
+For behavior migrations, doing only one of these without the others is a patch fix, not a complete slice. Patch fixes are how the codebase got into its current state — do not add more.
+
+**Scaffold, test-harness, docs, or pure setup slices** follow their issue's acceptance criteria and verification command. They should not migrate behavior opportunistically, and they don't need to delete an old path or reduce grep counts until a behavior actually moves.
 
 ## Quality nudges
 
@@ -65,9 +67,9 @@ This section governs how the agent finishes work. It is not optional.
 After finishing any reviewable slice (per the five-rule definition above):
 
 1. Re-read `docs/NORTH_STAR.md` and answer all five done-check questions there. If any answer is "no" or "yes, oversight," fix it before continuing.
-2. Run the grep checks listed above and any grep gate the slice's issue specifies. Confirm the legacy counts went down, not up.
+2. Run the grep checks listed above and any grep gate the slice's issue specifies. For behavior-migration slices, confirm legacy counts went down (or the remaining hits are more isolated). For scaffold/setup slices, record the baseline counts in the commit body instead.
 3. Run the slice's `verification` command (typically `cargo test -p <crate> <focus>` and/or `cargo build --profile dev-fast`). Quote the result in the chat update.
-4. **If the slice touched TUI behavior, run Mode B from `docs/TUI_VERIFICATION.md`.** Compile-only is not sufficient. The slice must ship a `scripts/test-<slice>-termwright.sh` that fails on the current code, passes after the slice, and is included in `scripts/tui-verify.sh`. Run `bash scripts/tui-verify.sh` and confirm every suite passes.
+4. **If the slice touched TUI behavior, run Mode B from `docs/TUI_VERIFICATION.md`.** Compile-only is not sufficient. For new behavior / bug fixes, the slice ships a `scripts/test-<slice>-termwright.sh` that fails on the current code and passes after. For behavior-preserving refactors, a characterization test that passes before and after is fine. Either way, include it in `scripts/tui-verify.sh` and confirm `bash scripts/tui-verify.sh` passes every suite.
 5. Update `./issues.json` via `bash scripts/work.sh tick <issue.criterion>` for each acceptance criterion completed, and `bash scripts/work.sh done <issue>` only when all of that issue's criteria are ticked AND verification ran.
 6. If the slice surfaced work that doesn't belong in this issue, file a child issue with `bash scripts/work.sh add-child <parent_id> "<title>"`. Do not silently expand the current slice.
 7. Commit immediately after the slice passes the done-check. One slice = one commit.
@@ -82,8 +84,8 @@ After finishing any reviewable slice (per the five-rule definition above):
   - **What old mutation disappeared**: the deleted `App` field, the deleted scatter, the deleted parallel computation.
   - **Test/check that protects it**: the test name(s) and any grep gate result.
   - **North-Star check**: one-line note on which invariant or proof-of-architecture feature this slice moved forward, and confirmation that the done-check answers all pass.
+- Local commits are expected after each completed slice (one slice = one commit). Run `git push` only when explicitly approved by the user.
 - Never amend a published commit and never `git push --force`. If a slice was wrong, file a child issue and ship a corrective slice.
-- Run `git commit` and `git push` only when explicitly approved by the user. The default is local commits.
 
 ### When the agent stops
 

@@ -1,6 +1,8 @@
 # AGENTS.md
 
-LazyDiff is a **pi-mono-style extensible core, for code review**: a stable Rust-owned diff/review workspace with bounded contribution seams so people add custom commands, keymaps, inline rows, decorations, chrome slots, fold strategies, and review actions in their own Rust without forking the core.
+LazyDiff is a terminal-first **"build your own diff / build your own code review"** workspace.
+
+Architecturally it is a **pi-mono-style extensible Rust core**: one stable diff/review workspace with bounded contribution seams for custom commands, keymaps, inline rows, decorations, chrome slots, fold strategies, and review actions — without forking the core.
 
 This file is the entry point. It is short on purpose. Read in order; consult specifics on demand.
 
@@ -17,7 +19,7 @@ This file is the entry point. It is short on purpose. Read in order; consult spe
 3. `docs/adr/0001`…`0008` — accepted architecture decisions.
 4. `docs/research/synthesis.md` then per-source notes — *why* each external pattern shaped a decision.
 5. `docs/learning/ownership-walkthrough.md` — Rust ownership as architecture boundary.
-6. `docs/features/001-diff-workspace/{spec,plan,RULES,issues.json,DECISIONS,README}.md` — active feature.
+6. `docs/features/001-diff-workspace/` — active feature (`spec.md`, `plan.md`, `RULES.md`, `issues.json`, `DECISIONS.md`, `README.md`).
 7. `docs/TUI_VERIFICATION.md` — three verification modes; Mode B (termwright) is default for TUI-observable slices.
 
 ## Always-on docs
@@ -55,11 +57,11 @@ Record the call sized to its weight:
 | Cross-slice, not ADR-worthy (renamed a trait, chose lib X, reordered slices) | active feature's `DECISIONS.md` | dated bullet at top: `- YYYY-MM-DD — <what> — <why> — <issue id>` |
 | Architecture-shaped (new contribution kind, ownership change, persistence/event-loop policy) | `docs/adr/` amendment | **ask first**, then file |
 
-If a deviation needs more than two lines to explain, it's ADR-shaped.
+A deviation is ADR-shaped if it changes an invariant, ownership boundary, the contribution model, or persistence/rendering/event-loop/UX policy — or if it will shape future features. Otherwise keep it terse in issue notes or `DECISIONS.md`.
 
 ## Guardrails (only the load-bearing ones)
 
-- Ask before architecture-shaped changes (persistence, rendering pipeline, event loop, UX policy, new contribution kinds).
+- Ask before architecture-shaped changes: persistence policy, rendering pipeline, event loop, UX policy, public-plugin/runtime behavior, or **unplanned** contribution seams. Planned internal contribution work (per the active feature's `spec.md` and the ADRs) does not need to ask.
 - TUI-observable slices need Mode B (`docs/TUI_VERIFICATION.md`). Compile-only is not proof.
 - Git is local-only by default. No `git push`, no `--force`, no `--amend` on published commits unless told.
 

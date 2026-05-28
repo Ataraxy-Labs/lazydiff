@@ -41,13 +41,13 @@ Out:
 - Greps for `viewer_mut()|inline_focus|comment_modal` in `src/app.rs` / `src/app` drop to zero outside the workspace module.
 - Greps for `row_count_for_mode|visual_rows_with_inline_blocks` in `src/app.rs|src/render|src/diff_render` drop to zero outside the workspace module.
 - `bash scripts/tui-verify.sh` passes every suite.
-- A second person (or a fresh agent session) can add a new contribution kind (e.g. an AI-risk-driven `FoldStrategy`) by writing pure Rust against the contribution traits, without modifying `DiffWorkspace` internals or `App`.
+- A second person (or a fresh agent session) can add a new contribution **implementation** (e.g. an AI-risk-driven `FoldStrategy`) by writing pure Rust against the contribution traits, without modifying `DiffWorkspace` internals or `App`.
 
 ## Out of scope for this feature (file as future work if surfaced)
 
 - Performance optimization beyond what falls out of having one cached row list.
 - Stable contribution trait signatures for outside crates — trait shapes can still change inside this feature; stability comes later once a few real consumers exercise them.
-- Migration of any other surface. If a related cleanup tempts you, file a child issue or a future-feature note rather than expanding scope.
+- Migration of any other surface. Adjacent cleanup that the current diff slice needs to compile or pass is fine; broader cleanup goes into a child issue or a future-feature note rather than expanding scope.
 
 ## Where to read more
 
