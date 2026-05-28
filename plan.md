@@ -1,4 +1,4 @@
-# Diff Viewer Architecture Plan
+# Diff Workspace Migration Plan (also the whole-TUI proving ground)
 
 ## Agent Operating Rule
 
@@ -10,9 +10,11 @@ Before finalizing any response on this project:
   - completed checklist items this turn
   - next unchecked compulsory item
   - verification run
-- Do not claim the diff viewer architecture work is done until every compulsory item is checked.
+- Do not claim the diff workspace architecture work is done until every compulsory item is checked.
 
-Goal: make lazydiff's diff viewer use a single, viewer-owned interaction/state architecture for reliable Vim-like UX, while preserving lazydiff's existing fast parsing/rendering core, Pierre styling, syntax highlighting, inline diff spans, themes, and colors.
+Goal: prove the whole-TUI architecture pattern by migrating the Diff Workspace first. Replace scattered `App`-side mutation of cursor, scroll, selection, inline focus, draft editor, thread expansion, and mouse with a single Rust-owned Diff Workspace Owner that drives a unified visual-row stream, accepts intents, returns effects, and exposes bounded contribution seams. The same pattern will then be applied surface-by-surface to the rest of the TUI (Semantic, Finder, Command Palette, Review Sidebar, Commit List, Queue) per ADR 0006.
+
+Scope clarification: this file is no longer "just the diff viewer." It is the proving ground for LazyDiff's whole-TUI architecture (ADRs 0001–0008). Diff is first because it concentrates the worst bugs and the most state; other surfaces follow under separate slices once the pattern lands. Compulsory items below remain diff-shaped on purpose — do not interleave whole-TUI work until the diff slices are complete.
 
 Product direction: LazyDiff should become a "build your own diff / build your own code review" workspace. The core must stay simple, safe, and Rust-owned, while review workflows become customizable through bounded contribution seams: commands, keybindings, inline rows, decorations, review actions, chrome/status, and explicit effects. This does not mean arbitrary renderer mutation or a public plugin runtime in the first migration slice.
 
@@ -55,7 +57,7 @@ Compulsory completion order:
 - [x] 14. Keep inline comment boxes side-local to the target left/right buffer instead of full-width decorations.
 - [x] 15. Keep editor focus styling identical to unfocused comment styling; only text body/cursor is editable, not the title/header.
 
-- [ ] True side-by-side visual-row model drives navigation, scrolling, mouse mapping, and renderer iteration.
+- [ ] True side-by-side visual-row model drives navigation, scrolling, mouse mapping, and renderer iteration. Concretely: one cached **Visual-Row Stream** owned by the Diff Workspace Owner (ADR 0005), rebuilt on a dirty flag, lent as a borrowed slice for one frame, with sparse row-height overrides for inline rows. Greps for the legacy `row_count_for_mode` / per-consumer `visual_rows_with_inline_blocks` calls in `src/app.rs` must drop to zero outside the workspace module.
 - [ ] Inline comment and draft editor rows live in the diff visual-row stream, not separate modals/side panels only.
   - [x] Viewer has inline block visual rows.
   - [x] App review comments/drafts are fed into inline block rows.
@@ -270,7 +272,7 @@ cargo build --profile dev-fast
 LAZYDIFF_KEY_DEBUG=1 LAZYDIFF_THEME=default-dark ./target/dev-fast/lazydiff --branch
 ```
 
-## Definition of Done
+## Definition of Done (Diff Workspace slice)
 
 - [x] Diff interaction state is owned by `DiffViewerState` without old adapter semantics.
 - [ ] Keyboard visual mode is reliable for all supported motions.
@@ -281,3 +283,17 @@ LAZYDIFF_KEY_DEBUG=1 LAZYDIFF_THEME=default-dark ./target/dev-fast/lazydiff --br
 - [ ] Inline comments/editor participate in visual row layout.
 - [ ] Renderer keeps lazydiff's current visual quality while consuming viewer-owned layout state.
 - [ ] Regression tests cover the interaction paths users rely on.
+
+## Whole-TUI follow-on slices (not started; not compulsory until diff slices land)
+
+These follow-on slices apply the same Surface Owner / reducer / effects / contributions pattern (ADRs 0006–0008) to the rest of the TUI. They are listed here so the broader scope is visible; do not start them until the compulsory diff items above are checked.
+
+- [ ] **App shell / router seam (ADR 0006).** Extract `App` into a routing + effect-running shell with explicit `AppSurface` dispatch. No surface state moves yet.
+- [ ] **Effect runner + generation tokens (ADR 0007).** Centralize tokio task spawning; route results back as typed intents; add generation tokens to identity-bound effects.
+- [ ] **Contribution registry first pass (ADR 0008).** Internal-only registry for Commands, Keymap entries, Command palette entries, Inline row producers, Chrome slots. Migrate existing keybindings, palette entries, and status chips into it.
+- [ ] **Semantic Surface owner.** Move semantic scroll/selection/expansion state into a `SemanticSurface` reducer.
+- [ ] **Finder / Command Palette / Review Sidebar surfaces.** Each becomes its own owner with intent/effect contract.
+- [ ] **Commit list + Queue/Home surfaces.** Move forge/auth coupling behind effects; surfaces consume cached results only.
+- [ ] **Persistence + forge as effects.** All writes (notes, drafts, settings) and forge calls flow through the effect runner; no surface performs IO inline.
+
+Each slice obeys the AGENTS.md reviewable-slice rule (one concept, deletes the old path, adds a workspace operation, focused tests, grep proof of decreased scatter).

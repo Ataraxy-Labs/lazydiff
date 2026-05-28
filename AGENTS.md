@@ -12,11 +12,20 @@
 
 Before making architecture-shaped changes, read in this order:
 
-1. `CONTEXT.md` — canonical vocabulary.
-2. `docs/adr/0001` … `docs/adr/0004` — accepted decisions.
+1. `CONTEXT.md` — canonical vocabulary (Diff Workspace, Surface Owner, Visual-Row Stream, Generation Token, Contribution, Chrome Slot, …).
+2. `docs/adr/0001` … `docs/adr/0008` — accepted decisions:
+   - `0001` Diff Workspace + generic decorations.
+   - `0002` Extension-shaped internals before public plugin API.
+   - `0003` Reducer-first surface update loop.
+   - `0004` Rust-owned Diff Workspace state.
+   - `0005` Unified Visual-Row Stream with dirty cache.
+   - `0006` App shell / router + Surface Owners (whole-TUI shape).
+   - `0007` Async effects + generation tokens.
+   - `0008` Commands, keymaps, and chrome contribution points.
 3. `docs/research/synthesis.md` — one-page map of how external research (ProseMirror, XState, pi-mono, pierre) translates into LazyDiff's architecture.
-4. `docs/research/{prosemirror,xstate,pi-mono,pierre}.md` — depth on each source's specific lessons.
-5. `plan.md` — current migration checklist and operating rule.
+4. `docs/research/{prosemirror,xstate,pi-mono,pierre}.md` — depth on each source's specific lessons. `docs/research/rust-modules-and-visibility.md` covers Rust crate/module/visibility basics for newer-to-Rust contributors.
+5. `docs/learning/ownership-walkthrough.md` — guided product-flow walkthrough of why Rust ownership matters for LazyDiff's bug classes.
+6. `plan.md` — current migration checklist, operating rule, and whole-TUI follow-on slices.
 
 If a request would surprise any of the above, stop and ask the human owner before changing direction.
 

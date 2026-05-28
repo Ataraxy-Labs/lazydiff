@@ -32,6 +32,42 @@ _Avoid_: Any pattern where the app shell or renderer directly mutates those fiel
 A bounded way to add or customize code-review behavior — commands, keybindings, inline rows, decorations, review actions, chrome/status, or external effects — without taking ownership of diff coordinate math or workspace interaction state.
 _Avoid_: Plugin when discussing the current internal seam; arbitrary renderer mutation; direct `App` mutation.
 
+**App Shell**:
+The thin top-level module that routes input to the active surface, runs effects, and hosts global overlays. It does not own or mutate any surface's interactive state.
+_Avoid_: God struct, main controller, app state for the routing/effect role.
+
+**Surface**:
+A coherent interactive screen of the TUI — Diff Workspace, Semantic, Finder, Command Palette, Review Sidebar, Commit List, Queue/Home. Each surface has one Rust-owned reducer.
+_Avoid_: Screen, page, view when discussing the owner of interactive state.
+
+**Surface Owner**:
+The Rust module that has exclusive mutable ownership of a surface's interactive state and exposes `update(intent) -> Vec<effect>` and a read-only frame. The **Diff Workspace Owner** is the first instance.
+_Avoid_: Direct field access from the **App Shell** or renderer.
+
+**Surface Intent**:
+A user-meaningful or system-meaningful message handed to a **Surface Owner** by the **App Shell**. Inputs are translated into intents; async results return as intents.
+_Avoid_: Calling mutator methods directly; passing raw key events into surface internals.
+
+**Surface Effect**:
+A description of work the **App Shell**'s effect runner should perform — persistence write, forge call, clipboard, navigation, async kick. Returned by a reducer; never executed inside one.
+_Avoid_: Side effects inside reducers; tasks spawned from surface code.
+
+**Chrome Slot**:
+A named region of the screen (status segment, header chip, footer hint, side-panel tab) that contributions can fill with a typed value. The renderer composes registered slot values in defined order.
+_Avoid_: Renderer-side conditional product UI; hard-coded status strings.
+
+**Contribution**:
+A registered value (Command, Keymap entry, Command palette entry, Inline row producer, Decoration producer, Chrome slot value) that a surface or the shell consumes. Contributions receive read-only context and produce data or intents; they never receive `&mut App` or `&mut Surface`.
+_Avoid_: Subclassing, ad-hoc hooks, contributions that mutate state directly.
+
+**Generation Token**:
+A `(surface, kind, value)` token attached to every async effect. When the result returns, the surface drops it if the current generation no longer matches, preventing stale async data from overwriting the live surface state.
+_Avoid_: Applying async results without a token check; relying solely on cooperative cancellation.
+
+**Visual-Row Stream**:
+The single cached list of **Visual Rows** the **Diff Workspace Owner** rebuilds on demand and lends to all consumers (navigation, scrolling, mouse mapping, renderer iteration) for one frame. Backed by a dirty flag; sparse row-height overrides keep it cheap.
+_Avoid_: Recomputing rows per-consumer; storing parallel row counts; renderer asking the document directly.
+
 ## Relationships
 
 - A **Diff Workspace** is made of **Visual Rows**.
@@ -40,6 +76,11 @@ _Avoid_: Plugin when discussing the current internal seam; arbitrary renderer mu
 - A **Side-Filtered Selection** applies within one side of a split **Diff Workspace**.
 - The **Diff Workspace Owner** updates the workspace's interactive state as one unit; the app shell asks it to perform user-meaningful actions and executes returned side effects.
 - A **Review Workflow Contribution** customizes the review experience by contributing data and effects to the **Diff Workspace Owner**; it does not bypass visual rows, coordinate mapping, or renderer contracts.
+- The **App Shell** routes input to the active **Surface** as a **Surface Intent** and runs returned **Surface Effects**; it never mutates surface-private fields.
+- A **Surface Owner** updates its private state from one **Surface Intent** at a time and returns zero or more **Surface Effects**; the **Diff Workspace Owner** is the first concrete instance.
+- A **Contribution** is consumed by a **Surface Owner** or the **App Shell** to fill a **Chrome Slot**, register a command/keymap entry, or produce inline rows/decorations for the **Visual-Row Stream**.
+- Every async **Surface Effect** carries a **Generation Token**; results return as intents and are dropped when the surface's generation has moved on.
+- All four diff consumers (navigation, scrolling, mouse mapping, renderer iteration) read the same **Visual-Row Stream** from the **Diff Workspace Owner**.
 
 ## Example dialogue
 
