@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # tui-verify.sh — run the headless TUI regression suite (Mode B in
-# docs/TUI_VERIFICATION.md). Discovers every scripts/test-*-termwright.sh,
-# runs it, and reports PASS/FAIL with a per-test transcript.
+# docs/TUI_VERIFICATION.md). Rebuilds the dev-fast binary by default
+# so the suite never runs against stale code. Discovers every
+# scripts/test-*-termwright.sh, runs it, and reports PASS/FAIL with
+# per-test transcript on failure.
 #
 # Usage:
-#   bash scripts/tui-verify.sh           # run all suites
-#   bash scripts/tui-verify.sh <name>    # run only test-<name>-termwright.sh
+#   bash scripts/tui-verify.sh                 # rebuild dev-fast + run all suites
+#   bash scripts/tui-verify.sh --no-build      # skip rebuild (only when you know it's fresh)
+#   bash scripts/tui-verify.sh <name>          # rebuild + run only test-<name>-termwright.sh
+#   bash scripts/tui-verify.sh --no-build <n>  # skip rebuild + run only one suite
 #
-# Exit code is the number of failed suites (0 = all pass).
+# Exit code is the number of failed suites (0 = all pass) or 2 on preflight error.
 
 set -uo pipefail
 
@@ -15,12 +19,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TERMWRIGHT_BIN=${TERMWRIGHT_BIN:-/Users/palanikannanm/.cache/checkouts/github.com/fcoury/termwright/target/debug/termwright}
 APP="$ROOT/target/dev-fast/lazydiff"
 
-# ---- preflight ------------------------------------------------------------
+# ---- arg parsing ----------------------------------------------------------
 
-fail_preflight() {
-  echo "tui-verify: $1" >&2
-  exit 2
-}
+rebuild=1
+filter=""
+for arg in "$@"; do
+  case "$arg" in
+    --no-build) rebuild=0 ;;
+    --help|-h)
+      sed -n '2,15p' "$0"
+      exit 0
+      ;;
+    -*) echo "tui-verify: unknown flag '$arg'" >&2; exit 2 ;;
+    *) filter="$arg" ;;
+  esac
+done
+
+# ---- preflight: termwright ------------------------------------------------
 
 if [[ ! -x "$TERMWRIGHT_BIN" ]]; then
   cat >&2 <<EOF
@@ -37,15 +52,27 @@ EOF
   exit 2
 fi
 
+# ---- rebuild dev-fast (default) ------------------------------------------
+
+if (( rebuild == 1 )); then
+  echo "── cargo build --profile dev-fast (use --no-build to skip) ─────────"
+  build_start=$(date +%s)
+  if ! ( cd "$ROOT" && cargo build --profile dev-fast 2>&1 | tail -3 ); then
+    echo "tui-verify: cargo build failed; cannot run TUI suite against stale binary" >&2
+    exit 2
+  fi
+  echo "── build done in $(( $(date +%s) - build_start ))s"
+  echo
+fi
+
 if [[ ! -x "$APP" ]]; then
-  echo "tui-verify: missing $APP" >&2
-  echo "  run: cargo build --profile dev-fast" >&2
+  echo "tui-verify: missing $APP after build" >&2
+  echo "  re-run without --no-build, or: cargo build --profile dev-fast" >&2
   exit 2
 fi
 
 # ---- discover suites ------------------------------------------------------
 
-filter="${1:-}"
 if [[ -n "$filter" ]]; then
   pattern="$ROOT/scripts/test-${filter}-termwright.sh"
 else

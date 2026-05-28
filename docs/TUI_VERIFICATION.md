@@ -9,7 +9,7 @@ This is referenced from `docs/MIGRATION.md` "Operating rule — finishing the wo
 | Mode | When | How | Persistence |
 |---|---|---|---|
 | **A — Compile-only** | Non-visual slices only: types, refactor, doc, internal trait changes that don't reach the renderer | `cargo build --profile dev-fast` | none |
-| **B — Headless functional (termwright)** | **Default for any TUI slice.** Drives the dev binary in a real PTY, sends synthetic keys/mouse, asserts on cursor row / screen text / structured output | `bash scripts/tui-verify.sh` (all suites) or `bash scripts/test-<name>-termwright.sh` (one suite) | committed `.sh` files become regression tests forever |
+| **B — Headless functional (termwright)** | **Default for any TUI slice.** Drives the dev binary in a real PTY, sends synthetic keys/mouse, asserts on cursor row / screen text / structured output | `bash scripts/tui-verify.sh` rebuilds `target/dev-fast/lazydiff` and runs every suite. Pass `--no-build` only when you are sure the binary is fresh. `bash scripts/tui-verify.sh <name>` runs one suite. | committed `.sh` files become regression tests forever |
 | **C — Live tmux pane** | (i) Debugging something termwright can't easily inspect; (ii) HITL validation (issue #11); (iii) human visual review | `live_terminal_run({ command: "bash scripts/dev-watch-tui.sh --branch" })` then `live_terminal_read` / send keys / `live_terminal_close({ kill: true })` | ephemeral |
 
 **Rule**: every TUI slice ships a Mode B test. Mode C is for debugging or HITL, not for "I think it works."
