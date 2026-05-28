@@ -89,3 +89,13 @@ Under `~/.cache/checkouts/github.com/statelyai/xstate/`:
 2. Effects are explicit data, not inline calls.
 3. Async results carry a generation token so the workspace can ignore stale ones.
 4. State is private; the only way in is an intent.
+
+## Refresh
+
+If `~/.cache/checkouts/github.com/statelyai/xstate/` is missing, refresh with:
+
+```sh
+bash ~/.agents/skills/librarian/checkout.sh statelyai/xstate --path-only
+```
+
+Do not write a new XState claim in this file or in the ADRs without grounding it in the cached source.

@@ -29,14 +29,30 @@ These notes document the external projects we studied while shaping the **Diff W
 
 Most of the design dialogue happened in thread `T-019e4443-e447-71e1-b9f4-0f035069d83c`. Use `read_thread` against that ID if you want the original conversation. Key user-owned decisions captured there are also in the `CONTEXT.md` and the ADRs.
 
-## Local checkouts
+## Local checkouts — ground every external claim in real source
 
-The repos are cached locally under `~/.cache/checkouts/github.com/`:
+The reference repos are cached locally under `~/.cache/checkouts/github.com/`. **Read them directly before claiming how any of these projects work.** Do not infer; grep the source.
 
-- `ProseMirror/*`
-- `statelyai/xstate`
-- `badlogic/pi-mono`
-- `pierrecomputer/pierre` (at tag `pierre-v1.2.1`)
+| Repo | Local path |
+|---|---|
+| ProseMirror core | `~/.cache/checkouts/github.com/ProseMirror/prosemirror` |
+| ProseMirror state | `~/.cache/checkouts/github.com/ProseMirror/prosemirror-state` |
+| ProseMirror view | `~/.cache/checkouts/github.com/ProseMirror/prosemirror-view` |
+| ProseMirror commands | `~/.cache/checkouts/github.com/ProseMirror/prosemirror-commands` |
+| ProseMirror keymap | `~/.cache/checkouts/github.com/ProseMirror/prosemirror-keymap` |
+| ProseMirror history | `~/.cache/checkouts/github.com/ProseMirror/prosemirror-history` |
+| XState | `~/.cache/checkouts/github.com/statelyai/xstate` |
+| pi-mono | `~/.cache/checkouts/github.com/badlogic/pi-mono` |
+| pierre | `~/.cache/checkouts/github.com/pierrecomputer/pierre` |
+
+If a path is missing or stale, refresh it via the `librarian` skill:
+
+```sh
+bash ~/.agents/skills/librarian/checkout.sh <owner>/<repo> --path-only
+# e.g. bash ~/.agents/skills/librarian/checkout.sh pierrecomputer/pierre --path-only
+```
+
+Add `--force-update` to force a fetch. **Do not write a new research claim without grounding it in the checkout.**
 
 ## What this folder is NOT
 

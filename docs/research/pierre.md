@@ -118,3 +118,13 @@ Under `~/.cache/checkouts/github.com/pierrecomputer/pierre/packages/diffs/src/` 
 3. Dirty flag is flipped by mutation, cleared by rebuild; consumers ask through the owner.
 4. Coalesce input/state-change signals once per event-loop iteration.
 5. Use honest performance language anchored in latency/draw time/coalescing, not framerate.
+
+## Refresh
+
+If `~/.cache/checkouts/github.com/pierrecomputer/pierre/` is missing, refresh with:
+
+```sh
+bash ~/.agents/skills/librarian/checkout.sh pierrecomputer/pierre --path-only
+```
+
+Do not write a new pierre claim in this file or in the ADRs without grounding it in the cached source.

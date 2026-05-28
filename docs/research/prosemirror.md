@@ -64,3 +64,11 @@ Under `~/.cache/checkouts/github.com/ProseMirror/`:
 - `prosemirror-commands/src/commands.ts` — command signatures.
 - `prosemirror-keymap/src/keymap.ts` — keymap plugin.
 - `prosemirror-example-setup/src/index.ts` — assembly, not architecture; useful as a "what gets composed at the edges" reference.
+
+If any of these paths are missing, refresh with the `librarian` skill (one repo at a time):
+
+```sh
+bash ~/.agents/skills/librarian/checkout.sh ProseMirror/prosemirror-state --path-only
+```
+
+Do not write a new ProseMirror claim in this file or in the ADRs without grounding it in the cached source.

@@ -118,3 +118,13 @@ In the user's own `pi-config`:
 3. Async work carries a generation token; stale results are dropped.
 4. Contribution shape should anticipate UI composition (slots, chrome) from day one.
 5. The runtime-loading question is separate from the contribution-shape question. Shape now, runtime later.
+
+## Refresh
+
+If `~/.cache/checkouts/github.com/badlogic/pi-mono/` is missing, refresh with:
+
+```sh
+bash ~/.agents/skills/librarian/checkout.sh badlogic/pi-mono --path-only
+```
+
+Do not write a new pi-mono claim in this file or in the ADRs without grounding it in the cached source.

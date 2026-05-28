@@ -29,6 +29,25 @@ Before making architecture-shaped changes, read in this order:
 
 If a request would surprise any of the above, stop and ask the human owner before changing direction.
 
+### Going deeper: read the cached reference source
+
+When you need more depth on an external pattern that LazyDiff borrows from — ProseMirror decorations/commands/keymaps, XState's `@xstate/store` vs `fromTransition` vs statecharts split, pi-mono's capability contexts and extension surface, Pierre's Virtualizer / sparse height cache / coalesced rendering — read the actual source. The canonical copies are cached at:
+
+```
+~/.cache/checkouts/github.com/ProseMirror/{prosemirror,prosemirror-state,prosemirror-view,prosemirror-commands,prosemirror-keymap,prosemirror-history}
+~/.cache/checkouts/github.com/statelyai/xstate
+~/.cache/checkouts/github.com/badlogic/pi-mono
+~/.cache/checkouts/github.com/pierrecomputer/pierre
+```
+
+Refresh missing/stale paths with the `librarian` skill:
+
+```sh
+bash ~/.agents/skills/librarian/checkout.sh <owner>/<repo> --path-only
+```
+
+**Ground every external-pattern claim in the cached source.** Do not infer behavior from memory or paraphrased prior conversation. If a claim ends up in `docs/research/*.md`, `docs/adr/*.md`, `CONTEXT.md`, or `docs/NORTH_STAR.md`, the agent making the claim must have read the relevant cached source.
+
 ## Diff Workspace architecture
 
 - Use `CONTEXT.md` for canonical language. Prefer **Diff Workspace**, **Visual Row**, **Inline Review Row**, **Diff Decoration**, and **Diff Workspace Owner** as defined there.
