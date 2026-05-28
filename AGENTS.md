@@ -10,6 +10,8 @@ This file is the entry point. It is short on purpose. Read in order; consult spe
 
 - One reviewable slice at a time. `bash scripts/work.sh next` returns the next unblocked issue from the active feature's `issues.json`.
 - Humans own product and architecture decisions. Agents execute slices. For architecture-shaped changes, ask one focused question and wait.
+- Refactors should replace or delete old paths, not wrap them indefinitely. A scaffold slice may add a seam, but follow-up behavior slices should trend toward less code: remove duplicated state, parallel row math, adapter glue, and direct mutation as soon as the new owner covers the behavior.
+- Use TDD for behavior. For new behavior or bug fixes, write the failing focused test first; for TUI-observable behavior, that means a termwright Mode-B test. Behavior-preserving refactors need a characterization test or the issue's verification command before and after.
 - Don't stop on partial progress. Stop conditions live in the active feature's `RULES.md`.
 
 ## Reading order for a new session
