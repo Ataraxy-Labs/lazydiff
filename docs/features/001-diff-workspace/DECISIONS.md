@@ -16,4 +16,4 @@ Keep entries terse. Anything longer than two lines belongs in an ADR or a child 
 
 <!-- newest first; agents append above this comment -->
 
-(no entries yet — feature 001 implementation has not started)
+- 2026-05-28 — Feature 001 superseded by feature 002 clean rewrite — in-place migration was adding adapter glue faster than deleting legacy app architecture; ADR 0009 is now active — no issue

@@ -1,5 +1,7 @@
 # Feature 001 — Diff Workspace: the work list
 
+> Superseded by feature 002 (`docs/features/002-clean-tui-rewrite/`) and ADR 0009. Keep this folder as historical/reference material for bug classes, tests, and parity criteria. Do not continue this issue loop unless a human explicitly asks.
+
 This folder is the externalized issue tracker for the in-flight Diff Workspace migration (feature 001). It is intentionally just a JSON file and a small bash script, not a service. Future features live in sibling folders (`docs/features/002-…/`, etc.).
 
 ## Files

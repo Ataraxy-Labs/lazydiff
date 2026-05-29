@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # work.sh — tiny issue tracker for the active feature's issues.json
 #
-# Active feature folder is resolved from $LAZYDIFF_FEATURE (default: 001-diff-workspace).
+# Active feature folder is resolved from $LAZYDIFF_FEATURE (default: 002-clean-tui-rewrite).
 # Per-feature layout: docs/features/<slug>/{spec.md,plan.md,RULES.md,issues.json,README.md}
 #
 # Commands:
@@ -25,7 +25,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FEATURE="${LAZYDIFF_FEATURE:-001-diff-workspace}"
+FEATURE="${LAZYDIFF_FEATURE:-002-clean-tui-rewrite}"
 FILE="$ROOT/docs/features/$FEATURE/issues.json"
 TMP="$FILE.tmp"
 

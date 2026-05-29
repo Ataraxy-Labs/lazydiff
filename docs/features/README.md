@@ -20,7 +20,8 @@ docs/features/<NNN>-<slug>/
 
 | # | Slug | Status | Purpose |
 |---|---|---|---|
-| 001 | [`001-diff-workspace`](001-diff-workspace/) | in flight | Migrate the Diff surface into a Rust-owned `DiffWorkspace` with unified Visual-Row Stream. Proving ground for the whole-TUI Surface Owner pattern. |
+| 001 | [`001-diff-workspace`](001-diff-workspace/) | superseded | Historical in-place migration attempt. Keep as reference/parity evidence for bug classes and tests. |
+| 002 | [`002-clean-tui-rewrite`](002-clean-tui-rewrite/) | active | Build a clean isolated v2 TUI and v2 diff foundation, then layer app surfaces. |
 
 To switch which feature `scripts/work.sh` operates on:
 
@@ -28,7 +29,7 @@ To switch which feature `scripts/work.sh` operates on:
 LAZYDIFF_FEATURE=002-some-feature bash scripts/work.sh next
 ```
 
-Default is `001-diff-workspace`.
+Default is `002-clean-tui-rewrite`.
 
 ## When to start a new feature folder
 

@@ -6,11 +6,11 @@
     "status": "open | in_progress | done | blocked",
     "type": "AFK (no human needed) | HITL (needs human decision)",
     "phase": "A | B | C | D | E | F (matches plan.md phases) | X (uncategorized)",
-    "parent_id": "integer | null — for split-out child issues",
-    "discovered_during": "integer | null — which issue surfaced this one",
+    "parent_id": "integer | null \u2014 for split-out child issues",
+    "discovered_during": "integer | null \u2014 which issue surfaced this one",
     "blocked_by": "integer[] of issue ids that must be done first",
     "what_to_build": "end-to-end behavior, not layer-by-layer implementation",
-    "acceptance_criteria": "array of { text, done } — tickable via `work tick <id>.<n>`",
+    "acceptance_criteria": "array of { text, done } \u2014 tickable via `work tick <id>.<n>`",
     "verification": "shell command to prove the slice works (cargo test ..., grep, etc.)",
     "north_star_check": "behavioral question the agent re-asks at the end of the slice (see docs/NORTH_STAR.md)",
     "notes": "free-form notes appended over time via `work note`",
@@ -127,7 +127,7 @@
     {
       "id": 4,
       "title": "Migrate keyboard navigation (j/k/cursor) to Visual-Row Stream",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "A",
       "parent_id": null,
@@ -156,14 +156,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::nav && cargo test -p lazydiff-diffs viewer && rg \"viewer_mut\\(\\)\" src/app.rs | wc -l",
       "north_star_check": "Can a contributor add a new motion (e.g. `]c` next-hunk) as one new `NavigateRow` variant + test, without touching the renderer or App?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 5,
-      "title": "Migrate mouse cell→row mapping to Visual-Row Stream",
-      "status": "open",
+      "title": "Migrate mouse cell\u2192row mapping to Visual-Row Stream",
+      "status": "blocked",
       "type": "AFK",
       "phase": "A",
       "parent_id": null,
@@ -171,7 +171,7 @@
       "blocked_by": [
         2
       ],
-      "what_to_build": "Mouse click/move events become a `DiffWorkspaceIntent::MouseAt { cell }` intent. The workspace owner computes `row = scroll.first_visible + click_y` against `frame.rows`. App no longer does mouse → row math; the inline-row click case stops being a special case.",
+      "what_to_build": "Mouse click/move events become a `DiffWorkspaceIntent::MouseAt { cell }` intent. The workspace owner computes `row = scroll.first_visible + click_y` against `frame.rows`. App no longer does mouse \u2192 row math; the inline-row click case stops being a special case.",
       "acceptance_criteria": [
         {
           "text": "Mouse click on an inline review row maps to that inline row (verified by test).",
@@ -192,14 +192,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::mouse && cargo test -p lazydiff-diffs mouse",
       "north_star_check": "Does mouse, keyboard, scroll, and renderer all use the SAME `frame.rows`? Off-by-one in inline rows now impossible?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 6,
       "title": "Grep-gate compulsory item: zero legacy row paths outside workspace.rs",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "A",
       "parent_id": null,
@@ -230,14 +230,14 @@
       ],
       "verification": "rg \"row_count_for_mode|visual_rows_with_inline_blocks|viewer_mut\\(\\)\" src/app.rs src/render src/diff_render && cargo test -p lazydiff workspace",
       "north_star_check": "Did the diff workspace just kill the 'four cooks, one recipe' bug class structurally, not by convention?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 7,
       "title": "Inline draft editor as DiffWorkspace modal enum",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "B",
       "parent_id": null,
@@ -260,20 +260,20 @@
           "done": false
         },
         {
-          "text": "Tests: enter editor, type, submit, cancel — each via intent.",
+          "text": "Tests: enter editor, type, submit, cancel \u2014 each via intent.",
           "done": false
         }
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::editor && rg \"inline_focus\" src/app.rs",
       "north_star_check": "Did the editor stop being a special case that App pokes? Is the editor's existence visible only through `update(intent)`?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 8,
       "title": "Mouse drag selection as DiffWorkspace modal enum (fixes drag-during-scroll)",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "B",
       "parent_id": null,
@@ -302,14 +302,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::drag",
       "north_star_check": "Did 'mouse selection during scroll' stop being a known bug? Is the drag state visible only inside the workspace?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 9,
       "title": "Search prompt as DiffWorkspace modal enum",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "B",
       "parent_id": null,
@@ -328,7 +328,7 @@
           "done": false
         },
         {
-          "text": "Search column/range math is display-cell/grapheme aware (closes plan.md §4 item).",
+          "text": "Search column/range math is display-cell/grapheme aware (closes plan.md \u00a74 item).",
           "done": false
         },
         {
@@ -338,14 +338,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::search && cargo test -p lazydiff-diffs search",
       "north_star_check": "Is search now testable as a single reducer step? Did search-vs-visual-mode coordination stop being App's job?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 10,
       "title": "Text objects: nested + multi-line delimiters, side-filtered",
-      "status": "open",
+      "status": "blocked",
       "type": "HITL",
       "phase": "B",
       "parent_id": null,
@@ -353,7 +353,7 @@
       "blocked_by": [
         9
       ],
-      "what_to_build": "Implement the unfinished text-object work in plan.md §5: `textObjectSearchBounds`, `findDelimitedTextObject`, `findBracketTextObject`, `findQuoteTextObject`, `advanceTextObjectPosition`, `previousTextObjectPosition`, nested delimiters, multi-line objects, newline inclusion flags, side-filtered behavior. HITL because UX of multi-line vs. unsupported cases needs human sign-off before shipping.",
+      "what_to_build": "Implement the unfinished text-object work in plan.md \u00a75: `textObjectSearchBounds`, `findDelimitedTextObject`, `findBracketTextObject`, `findQuoteTextObject`, `advanceTextObjectPosition`, `previousTextObjectPosition`, nested delimiters, multi-line objects, newline inclusion flags, side-filtered behavior. HITL because UX of multi-line vs. unsupported cases needs human sign-off before shipping.",
       "acceptance_criteria": [
         {
           "text": "Nested-delimiter test passes.",
@@ -374,14 +374,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff-diffs text_objects",
       "north_star_check": "Can a contributor add a new text-object kind by adding one algorithm + intent variant without touching renderer or App?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 11,
       "title": "Interactive validation pass: cursor, selection, search, comments, mouse",
-      "status": "open",
+      "status": "blocked",
       "type": "HITL",
       "phase": "B",
       "parent_id": null,
@@ -391,7 +391,7 @@
         8,
         9
       ],
-      "what_to_build": "Run `target/dev-fast/lazydiff --branch` against real repos and walk through cursor motion, side-filtered selection, search, inline comment lifecycle, draft editor lifecycle, mouse drag, and split-view crossings. Record any regressions as child issues. Closes plan.md §0 'Interactive validation' and §3 'Validate visual behavior interactively'.",
+      "what_to_build": "Run `target/dev-fast/lazydiff --branch` against real repos and walk through cursor motion, side-filtered selection, search, inline comment lifecycle, draft editor lifecycle, mouse drag, and split-view crossings. Record any regressions as child issues. Closes plan.md \u00a70 'Interactive validation' and \u00a73 'Validate visual behavior interactively'.",
       "acceptance_criteria": [
         {
           "text": "Validation walkthrough completed against at least two real branches.",
@@ -408,14 +408,14 @@
       ],
       "verification": "cargo build --profile dev-fast && LAZYDIFF_KEY_DEBUG=1 LAZYDIFF_THEME=default-dark ./target/dev-fast/lazydiff --branch",
       "north_star_check": "Did any of the six bug classes (NORTH_STAR) reappear during the walkthrough?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 12,
       "title": "Extract AppShell + AppSurface enum dispatch (router + effect-runner seam)",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "C",
       "parent_id": null,
@@ -444,14 +444,14 @@
       ],
       "verification": "cargo build --profile dev-fast && wc -l src/app.rs",
       "north_star_check": "Does the shell still mutate any surface-private field? It should not.",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 13,
       "title": "Move command palette / file picker / terminal flow under AppShell global-overlay host",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "C",
       "parent_id": null,
@@ -476,14 +476,14 @@
       ],
       "verification": "cargo test -p lazydiff shell::overlays",
       "north_star_check": "Can a contributor register a new global overlay without editing `AppShell` internals?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 14,
       "title": "Centralize tokio::spawn behind EffectRunner; results return as typed intents",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "D",
       "parent_id": null,
@@ -508,14 +508,14 @@
       ],
       "verification": "rg \"tokio::spawn\" src | rg -v effect_runner && cargo test -p lazydiff effect_runner",
       "north_star_check": "Can a surface's reducer be tested in isolation by feeding it a fake `*Loaded` intent?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 15,
       "title": "GenerationToken on PR metadata + PR comments + blob loads",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "D",
       "parent_id": null,
@@ -540,14 +540,14 @@
       ],
       "verification": "cargo test -p lazydiff workspace::generation_tokens",
       "north_star_check": "Did the 'stale forge data overwrites active surface after navigation' bug class become structurally impossible?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 16,
       "title": "GenerationToken on review submit + persistence writes",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "D",
       "parent_id": null,
@@ -566,20 +566,20 @@
           "done": false
         },
         {
-          "text": "Test: submit then navigate away before result returns — record finalizes in cache, not on surface.",
+          "text": "Test: submit then navigate away before result returns \u2014 record finalizes in cache, not on surface.",
           "done": false
         }
       ],
       "verification": "cargo test -p lazydiff effect_runner::submit",
       "north_star_check": "Did 'optimistic submit lands on wrong record' become impossible?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 17,
       "title": "ContributionRegistry skeleton + Command + Keymap entry kinds",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "E",
       "parent_id": null,
@@ -604,14 +604,14 @@
       ],
       "verification": "cargo test -p lazydiff registry",
       "north_star_check": "Can a contributor register a new command + keybinding in one file without editing `AppShell`?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 18,
       "title": "Migrate existing keybindings to registry (built-in defaults only)",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "E",
       "parent_id": null,
@@ -636,14 +636,14 @@
       ],
       "verification": "cargo test -p lazydiff && rg \"KeyCode::Char\\(\" src/app.rs",
       "north_star_check": "Adding a new keybinding is now one line in one file; verify by adding a dummy and removing it.",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 19,
       "title": "Command palette consumes registry instead of hard-coded list",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "E",
       "parent_id": null,
@@ -668,14 +668,14 @@
       ],
       "verification": "cargo test -p lazydiff command_palette",
       "north_star_check": "Adding a new palette entry is now a registry call; the palette UI changed zero lines.",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 20,
       "title": "Status chrome as Chrome Slot contributions",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "E",
       "parent_id": null,
@@ -700,14 +700,14 @@
       ],
       "verification": "cargo test -p lazydiff chrome",
       "north_star_check": "Can a contributor add a 'branch name' or 'AI risk score' chip without editing the renderer?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 21,
       "title": "Inline review rows as InlineRowProducer contributions",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "E",
       "parent_id": null,
@@ -733,14 +733,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::producers",
       "north_star_check": "Can a contributor add 'AI risk markers' or 'coverage hints' as a producer without touching the workspace owner?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 22,
       "title": "Built-in FoldStrategy contributions (unchanged-context, generated-file, imports)",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "E",
       "parent_id": null,
@@ -749,7 +749,7 @@
         6,
         17
       ],
-      "what_to_build": "Per ADR 0005 + ADR 0008: ship the workspace's fold support and three built-in strategies — unchanged-context fold, generated-file fold (matches `*.lock`, `dist/`, snapshots), and imports fold. Toggle is a `ToggleFold(fold_id)` intent; collapsed ranges become `FoldSummary` rows in the Visual-Row Stream.",
+      "what_to_build": "Per ADR 0005 + ADR 0008: ship the workspace's fold support and three built-in strategies \u2014 unchanged-context fold, generated-file fold (matches `*.lock`, `dist/`, snapshots), and imports fold. Toggle is a `ToggleFold(fold_id)` intent; collapsed ranges become `FoldSummary` rows in the Visual-Row Stream.",
       "acceptance_criteria": [
         {
           "text": "`Fold`, `FoldCandidate`, `FoldStrategy`, `FoldSummary` types exist in workspace.",
@@ -770,14 +770,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff workspace::folds",
       "north_star_check": "Can a contributor add a new fold strategy (e.g. 'fold whitespace-only hunks') as one registered function without touching the workspace owner or renderer?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 23,
       "title": "SemanticSurface owner: private scroll/selection/expansion state",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "F",
       "parent_id": null,
@@ -802,14 +802,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff semantic_surface",
       "north_star_check": "Does Semantic now use the same shape as Diff Workspace, proving the pattern is reusable?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 24,
       "title": "FinderSurface owner",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "F",
       "parent_id": null,
@@ -834,14 +834,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff finder_surface",
       "north_star_check": "Same shape as Diff Workspace + Semantic? Pattern still holding?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 25,
       "title": "ReviewSidebarSurface owner",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "F",
       "parent_id": null,
@@ -860,20 +860,20 @@
           "done": false
         },
         {
-          "text": "Cross-surface coordination (sidebar selection → diff jump) is an effect, not a direct mutation.",
+          "text": "Cross-surface coordination (sidebar selection \u2192 diff jump) is an effect, not a direct mutation.",
           "done": false
         }
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff review_sidebar_surface",
       "north_star_check": "Is cross-surface coordination now an effect (one surface emits, another receives as intent)?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 26,
       "title": "CommitListSurface + QueueSurface owners",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "F",
       "parent_id": null,
@@ -899,14 +899,14 @@
       ],
       "verification": "bash scripts/tui-verify.sh && cargo test -p lazydiff commit_list_surface queue_surface",
       "north_star_check": "Did inline forge calls disappear from these surfaces?",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     },
     {
       "id": 27,
       "title": "All persistence + forge writes go through EffectRunner (no inline IO from surfaces)",
-      "status": "open",
+      "status": "blocked",
       "type": "AFK",
       "phase": "F",
       "parent_id": null,
@@ -931,7 +931,7 @@
       ],
       "verification": "rg \"fs::write|tokio::fs::write|reqwest|forge_client::\" src/app | rg -v effect_runner",
       "north_star_check": "Does any surface still perform IO directly? If yes, this slice is not done.",
-      "notes": "",
+      "notes": "Superseded by feature 002 clean TUI rewrite per ADR 0009; keep this issue as reference/parity evidence, not active work.",
       "created_at": "2026-05-28T00:00:00Z",
       "updated_at": "2026-05-28T00:00:00Z"
     }

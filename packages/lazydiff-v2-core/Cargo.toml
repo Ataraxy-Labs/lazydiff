@@ -1,0 +1,8 @@
+[package]
+name = "lazydiff-v2-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lazydiff-v2-diff = { path = "../lazydiff-v2-diff" }
+lazydiff-v2-protocol = { path = "../lazydiff-v2-protocol" }

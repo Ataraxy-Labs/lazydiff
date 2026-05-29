@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "issues": [
+    {
+      "id": 1,
+      "title": "Create isolated v2 packages, runtime server seam, and TUI/GUI client bases",
+      "status": "done",
+      "type": "AFK",
+      "phase": "A",
+      "parent_id": null,
+      "discovered_during": null,
+      "blocked_by": [],
+      "what_to_build": "Create `packages/lazydiff-v2-{protocol,diff,core}` plus `apps/lazydiff-v2-{server,tui,gui}` isolated from legacy `src/app.rs`. The server owns AppCore/runtime state and serves semantic frames. TUI and GUI apps are thin clients/renderers that consume the same frame data and do not own product behavior directly.",
+      "acceptance_criteria": [
+        {
+          "text": "`packages/lazydiff-v2-diff` exists and exposes a small parsed-diff interface.",
+          "done": true
+        },
+        {
+          "text": "`packages/lazydiff-v2-protocol` exists and defines renderer-agnostic semantic frames.",
+          "done": true
+        },
+        {
+          "text": "`packages/lazydiff-v2-core` exists and owns the initial AppCore/contribution registry.",
+          "done": true
+        },
+        {
+          "text": "`apps/lazydiff-v2-server` exists and serves a patch-backed frame without importing legacy `src/app.rs` modules.",
+          "done": true
+        },
+        {
+          "text": "`apps/lazydiff-v2-tui` exists and renders server frames without importing legacy `src/app.rs` modules.",
+          "done": true
+        },
+        {
+          "text": "`apps/lazydiff-v2-gui` exists and renders server frames without importing legacy `src/app.rs` modules.",
+          "done": true
+        },
+        {
+          "text": "The first protocol boundary is explicit: TUI and GUI client code translate server frame data into host output and do not own diff navigation/product state.",
+          "done": true
+        },
+        {
+          "text": "`cargo run -p lazydiff-v2-server -- patch <file>` serves a semantic frame.",
+          "done": true
+        },
+        {
+          "text": "`cargo run -p lazydiff-v2-tui -- --server <host:port>` renders file names and diff lines from the server.",
+          "done": true
+        },
+        {
+          "text": "`cargo run -p lazydiff-v2-gui -- --server <host:port>` consumes the same server frame.",
+          "done": true
+        },
+        {
+          "text": "Focused unit tests cover the v2 diff parser smoke path.",
+          "done": true
+        }
+      ],
+      "verification": "cargo test -p lazydiff-v2-protocol -p lazydiff-v2-diff -p lazydiff-v2-core -p lazydiff-v2-server -p lazydiff-v2-tui && cargo check -p lazydiff-v2-gui && cargo run -p lazydiff-v2-server -- --help && cargo run -p lazydiff-v2-tui -- --help && cargo run -p lazydiff-v2-gui -- --help",
+      "north_star_check": "Did this create an isolated server-owned v2 seam without adding adapter glue to the legacy app or baking product behavior into the TUI/GUI renderers?",
+      "notes": "",
+      "created_at": "2026-05-28T00:00:00Z",
+      "updated_at": "2026-05-29T15:05:07Z"
+    },
+    {
+      "id": 2,
+      "title": "Add termwright smoke test for v2 diff rendering",
+      "status": "done",
+      "type": "AFK",
+      "phase": "A",
+      "parent_id": null,
+      "discovered_during": null,
+      "blocked_by": [
+        1
+      ],
+      "what_to_build": "Add `scripts/test-v2-diff-render-termwright.sh` and include it in `scripts/tui-verify.sh` discovery by naming convention. It should stage a synthetic diff, run `lazydiff-v2`, and assert file name plus added/removed/context lines render.",
+      "acceptance_criteria": [
+        {
+          "text": "Termwright v2 diff render smoke test exists and is executable.",
+          "done": true
+        },
+        {
+          "text": "The test asserts file name and changed lines are visible.",
+          "done": true
+        },
+        {
+          "text": "`bash scripts/tui-verify.sh v2-diff-render` passes.",
+          "done": true
+        }
+      ],
+      "verification": "bash scripts/tui-verify.sh v2-diff-render",
+      "north_star_check": "Does v2 get Mode-B coverage from the first TUI-visible slice?",
+      "notes": "",
+      "created_at": "2026-05-28T00:00:00Z",
+      "updated_at": "2026-05-29T15:06:52Z"
+    }
+  ]
+}

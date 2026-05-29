@@ -2,7 +2,7 @@
 
 LazyDiff is a terminal-first **"build your own diff / build your own code review"** workspace.
 
-Architecturally it is a **pi-mono-style extensible Rust core**: one stable diff/review workspace with bounded contribution seams for custom commands, keymaps, inline rows, decorations, chrome slots, fold strategies, and review actions — without forking the core.
+Architecturally it is a **pi-mono-style extensible Rust core**: one stable diff/review workspace with bounded contribution seams for custom commands, keymaps, inline rows, decorations, chrome slots, fold strategies, and review actions — without forking the core. ADR 0009 moves active work to a clean v2 rewrite; legacy app code is reference material, not the target architecture.
 
 This file is the entry point. It is short on purpose. Read in order; consult specifics on demand.
 
@@ -10,7 +10,8 @@ This file is the entry point. It is short on purpose. Read in order; consult spe
 
 - One reviewable slice at a time. `bash scripts/work.sh next` returns the next unblocked issue from the active feature's `issues.json`.
 - Humans own product and architecture decisions. Agents execute slices. For architecture-shaped changes, ask one focused question and wait.
-- Refactors should replace or delete old paths, not wrap them indefinitely. A scaffold slice may add a seam, but follow-up behavior slices should trend toward less code: remove duplicated state, parallel row math, adapter glue, and direct mutation as soon as the new owner covers the behavior.
+- Active rewrite work belongs in v2 modules/crates (`src/rewrite/`, `src/bin/lazydiff-v2.rs`, `crates/lazydiff-v2-diff`). Do not continue feature 001 or mutate legacy `src/app.rs` architecture unless explicitly asked.
+- Refactors and rewrite slices should replace or delete old paths, not wrap them indefinitely. A scaffold slice may add a seam, but follow-up behavior slices should trend toward less code: remove duplicated state, parallel row math, adapter glue, and direct mutation as soon as the new owner covers the behavior.
 - Use TDD for behavior. For new behavior or bug fixes, write the failing focused test first; for TUI-observable behavior, that means a termwright Mode-B test. Behavior-preserving refactors need a characterization test or the issue's verification command before and after.
 - Don't stop on partial progress. Stop conditions live in the active feature's `RULES.md`.
 
@@ -18,10 +19,10 @@ This file is the entry point. It is short on purpose. Read in order; consult spe
 
 1. `docs/NORTH_STAR.md` — mission, bug classes, architecture invariants, end-of-slice done-check.
 2. `CONTEXT.md` — canonical vocabulary. Use these names.
-3. `docs/adr/0001`…`0008` — accepted architecture decisions.
+3. `docs/adr/0001`…`0009` — accepted architecture decisions; 0009 makes the clean rewrite active.
 4. `docs/research/synthesis.md` then per-source notes — *why* each external pattern shaped a decision.
 5. `docs/learning/ownership-walkthrough.md` — Rust ownership as architecture boundary.
-6. `docs/features/001-diff-workspace/` — active feature (`spec.md`, `plan.md`, `RULES.md`, `issues.json`, `DECISIONS.md`, `README.md`).
+6. `docs/features/002-clean-tui-rewrite/` — active feature (`spec.md`, `plan.md`, `RULES.md`, `issues.json`, `DECISIONS.md`, `README.md`). Feature 001 is historical/reference.
 7. `docs/TUI_VERIFICATION.md` — three verification modes; Mode B (termwright) is default for TUI-observable slices.
 
 ## Always-on docs
@@ -47,7 +48,7 @@ This file is the entry point. It is short on purpose. Read in order; consult spe
 | `DECISIONS.md` | Append-only deviation log. |
 | `README.md` | Tracker + per-slice TDD loop. |
 
-`scripts/work.sh` resolves the active feature from `$LAZYDIFF_FEATURE` (default `001-diff-workspace`). Index at `docs/features/README.md`.
+`scripts/work.sh` resolves the active feature from `$LAZYDIFF_FEATURE` (default `002-clean-tui-rewrite`). Index at `docs/features/README.md`.
 
 ## When you deviate from the plan
 

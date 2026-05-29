@@ -9,6 +9,18 @@ readme = "README.md"
 keywords = ["git", "diff", "tui", "review"]
 categories = ["command-line-utilities", "development-tools"]
 
+[workspace]
+members = [
+    ".",
+    "apps/lazydiff-v2-gui",
+    "apps/lazydiff-v2-server",
+    "apps/lazydiff-v2-tui",
+    "crates/lazydiff-diffs",
+    "packages/lazydiff-v2-core",
+    "packages/lazydiff-v2-diff",
+    "packages/lazydiff-v2-protocol",
+]
+
 [dependencies]
 color-eyre = "0.6"
 convex = { version = "0.10.4", default-features = false, features = ["rustls-tls-webpki-roots"] }

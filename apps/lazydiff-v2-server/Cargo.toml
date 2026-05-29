@@ -1,0 +1,14 @@
+[package]
+name = "lazydiff-v2-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "lazydiff-v2-server"
+path = "src/main.rs"
+
+[dependencies]
+color-eyre = "0.6"
+lazydiff-v2-core = { path = "../../packages/lazydiff-v2-core" }
+lazydiff-v2-protocol = { path = "../../packages/lazydiff-v2-protocol" }
+serde_json = "1"
