@@ -1,11 +1,7 @@
-use std::{
-    env,
-    io::{ErrorKind, Read as _, Write as _},
-    net::{Shutdown, TcpStream},
-};
+use std::env;
 
 use color_eyre::Result;
-use lazydiff_v2_protocol::AppFrame;
+use lazydiff_v2_client::{ClientWorkspace, fetch_frame};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -18,8 +14,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let server = parse_server(&args)?;
-    let frame = fetch_frame(server)?;
-    print!("{}", render_terminal(&frame));
+    let workspace = ClientWorkspace::from_frame(fetch_frame(server)?);
+    print!("{}", workspace.terminal_text());
     Ok(())
 }
 
@@ -32,52 +28,6 @@ fn parse_server(args: &[String]) -> Result<&str> {
             help_text()
         )),
     }
-}
-
-fn fetch_frame(server: &str) -> Result<AppFrame> {
-    let server = server.trim_start_matches("http://");
-    let mut stream = TcpStream::connect(server)?;
-    write!(
-        stream,
-        "GET /frame HTTP/1.1\r\nhost: {server}\r\nconnection: close\r\n\r\n"
-    )?;
-    stream.shutdown(Shutdown::Write)?;
-    let response = read_response(&mut stream)?;
-    let response = String::from_utf8(response)?;
-    let (_, body) = response
-        .split_once("\r\n\r\n")
-        .or_else(|| response.split_once("\n\n"))
-        .ok_or_else(|| color_eyre::eyre::eyre!("invalid server response: {:?}", response))?;
-    Ok(serde_json::from_str(body)?)
-}
-
-fn read_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    let mut response = Vec::new();
-    let mut buffer = [0; 4096];
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(bytes_read) => response.extend_from_slice(&buffer[..bytes_read]),
-            Err(error) if error.kind() == ErrorKind::ConnectionReset && !response.is_empty() => {
-                break;
-            }
-            Err(error) => {
-                return Err(error.into());
-            }
-        }
-    }
-    Ok(response)
-}
-
-fn render_terminal(frame: &AppFrame) -> String {
-    let mut output = String::new();
-    output.push_str("LazyDiff v2 terminal\n");
-    output.push_str(&format!("rows: {}\n", frame.diff.total_rows));
-    for row in &frame.diff.rows {
-        output.push_str(&row.text);
-        output.push('\n');
-    }
-    output
 }
 
 fn help_text() -> &'static str {

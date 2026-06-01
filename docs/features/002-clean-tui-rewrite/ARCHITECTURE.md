@@ -4,7 +4,7 @@ This document is the durable version of the rewrite foundation discussed in chat
 
 The rewrite goal is not to avoid complexity. The goal is to put essential complexity behind deep modules so the app does not re-grow a god object.
 
-The app target is not “a better TUI only.” The target is one local Rust runtime server mounted by multiple renderer clients. The terminal client ships first; a GPUI/gpui-component client consumes the same protocol frames and dispatches the same intents.
+The app target is not “a better TUI only.” The target is one local Rust runtime server plus one shared client core mounted by multiple renderer clients. The terminal client ships first; a GPUI/gpui-component client consumes the same protocol frames and shares the same renderer-independent interaction logic. Only the host resources and final UI components differ.
 
 ## Reference lessons we are carrying forward
 
@@ -48,10 +48,11 @@ GPUI and gpui-component give us windowing, focus, overlay/root layers, scroll ha
 
 GUI guidance:
 
-- server-owned core owns `VisualRowIndex`, row identities, cursor, folds, commands, and effects;
-- GPUI adapter owns GPUI entities, focus handles, scroll handles, and element construction;
+- server-owned core owns semantic row identities, workspace data, commands, contribution resolution, validation, and effects;
+- shared client core owns cursor movement, scroll anchoring, selection, keymap application, command target construction, frame caching, and viewport requests;
+- GPUI adapter owns GPUI entities, focus handles, pixel scroll handles, measurement caches, and element construction;
 - virtualized GUI rows correspond to core visual rows;
-- GPUI actions/key bindings translate into the same protocol commands/intents used by the TUI;
+- GPUI actions/key bindings translate into the same shared client-core intents used by the TUI;
 - GPUI overlays/dialogs mount shared command/help data rather than duplicating context rules.
 
 ### Pierre — one geometry owner, sparse work
@@ -152,20 +153,35 @@ The paint-ready, viewport-only model consumed by renderer adapters. The renderer
 
 The model should contain semantic row data and stable IDs, not terminal-specific cells. TUI can lower it to styled spans/cells; GPUI can lower it to elements, virtual-list items, and theme colors.
 
+### `SharedClientCore`
+
+The renderer-independent client library used by both TUI and GPUI. It owns local interaction state that should not be mirrored across clients by default: cursor/current row, scroll anchor, selection in progress, palette query text, local overlay stack, frame cache, and viewport requests.
+
+It exposes a small reducer/effect API:
+
+```rust
+fn update(intent: ClientIntent) -> Vec<ClientEffect>;
+fn view_model() -> ClientViewModel<'_>;
+```
+
+Examples of `ClientEffect`: request a new frame from the server, send a command request with an explicit semantic target, copy text through a host capability, or ask the host to open a URL.
+
+The shared client core is where Vim navigation, selection behavior, command targeting, and keymap application live so TUI and GPUI do not reimplement app behavior separately.
+
 ### `RendererClient`
 
-A thin host-specific edge that turns host events into protocol messages and server frames into host paint primitives.
+A thin host-specific edge that turns host events into shared client-core intents, performs client-core effects against the server protocol and host capabilities, and lowers client view models into host paint primitives.
 
 Examples:
 
 - terminal adapter: crossterm/ratatui events and cells;
 - GPUI adapter: gpui actions, focus, windows, virtual lists, and elements.
 
-The client may own host resources, but not product state such as review context, diff cursor, command availability, PR/local behavior, or navigation semantics.
+The renderer client may own host resources, but not product state such as review context, command availability, PR/local behavior, or navigation semantics. Cursor, selection, and scroll interaction behavior belong in shared client core, not separately in the TUI and GPUI apps.
 
 ### `RuntimeServer`
 
-The local Rust process that owns AppCore and serves protocol frames/events to renderers. It is the single product runtime for TUI and GUI, similar to a local sidecar. It can start as a simple localhost server and grow into streaming events, subscriptions, and richer client requests without moving product behavior into renderers.
+The local Rust process that owns AppCore and serves protocol frames/events to renderers. It is the single product runtime for TUI and GUI, similar to a local sidecar. It can start as a simple localhost server and grow into streaming events, subscriptions, and richer client requests without moving product behavior into renderers. It does not own per-client cursor/scroll/selection by default; clients send explicit semantic targets when invoking commands.
 
 ### `DiffWorkspace`
 
@@ -205,17 +221,21 @@ A coherent interactive screen with one owner: Diff Workspace, Command Palette, F
 ## Whole-app architecture
 
 ```diagram
-                    local Rust runtime server
+              local Rust runtime server + shared client core
 ╭────────────────────────────────────────────────────────────╮
 │                    RuntimeServer + AppCore                  │
 │                                                            │
-│  AppShell + surfaces + commands + effects + contributions │
+│  workspaces + commands + effects + contributions + frames  │
 ╰────────────────────────────────────────────────────────────╯
                               ▲
                               │ protocol events/frames
-              ╭───────────────┴────────────────╮
-              │                                │
-              ▼                                ▼
+                              ▼
+╭────────────────────────────────────────────────────────────╮
+│                  SharedClientCore                           │
+│ cursor, scroll anchor, selection, keymaps, command targets │
+╰───────────────┬────────────────────────────┬───────────────╯
+                │                            │
+                ▼                            ▼
 ╭────────────────────────────╮     ╭────────────────────────────╮
 │ Terminal Renderer Client    │     │ GPUI Renderer Client        │
 │ crossterm/ratatui/termwright│     │ gpui/gpui-component         │
@@ -290,7 +310,7 @@ Inside the shared core:
 
 ## Renderer boundary
 
-The renderer boundary is the rule that keeps the GUI honest. The terminal and GPUI clients are allowed to differ in paint and host mechanics only.
+The renderer boundary is the rule that keeps the GUI honest. The terminal and GPUI clients are allowed to differ in paint and host mechanics only. Renderer-independent client behavior lives in shared client core.
 
 ```diagram
 ╭────────────────────────────────────────────╮
@@ -300,12 +320,17 @@ The renderer boundary is the rule that keeps the GUI honest. The terminal and GP
                    ▼
 ╭────────────────────────────────────────────╮
 │ RendererAdapter                             │
-│ normalize into protocol event/request       │
+│ normalize into ClientIntent                 │
+╰──────────────────┬─────────────────────────╯
+                   ▼
+╭────────────────────────────────────────────╮
+│ SharedClientCore                            │
+│ cursor/selection/scroll + command targets   │
 ╰──────────────────┬─────────────────────────╯
                    ▼
 ╭────────────────────────────────────────────╮
 │ RuntimeServer + shared AppCore              │
-│ command context, reducers, effects          │
+│ workspace data, validation, reducers, IO     │
 ╰──────────────────┬─────────────────────────╯
                    ▼
 ╭────────────────────────────────────────────╮
@@ -314,22 +339,23 @@ The renderer boundary is the rule that keeps the GUI honest. The terminal and GP
 ╰──────────────────┬─────────────────────────╯
                    ▼
 ╭────────────────────────────────────────────╮
-│ RendererClient                              │
-│ lower to terminal cells or GPUI elements    │
+│ SharedClientCore + RendererClient           │
+│ cache/target frame, lower to host UI         │
 ╰────────────────────────────────────────────╯
 ```
 
 Renderer-specific ownership is allowed for:
 
 - terminal handles, alternate screen, raw mode, ratatui layout values;
-- GPUI entities, windows, focus handles, scroll handles, themes, and `VirtualList` item sizes;
+- GPUI entities, windows, focus handles, pixel scroll handles, themes, animations, and `VirtualList` item sizes;
 - host-specific measurement caches that do not decide product behavior.
 
 Renderer-specific ownership is not allowed for:
 
 - command availability and help contents;
 - PR/local/raw-patch context rules;
-- diff cursor, visual row identity, folds, or search state;
+- visual row identity, folds, or search/product state;
+- cursor movement, selection behavior, keymap application, command target construction, or scroll anchoring duplicated separately in TUI and GPUI;
 - `Esc` semantics and navigation stack policy;
 - effect execution policy beyond host IO plumbing.
 
@@ -345,11 +371,17 @@ For GPUI, the intended shape is:
 │ LazyDiffGpuiClient          │
 │ owns Entity handles only    │
 ╰─────────────┬──────────────╯
-              │ reads frame / sends protocol events
+              │ host events / paint models
+              ▼
+╭────────────────────────────╮
+│ SharedClientCore            │
+│ cursor, selection, targets  │
+╰─────────────┬──────────────╯
+              │ protocol requests / frames
               ▼
 ╭────────────────────────────╮
 │ RuntimeServer + AppCore     │
-│ AppShell + DiffWorkspace    │
+│ workspace + contributions   │
 ╰─────────────┬──────────────╯
               │ frame rows
               ▼
@@ -600,13 +632,46 @@ Later Vim motions (`w`, `b`, `e`), visual mode, yanking, search, and text object
 packages/lazydiff-v2-protocol/ # semantic frames and client/server messages
 packages/lazydiff-v2-diff/     # parser, document, visual rows, display map, diff frames
 packages/lazydiff-v2-core/     # AppCore, AppShell shape, commands, contributions, effects
+packages/lazydiff-v2-client/   # shared TUI/GUI interaction state and client reducers
 
 apps/lazydiff-v2-server/       # local runtime server
 apps/lazydiff-v2-tui/          # terminal client/renderer only
 apps/lazydiff-v2-gui/          # GPUI client/renderer only
 ```
 
-The first implementation may keep some modules small or skeletal, but the seams should exist from day one. Separate packages are justified here because they enforce the server/client dependency direction and keep GPUI dependencies out of protocol, diff, core, server, and TUI builds.
+The first implementation may keep some modules small or skeletal, but the seams should exist from day one. Separate packages are justified here because they enforce the server/client dependency direction, allow TUI and GPUI to share client behavior, and keep GPUI dependencies out of protocol, diff, core, server, and shared client builds.
+
+## Server vs shared-client ownership
+
+LazyDiff v2 is server-authoritative for workspace data, contribution resolution, command validation, and effects. Renderer clients are authoritative for host resources and physical presentation. Shared client core is authoritative for renderer-independent local interaction behavior.
+
+| Concern | Owner | Shared between TUI/GUI? |
+|---|---|---|
+| Diff document, PR metadata, submitted comments | Runtime server | Yes |
+| Stable file/hunk/line/visual row IDs | Runtime server | Yes |
+| Command/keymap definitions and plugin contributions | Runtime server | Yes |
+| Command validation and IO/effects | Runtime server | Yes |
+| Cursor/current row movement | Shared client core | Same behavior, independent state per client |
+| Scroll anchoring and viewport requests | Shared client core | Same behavior, independent state per client |
+| Selection behavior and command target construction | Shared client core | Same behavior, independent state per client |
+| Keymap application to client intents | Shared client core | Same behavior, independent state per client |
+| Frame cache and semantic viewport hints | Shared client core | Same behavior, independent cache per client |
+| Terminal raw mode/cells and GPUI entities/focus/pixels | Renderer app | No |
+| Hover, animation, measured row heights | Renderer app | No |
+
+Commands sent to the server include explicit semantic targets instead of relying on a server-side cursor:
+
+```rust
+struct CommandRequest {
+    workspace_id: WorkspaceId,
+    command: CommandId,
+    target: Option<SemanticTarget>,
+    selection: Option<SemanticSelection>,
+    client_context: ClientContext,
+}
+```
+
+This keeps TUI and GUI independent by default while sharing the code that determines what a keypress, selection, scroll, or command target means.
 
 ## First milestone
 

@@ -9,5 +9,4 @@ path = "src/main.rs"
 
 [dependencies]
 color-eyre = "0.6"
-lazydiff-v2-protocol = { path = "../../packages/lazydiff-v2-protocol" }
-serde_json = "1"
+lazydiff-v2-client = { path = "../../packages/lazydiff-v2-client" }

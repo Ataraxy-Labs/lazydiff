@@ -3735,6 +3735,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazydiff-v2-client"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "lazydiff-v2-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazydiff-v2-core"
 version = "0.1.0"
 dependencies = [
@@ -3757,7 +3767,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
- "lazydiff-v2-protocol",
+ "lazydiff-v2-client",
  "serde_json",
 ]
 
@@ -3783,8 +3793,7 @@ name = "lazydiff-v2-tui"
 version = "0.1.0"
 dependencies = [
  "color-eyre",
- "lazydiff-v2-protocol",
- "serde_json",
+ "lazydiff-v2-client",
 ]
 
 [[package]]

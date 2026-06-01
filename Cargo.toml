@@ -16,6 +16,7 @@ members = [
     "apps/lazydiff-v2-server",
     "apps/lazydiff-v2-tui",
     "crates/lazydiff-diffs",
+    "packages/lazydiff-v2-client",
     "packages/lazydiff-v2-core",
     "packages/lazydiff-v2-diff",
     "packages/lazydiff-v2-protocol",
