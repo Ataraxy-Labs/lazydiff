@@ -1431,16 +1431,16 @@ mod tests {
     }
 
     fn file(lines: Vec<DiffLine>) -> FileDiff {
-        FileDiff {
-            old_path: Some("a".into()),
-            new_path: "a".into(),
-            hunks: vec![Hunk {
+        FileDiff::new(
+            Some("a".into()),
+            "a".into(),
+            vec![Hunk {
                 old_start: 1,
                 new_start: 1,
                 header: String::new(),
                 lines,
             }],
-        }
+        )
     }
 
     #[test]

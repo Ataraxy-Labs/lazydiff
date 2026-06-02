@@ -66,6 +66,7 @@ pub(super) enum DiffBufferAction {
     NextNote,
     PreviousNote,
     ToggleSideBySide,
+    ToggleFileTree,
     SwitchSide,
     OpenCommandPalette,
     OpenFileFinder,
@@ -195,6 +196,9 @@ impl DiffBufferState {
             KeyCode::Char('e') if self.pending.keys == " " => {
                 self.accept(DiffBufferAction::OpenFileFinder)
             }
+            KeyCode::Char('t') if self.pending.keys == " " => {
+                self.accept(DiffBufferAction::ToggleFileTree)
+            }
             KeyCode::Char('/') if key.modifiers.is_empty() => {
                 self.pending.clear();
                 self.viewer.search.query.clear();
@@ -291,15 +295,36 @@ impl DiffBufferState {
                 self.mode = DiffBufferMode::Normal;
                 DiffBufferAction::Cancel
             }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.mode = DiffBufferMode::Normal;
+                DiffBufferAction::Cancel
+            }
             KeyCode::Enter => {
                 self.mode = DiffBufferMode::Normal;
                 DiffBufferAction::SearchAccept
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace
+                if key.modifiers.is_empty() || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
                 self.viewer.search.query.pop();
                 DiffBufferAction::SearchChanged
             }
-            KeyCode::Char(ch) if !ch.is_control() && key.modifiers.is_empty() => {
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.viewer.search.query.pop();
+                DiffBufferAction::SearchChanged
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.viewer.search.query.clear();
+                DiffBufferAction::SearchChanged
+            }
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                delete_previous_search_word(&mut self.viewer.search.query);
+                DiffBufferAction::SearchChanged
+            }
+            KeyCode::Char(ch)
+                if !ch.is_control()
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+            {
                 self.viewer.search.query.push(ch);
                 DiffBufferAction::SearchChanged
             }
@@ -389,6 +414,15 @@ fn shifted_text_object_char(ch: char) -> char {
     }
 }
 
+fn delete_previous_search_word(query: &mut String) {
+    while query.ends_with(char::is_whitespace) {
+        query.pop();
+    }
+    while query.chars().last().is_some_and(|ch| !ch.is_whitespace()) {
+        query.pop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,6 +433,10 @@ mod tests {
 
     fn ctrl(ch: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    fn shift(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT)
     }
 
     #[test]
@@ -429,6 +467,14 @@ mod tests {
         assert_eq!(
             state.handle_key(key(KeyCode::Char('e')), now),
             DiffBufferAction::OpenFileFinder
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char(' ')), now),
+            DiffBufferAction::None
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('t')), now),
+            DiffBufferAction::ToggleFileTree
         );
         assert_eq!(
             state.handle_key(key(KeyCode::Char('g')), now),
@@ -516,6 +562,51 @@ mod tests {
             state.handle_key(key(KeyCode::Enter), now),
             DiffBufferAction::SearchAccept
         );
+        assert_eq!(state.mode(), DiffBufferMode::Normal);
+    }
+
+    #[test]
+    fn search_mode_edits_like_vim_cmdline() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('/')), now),
+            DiffBufferAction::SearchChanged
+        );
+        for ch in "foo bar".chars() {
+            assert_eq!(
+                state.handle_key(key(KeyCode::Char(ch)), now),
+                DiffBufferAction::SearchChanged
+            );
+        }
+        assert_eq!(state.search_query(), "foo bar");
+        assert_eq!(
+            state.handle_key(key(KeyCode::Backspace), now),
+            DiffBufferAction::SearchChanged
+        );
+        assert_eq!(state.search_query(), "foo ba");
+        assert_eq!(
+            state.handle_key(ctrl('h'), now),
+            DiffBufferAction::SearchChanged
+        );
+        assert_eq!(state.search_query(), "foo b");
+        assert_eq!(
+            state.handle_key(ctrl('w'), now),
+            DiffBufferAction::SearchChanged
+        );
+        assert_eq!(state.search_query(), "foo ");
+        assert_eq!(
+            state.handle_key(shift('B'), now),
+            DiffBufferAction::SearchChanged
+        );
+        assert_eq!(state.search_query(), "foo B");
+        assert_eq!(
+            state.handle_key(ctrl('u'), now),
+            DiffBufferAction::SearchChanged
+        );
+        assert_eq!(state.search_query(), "");
+        assert_eq!(state.handle_key(ctrl('c'), now), DiffBufferAction::Cancel);
         assert_eq!(state.mode(), DiffBufferMode::Normal);
     }
 

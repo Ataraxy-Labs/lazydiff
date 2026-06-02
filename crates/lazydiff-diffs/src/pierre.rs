@@ -71,16 +71,17 @@ pub fn line_render_spans(
             inline_index += 1;
         }
 
-        let style = if inline_index < inline_spans.len()
-            && inline_spans[inline_index].start <= byte_index
-            && byte_index < inline_spans[inline_index].end
-        {
-            inline_diff_style(base_style, row_kind, theme)
-        } else if let Some(span) = active_syntax_span(syntax_spans, byte_index) {
+        let mut style = if let Some(span) = active_syntax_span(syntax_spans, byte_index) {
             syntax_span_style(base_style, span, theme)
         } else {
             base_style
         };
+        if inline_index < inline_spans.len()
+            && inline_spans[inline_index].start <= byte_index
+            && byte_index < inline_spans[inline_index].end
+        {
+            style = inline_diff_style(style, row_kind, theme);
+        }
 
         push_span(&mut spans, ch, style);
     }
@@ -169,14 +170,6 @@ pub(crate) fn apply_markdown_overlays(
     if text.is_empty() {
         return;
     }
-
-    // Original Pierre IDE palette. Theme-independent on purpose — these tokens
-    // were tuned to read as a polished IDE diff regardless of the surrounding
-    // shell, and the app-level theme toggle should not mute them.
-    spans.insert(
-        0,
-        styled_span(0, text.len(), Style::new().fg(Color::Rgb(251, 251, 251))),
-    );
 
     let trimmed = text.trim_start();
     let leading = text.len().saturating_sub(trimmed.len());
@@ -275,13 +268,10 @@ impl PierreHighlighter {
                 let ThemeVariant::Single(style) = token.style else {
                     continue;
                 };
-                push_aligned_token_span(
-                    &mut spans,
-                    source_line,
-                    &mut cursor,
-                    &token.text,
-                    giallo_style_to_ratatui(style),
-                );
+                let Some(style) = giallo_style_to_ratatui(style) else {
+                    continue;
+                };
+                push_aligned_token_span(&mut spans, source_line, &mut cursor, &token.text, style);
             }
             lines.push(spans);
         }
@@ -350,7 +340,7 @@ pub(crate) fn language_for_path(path: &str) -> &'static str {
     }
 }
 
-fn giallo_style_to_ratatui(style: giallo::Style) -> Style {
+fn giallo_style_to_ratatui(style: giallo::Style) -> Option<Style> {
     let mut modifiers = Modifier::empty();
     if style.font_style.contains(FontStyle::BOLD) {
         modifiers |= Modifier::BOLD;
@@ -364,10 +354,14 @@ fn giallo_style_to_ratatui(style: giallo::Style) -> Style {
     if style.font_style.contains(FontStyle::STRIKETHROUGH) {
         modifiers |= Modifier::CROSSED_OUT;
     }
-    Style::new()
-        .fg(normalize_pierre_token_color(style.foreground))
-        .add_modifier(modifiers)
+    let foreground = normalize_pierre_token_color(style.foreground);
+    if foreground == PIERRE_DEFAULT_FOREGROUND && modifiers.is_empty() {
+        return None;
+    }
+    Some(Style::new().fg(foreground).add_modifier(modifiers))
 }
+
+const PIERRE_DEFAULT_FOREGROUND: Color = Color::Rgb(251, 251, 251);
 
 fn giallo_color_to_ratatui(color: giallo::Color) -> Color {
     let hex = color.as_hex();
@@ -643,6 +637,16 @@ mod tests {
     }
 
     #[test]
+    fn pierre_does_not_emit_default_foreground_as_syntax() {
+        let mut highlighter = PierreHighlighter::new().expect("built-in giallo registry loads");
+        let spans = highlighter
+            .highlight_lines(language_for_path("example.txt"), "plain text")
+            .expect("plain fallback highlights");
+
+        assert_eq!(spans, vec![Vec::new()]);
+    }
+
+    #[test]
     fn aligned_token_spans_leave_unhighlighted_gaps_without_shifting_later_tokens() {
         let mut spans = Vec::new();
         let mut cursor = 0;
@@ -696,5 +700,27 @@ mod tests {
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].start..spans[0].end, 0..5);
         assert_eq!(spans[1].start..spans[1].end, 6..10);
+    }
+
+    #[test]
+    fn inline_diff_background_preserves_syntax_foreground() {
+        let theme = DiffTheme::default();
+        let spans = line_render_spans(
+            "Style::new()",
+            &[SyntaxSpan {
+                start: 0,
+                end: 5,
+                kind: SyntaxHighlightKind::Property,
+                style: Some(Style::new().fg(Color::Magenta)),
+            }],
+            &[InlineDiffSpan { start: 0, end: 5 }],
+            RowKind::Add,
+            theme,
+            Style::new().fg(Color::White).bg(theme.add_bg),
+        );
+
+        assert_eq!(spans[0].text, "Style");
+        assert_eq!(spans[0].style.fg, Some(Color::Magenta));
+        assert_eq!(spans[0].style.bg, Some(theme.add_content_bg));
     }
 }

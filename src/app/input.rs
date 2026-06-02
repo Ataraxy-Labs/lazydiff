@@ -285,7 +285,7 @@ impl App {
         ])
         .areas(area);
         let (_sidebar, _sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
-        diff_body
+        diff_content_area(diff_viewport_area(diff_body))
     }
 
     fn start_diff_mouse_selection(
@@ -301,7 +301,10 @@ impl App {
         if !contains_point(area, mouse.column, mouse.row) {
             return false;
         }
-        let inline_blocks = self.diff_inline_blocks();
+        let inline_blocks = self.diff_inline_blocks_for_area(Some(area));
+        if self.expand_collapsed_diff_row_at_mouse(mouse, area, &inline_blocks) {
+            return true;
+        }
         let started = self
             .diff_buffer
             .viewer_mut()
@@ -332,7 +335,7 @@ impl App {
         if !contains_point(area, mouse.column, mouse.row) {
             return false;
         }
-        let inline_blocks = self.diff_inline_blocks();
+        let inline_blocks = self.diff_inline_blocks_for_area(Some(area));
 
         self.diff_buffer
             .viewer_mut()
@@ -343,6 +346,49 @@ impl App {
                 mouse.column,
                 mouse.row,
             )
+    }
+
+    fn expand_collapsed_diff_row_at_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        area: Rect,
+        inline_blocks: &[DiffInlineBlock],
+    ) -> bool {
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let Some(row) = self
+            .diff_buffer
+            .viewer()
+            .document_row_for_screen_cell_with_inline_blocks(
+                &self.document,
+                inline_blocks,
+                area,
+                mouse.column,
+                mouse.row,
+            )
+        else {
+            return false;
+        };
+        if !self.document.is_collapsed_row(mode, row) {
+            return false;
+        }
+
+        self.diff_buffer
+            .viewer_mut()
+            .focus_row_ensure_visible(&self.document, row);
+        if self.document.expand_collapsed_row(mode, row) {
+            self.diff_buffer
+                .viewer_mut()
+                .focus_row_ensure_visible(&self.document, row);
+        } else {
+            self.branch_operation_status =
+                Some("unchanged lines not available for this diff".into());
+        }
+        self.diff_buffer.viewer_mut().clear_selection();
+        self.selecting_text = false;
+        self.pending_screen_selection = None;
+        self.screen_selection = None;
+        self.screen_selection_bounds = None;
+        true
     }
 
     fn finish_diff_mouse_selection(&mut self) {

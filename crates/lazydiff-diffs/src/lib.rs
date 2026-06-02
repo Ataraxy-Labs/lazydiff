@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::StatefulWidget;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -205,6 +205,11 @@ pub struct FileDiff {
     pub old_path: Option<String>,
     pub new_path: String,
     pub hunks: Vec<Hunk>,
+    old_source_lines: Option<Vec<String>>,
+    new_source_lines: Option<Vec<String>>,
+    old_source_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+    new_source_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+    expanded_gaps: HashSet<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,7 +279,13 @@ enum RowRef {
     },
     Collapsed {
         file_index: usize,
+        hunk_index: usize,
         count: u32,
+    },
+    ExpandedContext {
+        file_index: usize,
+        old_line: u32,
+        new_line: u32,
     },
     HunkHeader {
         file_index: usize,
@@ -321,31 +332,57 @@ impl DiffDocument {
             let file = &self.files[file_index];
             let left_reserve_sign = true;
             let right_reserve_sign = true;
-            let mut previous_old_end = 0;
+            let mut previous_old_end = 0u32;
+            let mut previous_new_end = 0u32;
 
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
+                let gap_expanded = file.expanded_gaps.contains(&hunk_index);
                 let collapsed_before = hunk.old_start.saturating_sub(previous_old_end + 1);
                 if collapsed_before > 0 {
-                    self.unified_rows.push(RowRef::Collapsed {
+                    let old_start = previous_old_end.saturating_add(1);
+                    let new_start = previous_new_end.saturating_add(1);
+                    if gap_expanded {
+                        for offset in 0..collapsed_before {
+                            let row = RowRef::ExpandedContext {
+                                file_index,
+                                old_line: old_start.saturating_add(offset),
+                                new_line: new_start.saturating_add(offset),
+                            };
+                            self.unified_rows.push(row);
+                            self.split_rows.push(row);
+                        }
+                    } else {
+                        self.unified_rows.push(RowRef::Collapsed {
+                            file_index,
+                            hunk_index,
+                            count: collapsed_before,
+                        });
+                        self.split_rows.push(RowRef::Collapsed {
+                            file_index,
+                            hunk_index,
+                            count: collapsed_before,
+                        });
+                    }
+                }
+
+                let skip_leading_context = if gap_expanded {
+                    hunk.leading_context_count()
+                } else {
+                    0
+                };
+
+                if !gap_expanded {
+                    self.unified_rows.push(RowRef::HunkHeader {
                         file_index,
-                        count: collapsed_before,
+                        hunk_index,
                     });
-                    self.split_rows.push(RowRef::Collapsed {
+                    self.split_rows.push(RowRef::HunkHeader {
                         file_index,
-                        count: collapsed_before,
+                        hunk_index,
                     });
                 }
 
-                self.unified_rows.push(RowRef::HunkHeader {
-                    file_index,
-                    hunk_index,
-                });
-                self.split_rows.push(RowRef::HunkHeader {
-                    file_index,
-                    hunk_index,
-                });
-
-                for line_index in 0..hunk.lines.len() {
+                for line_index in skip_leading_context..hunk.lines.len() {
                     let line = LineRef {
                         file_index,
                         hunk_index,
@@ -354,7 +391,7 @@ impl DiffDocument {
                     self.unified_rows.push(RowRef::Unified { line });
                 }
 
-                let mut line_index = 0;
+                let mut line_index = skip_leading_context;
                 while line_index < hunk.lines.len() {
                     match &hunk.lines[line_index] {
                         DiffLine::Context { .. } => {
@@ -402,6 +439,7 @@ impl DiffDocument {
                 }
 
                 previous_old_end = hunk.old_start + hunk.old_line_count().saturating_sub(1);
+                previous_new_end = hunk.new_start + hunk.new_line_count().saturating_sub(1);
             }
         }
     }
@@ -412,6 +450,19 @@ impl DiffDocument {
 }
 
 impl FileDiff {
+    pub fn new(old_path: Option<String>, new_path: String, hunks: Vec<Hunk>) -> Self {
+        Self {
+            old_path,
+            new_path,
+            hunks,
+            old_source_lines: None,
+            new_source_lines: None,
+            old_source_syntax_spans: None,
+            new_source_syntax_spans: None,
+            expanded_gaps: HashSet::new(),
+        }
+    }
+
     pub fn metadata(&self) -> FileDiffMetadata {
         metadata::build_file_metadata(self)
     }
@@ -501,6 +552,7 @@ impl DiffDocument {
         rows[..=row_index].iter().rev().find_map(|row| match row {
             RowRef::FileHeader { file_index }
             | RowRef::Collapsed { file_index, .. }
+            | RowRef::ExpandedContext { file_index, .. }
             | RowRef::HunkHeader { file_index, .. } => Some(*file_index),
             RowRef::Unified { line } => Some(line.file_index),
             RowRef::Split { left, right, .. } => (*left).or(*right).map(|line| line.file_index),
@@ -524,6 +576,7 @@ impl DiffDocument {
             RowRef::FileSeparator
             | RowRef::FileHeader { .. }
             | RowRef::Collapsed { .. }
+            | RowRef::ExpandedContext { .. }
             | RowRef::HunkHeader { .. } => None,
         }
     }
@@ -551,6 +604,26 @@ impl DiffDocument {
                         + UnicodeWidthStr::width(" "),
                 )
             }
+            RowRef::ExpandedContext {
+                old_line, new_line, ..
+            } => match mode {
+                DiffMode::Unified => Some(
+                    UnicodeWidthStr::width(gutter::exact_line_num(Some(old_line)).as_str())
+                        + UnicodeWidthStr::width(" ")
+                        + UnicodeWidthStr::width(gutter::exact_line_num(Some(new_line)).as_str())
+                        + UnicodeWidthStr::width(" "),
+                ),
+                DiffMode::Split => {
+                    let line = match side {
+                        DiffSide::Left => old_line,
+                        DiffSide::Right => new_line,
+                    };
+                    Some(
+                        UnicodeWidthStr::width(gutter::exact_line_num(Some(line)).as_str())
+                            + UnicodeWidthStr::width(" "),
+                    )
+                }
+            },
             RowRef::Split { .. } => {
                 let line = self
                     .line_target(mode, row_index, side)
@@ -655,11 +728,106 @@ impl DiffDocument {
                 DiffSide::Left => left.map(|line| self.line(line).text()),
                 DiffSide::Right => right.map(|line| self.line(line).text()),
             },
+            RowRef::ExpandedContext {
+                file_index,
+                old_line,
+                new_line,
+            } => self.expanded_context_text(file_index, side, old_line, new_line),
             RowRef::FileSeparator
             | RowRef::FileHeader { .. }
             | RowRef::Collapsed { .. }
             | RowRef::HunkHeader { .. } => None,
         }
+    }
+
+    pub fn is_collapsed_row(&self, mode: DiffMode, row_index: usize) -> bool {
+        matches!(
+            self.rows(mode).get(row_index),
+            Some(RowRef::Collapsed { .. })
+        )
+    }
+
+    pub fn expand_collapsed_row(&mut self, mode: DiffMode, row_index: usize) -> bool {
+        let Some(RowRef::Collapsed {
+            file_index,
+            hunk_index,
+            ..
+        }) = self.rows(mode).get(row_index).copied()
+        else {
+            return false;
+        };
+        let Some(file) = self.files.get_mut(file_index) else {
+            return false;
+        };
+        if file.old_source_lines.is_none() && file.new_source_lines.is_none() {
+            return false;
+        }
+        if !file.expanded_gaps.insert(hunk_index) {
+            return false;
+        }
+        self.rebuild_row_cache();
+        true
+    }
+
+    pub fn is_focusable_row(&self, mode: DiffMode, row_index: usize, side: DiffSide) -> bool {
+        let Some(row) = self.rows(mode).get(row_index) else {
+            return false;
+        };
+        matches!(
+            row,
+            RowRef::Collapsed { .. } | RowRef::ExpandedContext { .. }
+        ) || self.line_target(mode, row_index, side).is_some()
+            || self.line_target(mode, row_index, side.opposite()).is_some()
+    }
+
+    fn expanded_context_text(
+        &self,
+        file_index: usize,
+        side: DiffSide,
+        old_line: u32,
+        new_line: u32,
+    ) -> Option<&str> {
+        let file = self.files.get(file_index)?;
+        let (lines, line) = match side {
+            DiffSide::Left => (&file.old_source_lines, old_line),
+            DiffSide::Right => (&file.new_source_lines, new_line),
+        };
+        lines
+            .as_ref()
+            .and_then(|lines| lines.get(line.saturating_sub(1) as usize))
+            .map(String::as_str)
+            .or_else(|| {
+                let fallback = match side {
+                    DiffSide::Left => (&file.new_source_lines, new_line),
+                    DiffSide::Right => (&file.old_source_lines, old_line),
+                };
+                fallback
+                    .0
+                    .as_ref()
+                    .and_then(|lines| lines.get(fallback.1.saturating_sub(1) as usize))
+                    .map(String::as_str)
+            })
+    }
+
+    fn expanded_context_syntax_spans(
+        &self,
+        file_index: usize,
+        side: DiffSide,
+        old_line: u32,
+        new_line: u32,
+    ) -> &[SyntaxSpan] {
+        let Some(file) = self.files.get(file_index) else {
+            return &[];
+        };
+        let (spans, line) = match side {
+            DiffSide::Left => (&file.old_source_syntax_spans, old_line),
+            DiffSide::Right => (&file.new_source_syntax_spans, new_line),
+        };
+        spans
+            .as_ref()
+            .and_then(|lines| lines.get(line.saturating_sub(1) as usize))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn line_target_for_ref(&self, line: LineRef, side: DiffSide) -> Option<DiffLineTarget> {
@@ -716,6 +884,15 @@ impl DiffMode {
 pub enum DiffSide {
     Left,
     Right,
+}
+
+impl DiffSide {
+    fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -908,6 +1085,11 @@ pub fn parse_unified_diff(input: &str) -> DiffDocument {
                 old_path: None,
                 new_path: "diff".into(),
                 hunks: Vec::new(),
+                old_source_lines: None,
+                new_source_lines: None,
+                old_source_syntax_spans: None,
+                new_source_syntax_spans: None,
+                expanded_gaps: HashSet::new(),
             });
             continue;
         }
@@ -1082,14 +1264,20 @@ where
 
     for file in &mut document.files {
         let language = pierre::language_for_path(&file.new_path);
-        let old_source = resolve_source(file, DiffSide::Left)
+        let old_full_text = resolve_source(file, DiffSide::Left);
+        let new_full_text = resolve_source(file, DiffSide::Right);
+        file.old_source_lines = old_full_text.as_deref().map(source_lines);
+        file.new_source_lines = new_full_text.as_deref().map(source_lines);
+        let old_source = old_full_text
             .map(SideSource::from_full_text)
             .unwrap_or_else(|| collect_side_source(file, DiffSide::Left));
-        let new_source = resolve_source(file, DiffSide::Right)
+        let new_source = new_full_text
             .map(SideSource::from_full_text)
             .unwrap_or_else(|| collect_side_source(file, DiffSide::Right));
         let old_spans = highlighter.highlight_lines(language, &old_source.text);
         let new_spans = highlighter.highlight_lines(language, &new_source.text);
+        file.old_source_syntax_spans = file.old_source_lines.as_ref().and(old_spans.clone());
+        file.new_source_syntax_spans = file.new_source_lines.as_ref().and(new_spans.clone());
 
         if old_spans.is_some() || new_spans.is_some() {
             stats.files_highlighted += 1;
@@ -1163,6 +1351,20 @@ impl Hunk {
             .iter()
             .filter(|line| matches!(line, DiffLine::Context { .. } | DiffLine::Delete { .. }))
             .count() as u32
+    }
+
+    fn new_line_count(&self) -> u32 {
+        self.lines
+            .iter()
+            .filter(|line| matches!(line, DiffLine::Context { .. } | DiffLine::Add { .. }))
+            .count() as u32
+    }
+
+    fn leading_context_count(&self) -> usize {
+        self.lines
+            .iter()
+            .take_while(|line| matches!(line, DiffLine::Context { .. }))
+            .count()
     }
 }
 
@@ -1238,6 +1440,10 @@ fn slice_text_columns(text: &str, start: usize, end: usize) -> String {
 struct SideSource {
     text: String,
     line_indices: HashMap<u32, usize>,
+}
+
+fn source_lines(text: &str) -> Vec<String> {
+    text.split('\n').map(str::to_string).collect()
 }
 
 impl SideSource {
@@ -1652,7 +1858,9 @@ fn render_row_ref(
             let file = &document.files[file_index];
             render_file_header(area, y, buf, file, file_index, document.files.len(), theme);
         }
-        RowRef::Collapsed { file_index, count } => {
+        RowRef::Collapsed {
+            file_index, count, ..
+        } => {
             render_collapsed_row(
                 area,
                 y,
@@ -1660,6 +1868,29 @@ fn render_row_ref(
                 document.files[file_index].old_path.as_deref(),
                 count,
                 theme,
+                state.cursor.row == row_index,
+            );
+        }
+        RowRef::ExpandedContext {
+            file_index,
+            old_line,
+            new_line,
+        } => {
+            render_expanded_context_row(
+                state,
+                document,
+                area,
+                y,
+                buf,
+                file_index,
+                old_line,
+                new_line,
+                row_index,
+                now,
+                search_matches,
+                theme,
+                viewport,
+                show_diff_cursor,
             );
         }
         RowRef::HunkHeader {
@@ -1919,20 +2150,261 @@ fn render_collapsed_row(
     old_path: Option<&str>,
     count: u32,
     theme: DiffTheme,
+    selected: bool,
 ) {
     let _ = old_path;
-    let style = Style::new().fg(theme.muted).bg(theme.panel_alt);
-    let half = area.width / 2;
-    let _ = count;
-    let text = "⋯";
+    let bg = if selected { theme.selected } else { theme.bg };
+    let style = Style::new()
+        .fg(if selected { theme.text } else { theme.muted })
+        .bg(bg);
+    let line_style = Style::new().fg(theme.panel_alt).bg(bg);
+    let label = unchanged_lines_label(count);
 
     for x in area.left()..area.right() {
         buf[(x, y)].set_symbol(" ").set_style(style);
     }
 
-    if half > 0 {
-        buf.set_stringn(area.x, y, &text, half as usize, style);
+    render_collapsed_boundary_segment(area, y, buf, &label, style, line_style);
+}
+
+fn render_expanded_context_row(
+    state: &DiffViewerState,
+    document: &DiffDocument,
+    area: Rect,
+    y: u16,
+    buf: &mut Buffer,
+    file_index: usize,
+    old_line: u32,
+    new_line: u32,
+    row_index: usize,
+    now: Instant,
+    search_matches: &[DiffSearchMatch],
+    theme: DiffTheme,
+    viewport: DiffViewport,
+    show_diff_cursor: bool,
+) {
+    match viewport.mode {
+        DiffMode::Unified => {
+            let side = DiffSide::Right;
+            let text = document
+                .expanded_context_text(file_index, side, old_line, new_line)
+                .unwrap_or_default();
+            let syntax_spans =
+                document.expanded_context_syntax_spans(file_index, side, old_line, new_line);
+            let visible_text =
+                concealed_text(text, is_markdown_path(&document.files[file_index].new_path));
+            let style = row_style(RowKind::Context, false, theme);
+            let gutter_style = Style::new()
+                .fg(theme.muted)
+                .bg(style.bg.unwrap_or(theme.bg));
+            let gutter = format!(
+                "{} {} ",
+                gutter::exact_line_num(Some(old_line)),
+                gutter::exact_line_num(Some(new_line))
+            );
+            let layout = document
+                .pane_text_layout(DiffMode::Unified, row_index, side, area, viewport.scroll_x)
+                .unwrap_or(DiffPaneTextLayout {
+                    mode: DiffMode::Unified,
+                    side,
+                    row: row_index,
+                    pane: area,
+                    document_code_start: gutter.len(),
+                    visual_code_start: gutter.len(),
+                    scroll_x: viewport.scroll_x,
+                });
+            let overlays = row_overlays_for_render(
+                state,
+                document,
+                area,
+                row_index,
+                side,
+                now,
+                search_matches,
+                show_diff_cursor,
+            );
+            render_segments(
+                area,
+                y,
+                buf,
+                &[(&gutter, gutter_style)],
+                &visible_text,
+                syntax_spans,
+                &[],
+                RowKind::Context,
+                theme,
+                style,
+                layout,
+                &overlays,
+            );
+        }
+        DiffMode::Split => {
+            let half = area.width / 2;
+            let left_area = Rect::new(area.x, y, half, 1);
+            let right_area = Rect::new(area.x + half, y, area.width - half, 1);
+            render_expanded_context_split_side(
+                state,
+                document,
+                left_area,
+                buf,
+                file_index,
+                old_line,
+                new_line,
+                row_index,
+                DiffSide::Left,
+                now,
+                search_matches,
+                theme,
+                viewport,
+                show_diff_cursor,
+            );
+            render_expanded_context_split_side(
+                state,
+                document,
+                right_area,
+                buf,
+                file_index,
+                old_line,
+                new_line,
+                row_index,
+                DiffSide::Right,
+                now,
+                search_matches,
+                theme,
+                viewport,
+                show_diff_cursor,
+            );
+        }
     }
+}
+
+fn render_expanded_context_split_side(
+    state: &DiffViewerState,
+    document: &DiffDocument,
+    area: Rect,
+    buf: &mut Buffer,
+    file_index: usize,
+    old_line: u32,
+    new_line: u32,
+    row_index: usize,
+    side: DiffSide,
+    now: Instant,
+    search_matches: &[DiffSearchMatch],
+    theme: DiffTheme,
+    viewport: DiffViewport,
+    show_diff_cursor: bool,
+) {
+    let text = document
+        .expanded_context_text(file_index, side, old_line, new_line)
+        .unwrap_or_default();
+    let syntax_spans = document.expanded_context_syntax_spans(file_index, side, old_line, new_line);
+    let visible_text = concealed_text(text, is_markdown_path(&document.files[file_index].new_path));
+    let style = row_style(RowKind::Context, false, theme);
+    let line = match side {
+        DiffSide::Left => old_line,
+        DiffSide::Right => new_line,
+    };
+    let gutter = gutter::split_gutter_segments(
+        GutterCell {
+            line: Some(line),
+            sign: None,
+            reserve_sign: true,
+        },
+        RowKind::Context,
+        theme,
+        false,
+    );
+    let prefix_segments = [
+        (gutter.rail, gutter.rail_style),
+        (&gutter.line_number, gutter.line_number_style),
+        (gutter.sign, gutter.sign_style),
+        (gutter.trailing, gutter.line_number_style),
+    ];
+    let layout = document
+        .pane_text_layout(
+            DiffMode::Split,
+            row_index,
+            side,
+            area,
+            viewport.scroll_x_for_side(side),
+        )
+        .unwrap_or(DiffPaneTextLayout {
+            mode: DiffMode::Split,
+            side,
+            row: row_index,
+            pane: area,
+            document_code_start: 5,
+            visual_code_start: 6,
+            scroll_x: viewport.scroll_x_for_side(side),
+        });
+    let overlays = row_overlays_for_render(
+        state,
+        document,
+        area,
+        row_index,
+        side,
+        now,
+        search_matches,
+        show_diff_cursor,
+    );
+    render_segments(
+        area,
+        area.y,
+        buf,
+        &prefix_segments,
+        &visible_text,
+        syntax_spans,
+        &[],
+        RowKind::Context,
+        theme,
+        style,
+        layout,
+        &overlays,
+    );
+}
+
+fn unchanged_lines_label(count: u32) -> String {
+    match count {
+        1 => "↕ 1 unchanged line".to_string(),
+        count => format!("↕ {count} unchanged lines"),
+    }
+}
+
+fn render_collapsed_boundary_segment(
+    area: Rect,
+    y: u16,
+    buf: &mut Buffer,
+    label: &str,
+    label_style: Style,
+    line_style: Style,
+) {
+    if area.width == 0 {
+        return;
+    }
+
+    let label_width = UnicodeWidthStr::width(label) as u16;
+    if label_width.saturating_add(2) >= area.width {
+        buf.set_stringn(area.x, y, label, area.width as usize, label_style);
+        return;
+    }
+
+    for x in area.x.saturating_add(1)..area.right().saturating_sub(1) {
+        buf.set_stringn(x, y, "─", 1, line_style);
+    }
+
+    let label_x = area
+        .x
+        .saturating_add(area.width.saturating_sub(label_width) / 2)
+        .min(area.right().saturating_sub(label_width));
+    let padded = format!(" {label} ");
+    let padded_x = label_x.saturating_sub(1);
+    buf.set_stringn(
+        padded_x,
+        y,
+        padded,
+        area.right().saturating_sub(padded_x) as usize,
+        label_style,
+    );
 }
 
 fn render_hunk_header_row(area: Rect, y: u16, buf: &mut Buffer, header: &str, theme: DiffTheme) {
@@ -2589,5 +3061,77 @@ mod tests {
             .map(|x| buf[(x, body_y)].symbol())
             .collect::<String>();
         assert!(rendered_body.contains("inline body"));
+    }
+
+    #[test]
+    fn collapsed_row_renders_unchanged_line_boundary_label() {
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_collapsed_row(area, 0, &mut buf, None, 309, DiffTheme::default(), false);
+
+        let rendered = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(rendered.contains("↕ 309 unchanged lines"));
+        assert!(rendered.contains("─"));
+    }
+
+    #[test]
+    fn split_collapsed_row_centers_one_label_across_full_width() {
+        let area = Rect::new(0, 0, 100, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_collapsed_row(area, 0, &mut buf, None, 12, DiffTheme::default(), false);
+
+        let rendered = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(rendered.matches("↕ 12 unchanged lines").count(), 1);
+        let label_start = (0..area.width)
+            .find(|x| buf[(*x, 0)].symbol() == "↕")
+            .expect("boundary label marker");
+        assert!(label_start > 35 && label_start < 45);
+    }
+
+    #[test]
+    fn collapsed_row_expands_into_full_source_context_rows() {
+        let mut document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn one() {}\n+fn ONE() {}\n@@ -4,2 +4,2 @@\n fn four() {}\n-fn five() {}\n+fn FIVE() {}\n",
+        );
+        add_pierre_highlights_with_sources(&mut document, |_file, _side| {
+            Some("fn one() {}\nfn two() {}\nfn three() {}\nfn four() {}\nfn five() {}".to_string())
+        });
+        let collapsed_row = document
+            .rows(DiffMode::Unified)
+            .iter()
+            .position(|row| matches!(row, RowRef::Collapsed { count: 2, .. }))
+            .expect("collapsed gap row");
+        let before = row_count_for_mode(&document, DiffMode::Unified);
+
+        assert!(document.expand_collapsed_row(DiffMode::Unified, collapsed_row));
+
+        assert_eq!(
+            row_count_for_mode(&document, DiffMode::Unified),
+            before.saturating_sub(1)
+        );
+        assert_eq!(
+            document.row_text_for_selection(DiffMode::Unified, collapsed_row, DiffSide::Right),
+            Some("fn two() {}")
+        );
+        assert!(
+            !document
+                .expanded_context_syntax_spans(0, DiffSide::Right, 2, 2)
+                .is_empty()
+        );
+        assert_eq!(
+            document.row_text_for_selection(DiffMode::Unified, collapsed_row + 1, DiffSide::Right),
+            Some("fn three() {}")
+        );
+        assert!(document.line_row(DiffMode::Unified, 0, 1, 0).is_none());
+        assert_eq!(
+            document.line_row(DiffMode::Unified, 0, 1, 1),
+            Some(collapsed_row + 2)
+        );
     }
 }

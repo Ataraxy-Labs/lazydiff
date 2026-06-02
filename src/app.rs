@@ -91,7 +91,7 @@ fn diff_viewport_area(area: Rect) -> Rect {
 use crate::commands::{Command, Layer, command_for_layer};
 use crate::components::{app_chrome::AppHeader, command_palette::CommandPalette};
 use crate::design_system::{FinderPalette, HomePalette, SurfaceLayer, TextRole};
-use crate::forge::Forge;
+use crate::forge::{Forge, PullRequestFileSources};
 use crate::github::{
     GitCommit, GitHubAuthStatus, GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus,
     PrId, Worktree, WorktreeId, link_worktree_pr, list_branch_commits, list_worktrees,
@@ -1241,6 +1241,7 @@ impl App {
             "i/a + object   text objects (iw, aw, brackets)",
             "/, n, N        search",
             "s              toggle split/unified",
+            "space t        toggle file tree",
             "enter          open thread",
             "i              comment",
             "x / dd         delete note",
@@ -1302,8 +1303,13 @@ impl App {
         if self.surface == AppSurface::Diff {
             match key.code {
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.scroll_active_pane_horizontally(-8);
-                    return;
+                    if self.diff_buffer.mode() == DiffBufferMode::Search {
+                        // In / search, Ctrl-H is Backspace. Let the diff buffer edit the query
+                        // instead of treating it as horizontal pane scroll.
+                    } else {
+                        self.scroll_active_pane_horizontally(-8);
+                        return;
+                    }
                 }
                 // Most terminals encode Ctrl-H as ASCII backspace, so crossterm
                 // may surface it as Backspace instead of Char('h') + CONTROL.
@@ -1311,8 +1317,12 @@ impl App {
                     if key.modifiers.is_empty()
                         || key.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    self.scroll_active_pane_horizontally(-8);
-                    return;
+                    if self.diff_buffer.mode() == DiffBufferMode::Search {
+                        // In / search, Backspace edits the query.
+                    } else {
+                        self.scroll_active_pane_horizontally(-8);
+                        return;
+                    }
                 }
                 KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.scroll_active_pane_horizontally(8);
@@ -1575,6 +1585,7 @@ impl App {
             DiffBufferAction::ToggleSideBySide => {
                 self.diff_buffer.viewer_mut().toggle_mode(&self.document);
             }
+            DiffBufferAction::ToggleFileTree => self.toggle_review_sidebar(),
             DiffBufferAction::SwitchSide => {
                 if !self.diff_buffer.viewer_mut().switch_side(&self.document) {
                     self.branch_operation_status =
@@ -1587,7 +1598,11 @@ impl App {
             DiffBufferAction::SearchAccept => self.accept_diff_buffer_search(rows),
             DiffBufferAction::SearchNext => self.move_diff_buffer_search(1, rows),
             DiffBufferAction::SearchPrevious => self.move_diff_buffer_search(-1, rows),
-            DiffBufferAction::OpenThread => self.open_thread_modal(),
+            DiffBufferAction::OpenThread => {
+                if !self.expand_collapsed_diff_row_under_cursor() {
+                    self.open_thread_modal();
+                }
+            }
             DiffBufferAction::OpenEditor => self.open_current_file_in_editor(),
             DiffBufferAction::ToggleVisual => self.toggle_visual_selection(rows, false),
             DiffBufferAction::ToggleVisualLine => self.toggle_visual_selection(rows, true),
@@ -1612,6 +1627,31 @@ impl App {
                 self.quit_or_go_back(force);
             }
             DiffBufferAction::ShowHelp => self.diff_buffer.toggle_help(),
+        }
+    }
+
+    fn expand_collapsed_diff_row_under_cursor(&mut self) -> bool {
+        let viewer = self.diff_buffer.viewer();
+        let mode = viewer.viewport.mode;
+        let row = viewer.cursor.row;
+        if !self.document.is_collapsed_row(mode, row) {
+            return false;
+        }
+        if self.document.expand_collapsed_row(mode, row) {
+            self.diff_buffer
+                .viewer_mut()
+                .focus_row_ensure_visible(&self.document, row);
+        } else {
+            self.branch_operation_status =
+                Some("unchanged lines not available for this diff".into());
+        }
+        true
+    }
+
+    fn toggle_review_sidebar(&mut self) {
+        self.review_sidebar_visible = !self.review_sidebar_visible;
+        if !self.review_sidebar_visible && self.review_sidebar_focus {
+            self.set_diff_focus(self.current_diff_focus().non_sidebar());
         }
     }
 
@@ -2175,6 +2215,7 @@ impl App {
             Command::ToggleDiffMode => {
                 self.diff_buffer.viewer_mut().toggle_mode(&self.document);
             }
+            Command::ToggleFileTree => self.toggle_review_sidebar(),
             Command::JumpFirst => self.jump_focused_boundary(false, rows),
             Command::JumpLast => self.jump_focused_boundary(true, rows),
             Command::PreviousFile => self.jump_relative_file(-1, rows),
@@ -2778,8 +2819,37 @@ impl App {
         number: u32,
     ) -> std::result::Result<PullRequestDiffResult, String> {
         let patch = forge.fetch_pull_request_patch(repository, number)?;
-        let document = Self::materialize_diff_document(&patch);
+        let document =
+            Self::materialize_pull_request_diff_document(forge, repository, number, &patch);
         Ok(PullRequestDiffResult { patch, document })
+    }
+
+    fn materialize_pull_request_diff_document(
+        forge: &dyn Forge,
+        repository: &str,
+        number: u32,
+        patch: &str,
+    ) -> DiffDocument {
+        let mut document = parse_unified_diff(patch);
+        let paths = document
+            .files
+            .iter()
+            .flat_map(|file| [file.old_path.clone(), Some(file.new_path.clone())])
+            .flatten()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let sources = forge
+            .fetch_pull_request_file_sources(repository, number, &paths)
+            .unwrap_or_default();
+        add_pierre_highlights_with_sources(&mut document, |file, side| {
+            let source = pull_request_file_source(&sources, file, side)?;
+            match side {
+                DiffSide::Left => source.old.clone(),
+                DiffSide::Right => source.new.clone(),
+            }
+        });
+        document
     }
 
     fn materialize_diff_document(patch: &str) -> DiffDocument {
@@ -3381,8 +3451,14 @@ impl App {
         patch: String,
     ) {
         let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
         thread::spawn(move || {
-            let result = Ok(Self::materialize_diff_document(&patch));
+            let result = Ok(Self::materialize_pull_request_diff_document(
+                forge.as_ref(),
+                &repository,
+                number,
+                &patch,
+            ));
             let _ = sender.send(QueryEvent::CachedDiff {
                 repository,
                 number,
@@ -5324,6 +5400,23 @@ fn git_stdout_result_in<const N: usize>(
         });
     }
     String::from_utf8(output.stdout).map_err(|error| format!("git output was not utf-8: {error}"))
+}
+
+fn pull_request_file_source<'a>(
+    sources: &'a HashMap<String, PullRequestFileSources>,
+    file: &FileDiff,
+    side: DiffSide,
+) -> Option<&'a PullRequestFileSources> {
+    match side {
+        DiffSide::Left => file
+            .old_path
+            .as_ref()
+            .and_then(|path| sources.get(path))
+            .or_else(|| sources.get(&file.new_path)),
+        DiffSide::Right => sources
+            .get(&file.new_path)
+            .or_else(|| file.old_path.as_ref().and_then(|path| sources.get(path))),
+    }
 }
 
 fn git_blob_at(repo_path: &Path, rev: &str, path: &str) -> Option<String> {

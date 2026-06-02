@@ -15,6 +15,12 @@ pub(crate) type ForgeQueue = GitHubQueue;
 pub(crate) type ForgeComment = GitHubComment;
 pub(crate) type ForgeAuthStatus = GitHubAuthStatus;
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PullRequestFileSources {
+    pub(crate) old: Option<String>,
+    pub(crate) new: Option<String>,
+}
+
 /// Abstraction over a code forge (GitHub, GitLab, Gitea/Forgejo, …).
 pub(crate) trait Forge: Send + Sync {
     /// Human-readable name shown in UI messages (e.g. "GitHub", "GitLab").
@@ -41,6 +47,16 @@ pub(crate) trait Forge: Send + Sync {
 
     /// Fetch the unified diff patch for a pull request / merge request.
     fn fetch_pull_request_patch(&self, repo: &str, number: u32) -> Result<String, String>;
+
+    /// Fetch full old/new file contents for the changed files in a pull request / merge request.
+    fn fetch_pull_request_file_sources(
+        &self,
+        _repo: &str,
+        _number: u32,
+        _paths: &[String],
+    ) -> Result<std::collections::HashMap<String, PullRequestFileSources>, String> {
+        Ok(std::collections::HashMap::new())
+    }
 
     /// Fetch commits belonging to a pull request / merge request.
     fn fetch_pull_request_commits(&self, repo: &str, number: u32)

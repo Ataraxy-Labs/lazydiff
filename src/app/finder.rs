@@ -417,13 +417,26 @@ impl App {
                     command_result("navigation", "back to queue", "esc", Command::Back, 3),
                     command_result("navigation", "open thread", "enter", Command::OpenThread, 4),
                     command_result("view", "toggle diff mode", "m", Command::ToggleDiffMode, 5),
-                    command_result("navigation", "next file", "]", Command::NextFile, 6),
-                    command_result("navigation", "previous file", "[", Command::PreviousFile, 7),
-                    command_result("navigation", "next hunk", "N", Command::NextHunk, 8),
-                    command_result("navigation", "previous hunk", "p", Command::PreviousHunk, 9),
-                    command_result("navigation", "first row", "g", Command::JumpFirst, 10),
-                    command_result("navigation", "last row", "G", Command::JumpLast, 11),
-                    command_result("history", "show attempts", "A", Command::ShowAttempts, 12),
+                    command_result(
+                        "view",
+                        "toggle file tree",
+                        "space t",
+                        Command::ToggleFileTree,
+                        6,
+                    ),
+                    command_result("navigation", "next file", "]", Command::NextFile, 7),
+                    command_result("navigation", "previous file", "[", Command::PreviousFile, 8),
+                    command_result("navigation", "next hunk", "N", Command::NextHunk, 9),
+                    command_result(
+                        "navigation",
+                        "previous hunk",
+                        "p",
+                        Command::PreviousHunk,
+                        10,
+                    ),
+                    command_result("navigation", "first row", "g", Command::JumpFirst, 11),
+                    command_result("navigation", "last row", "G", Command::JumpLast, 12),
+                    command_result("history", "show attempts", "A", Command::ShowAttempts, 13),
                 ];
                 if matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
                     commands.splice(

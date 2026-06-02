@@ -1,5 +1,9 @@
 use std::{
-    collections::BTreeMap, env, fs, path::PathBuf, process::Command as ProcessCommand, thread,
+    collections::{BTreeMap, HashMap},
+    env, fs,
+    path::PathBuf,
+    process::Command as ProcessCommand,
+    thread,
     time::Duration,
 };
 
@@ -8,8 +12,8 @@ use lazydiff_diffs::{DiffLineRangeTarget, DiffSide};
 use serde::{Deserialize, Serialize};
 
 use crate::app::WorkItemKind;
-use crate::forge::Forge;
 use crate::forge::credentials;
+use crate::forge::{Forge, PullRequestFileSources};
 
 use super::models::{
     CheckRollupStatus, GitHubCheck, GitHubComment, GitHubPullRequest, GitHubQueue,
@@ -496,6 +500,80 @@ pub(crate) fn fetch_pull_request_patch(
     )?;
     let files = parse_pull_request_files_value(value)?;
     Ok(pull_request_files_to_patch(&files))
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPullRequestRefs {
+    base: GitHubPullRequestRef,
+    head: GitHubPullRequestRef,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubPullRequestRef {
+    sha: String,
+}
+
+pub(crate) fn fetch_pull_request_file_sources(
+    repository: &str,
+    number: u32,
+    paths: &[String],
+) -> std::result::Result<HashMap<String, PullRequestFileSources>, String> {
+    let token = github_token()
+        .ok_or_else(|| "sign in to Quiver to load GitHub diff context".to_string())?;
+    let refs: GitHubPullRequestRefs = github_get_json(
+        &format!("repos/{repository}/pulls/{number}"),
+        &token,
+        "GitHub PR refs",
+    )?;
+    let mut sources = HashMap::new();
+    for path in paths {
+        let old = github_get_file_text(repository, &refs.base.sha, path, &token).ok();
+        let new = github_get_file_text(repository, &refs.head.sha, path, &token).ok();
+        if old.is_some() || new.is_some() {
+            sources.insert(path.clone(), PullRequestFileSources { old, new });
+        }
+    }
+    Ok(sources)
+}
+
+fn github_get_file_text(
+    repository: &str,
+    sha: &str,
+    path: &str,
+    token: &str,
+) -> std::result::Result<String, String> {
+    let mut url = reqwest::Url::parse("https://api.github.com/").map_err(|e| e.to_string())?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "failed to build GitHub contents URL".to_string())?;
+        segments.push("repos");
+        for segment in repository.split('/') {
+            segments.push(segment);
+        }
+        segments.push("contents");
+        for segment in path.split('/') {
+            segments.push(segment);
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", sha);
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("lazydiff")
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github.raw")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "GitHub file contents request failed: {}",
+            response.status()
+        ));
+    }
+    response.text().map_err(|error| error.to_string())
 }
 
 pub(crate) fn fetch_commit_patch(
@@ -1000,6 +1078,15 @@ impl Forge for GitHubForge {
 
     fn fetch_pull_request_patch(&self, repo: &str, number: u32) -> Result<String, String> {
         fetch_pull_request_patch(repo, number)
+    }
+
+    fn fetch_pull_request_file_sources(
+        &self,
+        repo: &str,
+        number: u32,
+        paths: &[String],
+    ) -> Result<HashMap<String, PullRequestFileSources>, String> {
+        fetch_pull_request_file_sources(repo, number, paths)
     }
 
     fn fetch_pull_request_commits(

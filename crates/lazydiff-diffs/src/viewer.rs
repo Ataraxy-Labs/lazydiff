@@ -557,6 +557,12 @@ impl DiffViewerState {
         if local_y >= content_area.height as usize {
             return None;
         }
+        if document.is_collapsed_row(self.viewport.mode, self.cursor.row) {
+            return Some(DiffScreenPosition {
+                x: content_area.x.saturating_add(content_area.width / 2),
+                y: content_area.y.saturating_add(local_y as u16),
+            });
+        }
         let layout = self.pane_text_layout_for_side(document, content_area, self.cursor.side)?;
         if layout.pane.is_empty() {
             return None;
@@ -835,7 +841,6 @@ impl DiffViewerState {
                 }
             }
         };
-        let target = document.line_target(self.viewport.mode, row, side)?;
         let pane = self.viewport.pane_rect(area, side);
         let layout = document.pane_text_layout(
             self.viewport.mode,
@@ -844,13 +849,10 @@ impl DiffViewerState {
             pane,
             self.viewport.scroll_x_for_side(side),
         )?;
-        let line =
-            &document.files[target.file_index].hunks[target.hunk_index].lines[target.line_index];
-        let text_len = match line {
-            DiffLine::Context { text, .. }
-            | DiffLine::Add { text, .. }
-            | DiffLine::Delete { text, .. } => text.chars().count(),
-        };
+        let text_len = document
+            .row_text_for_selection(self.viewport.mode, row, side)?
+            .chars()
+            .count();
         let code_end = layout.document_code_start.saturating_add(text_len);
         let document_column = layout.screen_x_to_document_col(column, code_end);
         Some(DiffTextPoint {
@@ -858,6 +860,30 @@ impl DiffViewerState {
             side,
             column: document_column,
         })
+    }
+
+    pub fn document_row_for_screen_cell_with_inline_blocks(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        area: Rect,
+        column: u16,
+        screen_row: u16,
+    ) -> Option<usize> {
+        if column < area.left()
+            || column >= area.right()
+            || screen_row < area.top()
+            || screen_row >= area.bottom()
+        {
+            return None;
+        }
+        let visual_index = self
+            .viewport
+            .scroll_y
+            .saturating_add(screen_row.saturating_sub(area.y) as usize);
+        self.visual_rows_with_inline_blocks(document, inline_blocks)
+            .get(visual_index)?
+            .document_row()
     }
 
     pub fn start_mouse_selection(
@@ -1107,10 +1133,7 @@ impl DiffViewerState {
             let Some(row) = visual_rows[visual_index].document_row() else {
                 continue;
             };
-            if document
-                .line_target(self.viewport.mode, row, self.cursor.side)
-                .is_some()
-            {
+            if document.is_focusable_row(self.viewport.mode, row, self.cursor.side) {
                 return Some(row);
             }
             if (delta < 0 && visual_index == 0)
@@ -1149,14 +1172,10 @@ impl DiffViewerState {
     }
 
     fn cursor_code_range(&self, document: &DiffDocument) -> Option<(usize, usize)> {
-        let target = document.line_target(self.viewport.mode, self.cursor.row, self.cursor.side)?;
-        let line =
-            &document.files[target.file_index].hunks[target.hunk_index].lines[target.line_index];
-        let text_len = match line {
-            DiffLine::Context { text, .. }
-            | DiffLine::Add { text, .. }
-            | DiffLine::Delete { text, .. } => text.chars().count(),
-        };
+        let text_len = document
+            .row_text_for_selection(self.viewport.mode, self.cursor.row, self.cursor.side)?
+            .chars()
+            .count();
         let start = self.cursor_code_start(document);
         Some((start, start.saturating_add(text_len)))
     }
@@ -2367,7 +2386,8 @@ mod tests {
             .expect("cursor screen position");
 
         assert_eq!(position.y, visual_index as u16);
-        assert_eq!(position.x, 20 + code_start as u16 + 1);
+        let content_width = area.width.saturating_sub(1);
+        assert_eq!(position.x, content_width / 2 + code_start as u16 + 1);
     }
 
     #[test]
@@ -2392,8 +2412,9 @@ mod tests {
             .cursor_screen_position(&document, &[], area)
             .expect("cursor position");
 
-        assert!(position.x < area.x + area.width / 2);
-        assert_eq!(position.x, area.x + area.width / 2 - 1);
+        let content_width = area.width.saturating_sub(1);
+        assert!(position.x < area.x + content_width / 2);
+        assert_eq!(position.x, area.x + content_width / 2 - 1);
     }
 
     #[test]
