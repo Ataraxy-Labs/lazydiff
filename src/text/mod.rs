@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 mod markdown;
 pub(crate) use markdown::body_preview_lines;
 
@@ -75,19 +73,6 @@ pub(crate) fn relative_age(timestamp: &str) -> String {
     }
 }
 
-pub(crate) fn relative_unix_age(timestamp: i64) -> String {
-    let now = now_stamp() as i64;
-    let seconds = now.saturating_sub(timestamp).max(0);
-    match seconds {
-        0..=59 => "now".to_string(),
-        60..=3_599 => format!("{}m", seconds / 60),
-        3_600..=86_399 => format!("{}h", seconds / 3_600),
-        86_400..=5_097_599 => format!("{}d", seconds / 86_400),
-        5_097_600..=63_071_999 => format!("{}mo", seconds / 2_592_000),
-        _ => format!("{}y", seconds / 31_536_000),
-    }
-}
-
 fn parse_yyyy_mm_dd(value: &str) -> Option<(i32, u32, u32)> {
     let date = value.get(0..10)?;
     let mut parts = date.split('-');
@@ -105,11 +90,4 @@ fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
     let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     (era * 146_097 + doe - 719_468) as i64
-}
-
-fn now_stamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

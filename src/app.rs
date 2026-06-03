@@ -105,7 +105,7 @@ use crate::server_query::{
     LocalDiffResult, PullRequestDiffResult, QueryClient, QueryEvent, QueryKey, QueryResult,
     QueryStatus,
 };
-use crate::text::{body_preview_lines, markdown_preview_lines, relative_age, relative_unix_age};
+use crate::text::{body_preview_lines, markdown_preview_lines, relative_age};
 use crate::ui::{
     ListGeometryBuilder, ListRowGeometry, ListRowKind, centered_rect, contains_point, draw_box,
     draw_horizontal_rule, draw_vertical_rule, fill_rect, list_item_rows, list_row_at,
@@ -427,14 +427,25 @@ impl App {
         let session = Self::load_session_for_route(&store, &initial_source, &document);
         let (query_tx, query_rx) = mpsc::channel();
         let persisted_queries = store.restore_github_query_client();
-        let github = persisted_queries
+        let (github, persisted_queue_at) = persisted_queries
             .as_ref()
-            .and_then(|client| client.client_state.queue.clone())
-            .unwrap_or_else(GitHubQueue::empty_loading);
-        let github_auth = forge.auth_status();
+            .and_then(|client| {
+                let mut queue = client.client_state.queue.clone()?;
+                let has_displayable_queue = queue.cached_at.is_some()
+                    || matches!(queue.status, GitHubQueueStatus::Ready)
+                    || !queue.items.is_empty();
+                has_displayable_queue.then(|| {
+                    let cached_at = queue.cached_at.unwrap_or(client.timestamp);
+                    queue.cached_at = Some(cached_at);
+                    queue.status = GitHubQueueStatus::Ready;
+                    (queue, cached_at)
+                })
+            })
+            .unwrap_or_else(|| (GitHubQueue::empty_loading(), 0));
+        let github_auth = GitHubAuthStatus::Checking;
         let mut query_client = QueryClient::default();
-        if let Some(cached_at) = github.cached_at {
-            query_client.hydrate_success(QueryKey::GitHubQueue, cached_at);
+        if persisted_queue_at > 0 {
+            query_client.hydrate_success(QueryKey::GitHubQueue, persisted_queue_at);
         }
         let project_label = Self::project_label_from_env();
         // Read the persisted theme synchronously so the first paint
@@ -546,7 +557,7 @@ impl App {
         }
         app.revalidate_worktrees();
         app.revalidate_semantic_diff(app.local_route());
-        app.revalidate_queue();
+        app.revalidate_existing_forge_login(false);
         app
     }
 
@@ -750,8 +761,7 @@ impl App {
         match result {
             TerminalFlowResult::ForgeLogin(Ok(login)) if self.github_auth.can_load_github() => {
                 self.github.viewer = Some(login);
-                self.github.status = GitHubQueueStatus::Loading;
-                self.revalidate_queue();
+                self.github.status = GitHubQueueStatus::Ready;
             }
             TerminalFlowResult::ForgeLogin(Ok(_)) => {
                 self.github.status = GitHubQueueStatus::MissingToken;
@@ -870,6 +880,7 @@ impl App {
                 .theme(palette.theme.diff_theme())
                 .search_matches(&search_matches)
                 .inline_blocks(&inline_blocks)
+                .reviewed_paths(&self.viewed_files)
                 .show_diff_cursor(self.comment_modal.is_none() && self.inline_focus.is_none()),
             diff_viewport,
             frame.buffer_mut(),
@@ -2178,7 +2189,7 @@ impl App {
                 self.revalidate_selected_semantic_diff();
                 self.revalidate_queue();
             }
-            Command::_LoginForge => self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin),
+            Command::_LoginForge => self.revalidate_existing_forge_login(true),
             Command::PullBranch => self.run_selected_branch_operation(BranchOperation::Pull),
             Command::PushBranch => self.run_selected_branch_operation(BranchOperation::Push),
             Command::FetchBranch => self.run_selected_branch_operation(BranchOperation::Fetch),

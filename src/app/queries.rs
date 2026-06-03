@@ -203,8 +203,31 @@ impl App {
                     }
                     Err(error) => self.commit_status = Some(format!("commit diff failed: {error}")),
                 },
+                QueryEvent::ExistingForgeLogin {
+                    interactive,
+                    result,
+                } => match result {
+                    Ok(login) => {
+                        self.github_auth = GitHubAuthStatus::Authenticated;
+                        self.github.viewer = Some(login);
+                        if matches!(
+                            self.github.status,
+                            GitHubQueueStatus::MissingToken | GitHubQueueStatus::Error(_)
+                        ) {
+                            self.github.status = GitHubQueueStatus::Ready;
+                        }
+                    }
+                    Err(error) if interactive => {
+                        self.github.status = GitHubQueueStatus::Error(error);
+                        self.pending_terminal_flow = Some(TerminalFlow::ForgeLogin);
+                    }
+                    Err(_) => {
+                        self.github_auth = GitHubAuthStatus::MissingLogin;
+                    }
+                },
                 QueryEvent::Queue(result) => match result {
                     Ok(mut queue) => {
+                        self.github_auth = GitHubAuthStatus::Authenticated;
                         queue.cached_at = Some(now_stamp() as i64);
                         self.github = queue;
                         self.body_preview_cache.clear();
@@ -216,6 +239,7 @@ impl App {
                         self.persist_github_query_client();
                     }
                     Err(error) => {
+                        self.github_auth = GitHubAuthStatus::MissingLogin;
                         self.query_client
                             .finish_error(QueryKey::GitHubQueue, error.clone());
                         self.github.status = GitHubQueueStatus::Error(error);
@@ -474,14 +498,19 @@ impl App {
         });
     }
 
+    pub(super) fn revalidate_existing_forge_login(&mut self, interactive: bool) {
+        let sender = self.query_tx.clone();
+        let forge = Arc::clone(&self.forge);
+        thread::spawn(move || {
+            let result = forge.connect_existing_login();
+            let _ = sender.send(QueryEvent::ExistingForgeLogin {
+                interactive,
+                result,
+            });
+        });
+    }
+
     pub(super) fn revalidate_queue(&mut self) {
-        let auth = self.refresh_github_auth_gate();
-        if !auth.can_load_github() {
-            if let Some(error) = auth.error() {
-                self.query_client.finish_error(QueryKey::GitHubQueue, error);
-            }
-            return;
-        }
         if !self.query_client.start_fetch(QueryKey::GitHubQueue) {
             return;
         }

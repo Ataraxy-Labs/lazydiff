@@ -255,22 +255,11 @@ impl QueryResult {
             return "loading…".to_string();
         }
         if self.is_refetching() {
-            return self
-                .updated_at
-                .map(|updated_at| {
-                    format!(
-                        "refreshing · cached {}",
-                        crate::relative_unix_age(updated_at)
-                    )
-                })
-                .unwrap_or_else(|| "refreshing…".to_string());
+            return "syncing…".to_string();
         }
         match self.status {
             QueryStatus::Pending => "not loaded".to_string(),
-            QueryStatus::Success => self
-                .updated_at
-                .map(|updated_at| format!("cached {}", crate::relative_unix_age(updated_at)))
-                .unwrap_or_else(|| "cached".to_string()),
+            QueryStatus::Success => "synced".to_string(),
             QueryStatus::Error => self
                 .error
                 .as_ref()
@@ -290,6 +279,10 @@ pub(crate) enum QueryEvent {
         repo_path: String,
         sha: String,
         result: std::result::Result<DiffDocument, String>,
+    },
+    ExistingForgeLogin {
+        interactive: bool,
+        result: std::result::Result<String, String>,
     },
     BranchOperation(std::result::Result<String, String>),
     Queue(std::result::Result<GitHubQueue, String>),

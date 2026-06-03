@@ -25,6 +25,7 @@ use super::worktree::GitCommit;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GitHubAuthStatus {
     Authenticated,
+    Checking,
     MissingLogin,
 }
 
@@ -36,16 +37,16 @@ impl GitHubAuthStatus {
     pub(crate) fn summary(&self) -> &'static str {
         match self {
             Self::Authenticated => "GitHub signed in",
-            Self::MissingLogin => "sign in to load GitHub PRs",
+            Self::Checking => "GitHub syncing…",
+            Self::MissingLogin => "Sign in to load GitHub PRs",
         }
     }
 
     pub(crate) fn notice(&self) -> &'static str {
         match self {
             Self::Authenticated => "GitHub signed in",
-            Self::MissingLogin => {
-                "GitHub PRs are locked. Press l to sign in with GitHub, then press r to refresh."
-            }
+            Self::Checking => "GitHub syncing…",
+            Self::MissingLogin => "Sign in to load GitHub PRs · press l",
         }
     }
 
@@ -55,7 +56,10 @@ impl GitHubAuthStatus {
 }
 
 pub(crate) fn github_auth_status() -> GitHubAuthStatus {
-    if github_token().is_some() {
+    if env_token("GITHUB_TOKEN").is_some()
+        || env_token("GH_TOKEN").is_some()
+        || auth_file().exists()
+    {
         GitHubAuthStatus::Authenticated
     } else {
         GitHubAuthStatus::MissingLogin
@@ -63,7 +67,13 @@ pub(crate) fn github_auth_status() -> GitHubAuthStatus {
 }
 
 pub(crate) fn github_token() -> Option<String> {
-    credentials::load_token("lazydiff-github")
+    env_token("GITHUB_TOKEN")
+        .or_else(|| env_token("GH_TOKEN"))
+        .or_else(|| credentials::load_token("lazydiff-github"))
+}
+
+fn env_token(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|token| !token.trim().is_empty())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -100,7 +110,11 @@ const QUIVER_CONVEX_HTTP_URL: &str = match option_env!("LAZYDIFF_CONVEX_HTTP_URL
     None => "https://polished-kingfisher-268.convex.site",
 };
 
-pub(crate) fn login_with_device_flow() -> std::result::Result<GitHubUser, String> {
+pub(crate) fn login_github() -> std::result::Result<GitHubUser, String> {
+    if let Ok(user) = connect_existing_github_login() {
+        return Ok(user);
+    }
+
     let flow = start_device_flow()?;
     open_external(&flow.verification_uri);
     println!();
@@ -113,8 +127,22 @@ pub(crate) fn login_with_device_flow() -> std::result::Result<GitHubUser, String
     let token = poll_device_flow(&flow)?;
     let user = fetch_user(&token)?;
     persist_auth(&token, &user)?;
-    sync_user_to_convex(&user)?;
+    sync_user_to_convex_best_effort(&user);
     Ok(user)
+}
+
+pub(crate) fn connect_existing_github_login() -> std::result::Result<GitHubUser, String> {
+    let token = github_token().ok_or_else(|| "no existing GitHub token".to_string())?;
+    let user = fetch_user(&token)?;
+    write_json(auth_file(), &user)?;
+    sync_user_to_convex_best_effort(&user);
+    Ok(user)
+}
+
+fn sync_user_to_convex_best_effort(user: &GitHubUser) {
+    if let Err(error) = sync_user_to_convex(user) {
+        eprintln!("[lazydiff] GitHub sign-in succeeded; Convex user sync failed: {error}");
+    }
 }
 
 pub(crate) fn logout_github() -> std::result::Result<bool, String> {
@@ -1054,7 +1082,12 @@ impl Forge for GitHubForge {
     }
 
     fn login(&self) -> Result<String, String> {
-        let user = login_with_device_flow()?;
+        let user = login_github()?;
+        Ok(user.login)
+    }
+
+    fn connect_existing_login(&self) -> Result<String, String> {
+        let user = connect_existing_github_login()?;
         Ok(user.login)
     }
 
@@ -1063,8 +1096,7 @@ impl Forge for GitHubForge {
     }
 
     fn fetch_queue(&self) -> Result<GitHubQueue, String> {
-        let token =
-            github_token().ok_or_else(|| "set GITHUB_TOKEN or GH_TOKEN to load PRs".to_string())?;
+        let token = github_token().ok_or_else(|| "Sign in to load GitHub PRs".to_string())?;
         fetch_github_queue(&token)
     }
 

@@ -1648,31 +1648,43 @@ impl App {
     }
 
     pub(super) fn github_summary(&self) -> String {
+        let queue = self.query_client.get(&QueryKey::GitHubQueue);
+        if queue.is_initial_loading() {
+            return "GitHub syncing…".to_string();
+        }
+        if queue.is_refetching() {
+            return "GitHub syncing…".to_string();
+        }
+        if queue.status == QueryStatus::Success {
+            let count = self.github.items.len();
+            return if count == 0 {
+                "GitHub · no PRs".to_string()
+            } else if count == 1 {
+                "GitHub · 1 PR".to_string()
+            } else {
+                format!("GitHub · {count} PRs")
+            };
+        }
         if !self.github_auth.can_load_github() {
             return self.github_auth.summary().to_string();
         }
-        let queue = self.query_client.get(&QueryKey::GitHubQueue);
-        if queue.is_initial_loading() {
-            return "loading GitHub PRs…".to_string();
-        }
-        if queue.is_refetching() {
-            return queue
-                .updated_at
-                .map(|updated_at| format!("refreshing · updated {}", relative_unix_age(updated_at)))
-                .unwrap_or_else(|| "loading GitHub PRs…".to_string());
-        }
         match queue.status {
             QueryStatus::Error => self.github.summary().to_string(),
-            QueryStatus::Success => self
-                .github
-                .cached_at
-                .map(|updated_at| format!("updated {}", relative_unix_age(updated_at)))
-                .unwrap_or_else(|| self.github.summary().to_string()),
+            QueryStatus::Success => self.github.summary().to_string(),
             QueryStatus::Pending => self.github.summary().to_string(),
         }
     }
 
     pub(super) fn github_notice(&self) -> Option<String> {
+        if self.query_client.get(&QueryKey::GitHubQueue).status == QueryStatus::Success {
+            return match &self.github_auth {
+                GitHubAuthStatus::Checking => Some("GitHub syncing…".to_string()),
+                GitHubAuthStatus::MissingLogin => {
+                    Some("Sign in to refresh GitHub PRs · press l".to_string())
+                }
+                GitHubAuthStatus::Authenticated => self.github.notice(),
+            };
+        }
         if !self.github_auth.can_load_github() {
             return Some(self.github_auth.notice().to_string());
         }
@@ -1684,10 +1696,7 @@ impl App {
             return "loading…".to_string();
         }
         if query.is_refetching() {
-            return query
-                .updated_at
-                .map(|updated_at| format!("cached {}", relative_unix_age(updated_at)))
-                .unwrap_or_else(|| "loading…".to_string());
+            return "syncing…".to_string();
         }
         query.label()
     }

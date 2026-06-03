@@ -116,6 +116,7 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
             KeyCode::Char('k') | KeyCode::Up => Some(Command::MoveUp),
             KeyCode::Char('g') => Some(Command::JumpFirst),
             KeyCode::Char('G') => Some(Command::JumpLast),
+            KeyCode::Char('l') => Some(Command::_LoginForge),
             KeyCode::Char('r') => Some(Command::Refresh),
             KeyCode::Char('p') => Some(Command::PullBranch),
             KeyCode::Char('P') => Some(Command::PushBranch),

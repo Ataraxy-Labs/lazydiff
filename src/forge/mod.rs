@@ -32,6 +32,11 @@ pub(crate) trait Forge: Send + Sync {
     /// Interactive login flow. Returns the username on success.
     fn login(&self) -> Result<String, String>;
 
+    /// Reuse already-persisted credentials without starting an interactive login flow.
+    fn connect_existing_login(&self) -> Result<String, String> {
+        Err(format!("no existing {} credentials", self.name()))
+    }
+
     /// Remove persisted credentials. Returns `true` if something was removed.
     fn logout(&self) -> Result<bool, String>;
 

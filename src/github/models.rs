@@ -33,20 +33,20 @@ impl GitHubQueue {
 
     pub(crate) fn summary(&self) -> &str {
         match &self.status {
-            GitHubQueueStatus::MissingToken => "set GITHUB_TOKEN or GH_TOKEN to load PRs",
-            GitHubQueueStatus::Loading => "loading GitHub PRs…",
+            GitHubQueueStatus::MissingToken => "Sign in to load GitHub PRs",
+            GitHubQueueStatus::Loading => "GitHub syncing…",
             GitHubQueueStatus::Ready => "updated now",
-            GitHubQueueStatus::Error(_) => "GitHub load failed · press r to retry",
+            GitHubQueueStatus::Error(_) => "GitHub sync failed · press r",
         }
     }
 
     pub(crate) fn notice(&self) -> Option<String> {
         match &self.status {
             GitHubQueueStatus::MissingToken => {
-                Some("GitHub PR queue disabled: set GITHUB_TOKEN or GH_TOKEN".to_string())
+                Some("Sign in to load GitHub PRs · press l".to_string())
             }
-            GitHubQueueStatus::Loading => Some("Loading GitHub PR queue…".to_string()),
-            GitHubQueueStatus::Error(error) => Some(format!("GitHub PR queue failed: {error}")),
+            GitHubQueueStatus::Loading => Some("GitHub syncing…".to_string()),
+            GitHubQueueStatus::Error(_) => Some("GitHub sync failed · press r".to_string()),
             GitHubQueueStatus::Ready => None,
         }
     }

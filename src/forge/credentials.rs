@@ -27,6 +27,14 @@ pub(crate) fn store_token(service: &str, token: &str) -> Result<(), String> {
     {
         return Ok(());
     }
+
+    if !plaintext_token_fallback_enabled() {
+        return Err(
+            "failed to store token in the OS keychain. Set LAZYDIFF_ALLOW_PLAINTEXT_TOKEN=1 to use the legacy plaintext token file fallback."
+                .to_string(),
+        );
+    }
+
     store_token_to_file(service, token)
 }
 
@@ -82,6 +90,15 @@ pub(crate) fn delete_token(service: &str) -> Result<bool, String> {
     }
 
     Ok(removed)
+}
+
+fn plaintext_token_fallback_enabled() -> bool {
+    env::var("LAZYDIFF_ALLOW_PLAINTEXT_TOKEN").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn store_token_to_file(service: &str, token: &str) -> Result<(), String> {

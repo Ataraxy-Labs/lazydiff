@@ -978,6 +978,7 @@ pub struct DiffWidget<'a> {
     theme: DiffTheme,
     search_matches: &'a [DiffSearchMatch],
     inline_blocks: &'a [DiffInlineBlock],
+    reviewed_paths: Option<&'a HashSet<String>>,
     show_diff_cursor: bool,
 }
 
@@ -988,6 +989,7 @@ impl<'a> DiffWidget<'a> {
             theme: DiffTheme::default(),
             search_matches: &[],
             inline_blocks: &[],
+            reviewed_paths: None,
             show_diff_cursor: true,
         }
     }
@@ -1004,6 +1006,11 @@ impl<'a> DiffWidget<'a> {
 
     pub fn inline_blocks(mut self, inline_blocks: &'a [DiffInlineBlock]) -> Self {
         self.inline_blocks = inline_blocks;
+        self
+    }
+
+    pub fn reviewed_paths(mut self, reviewed_paths: &'a HashSet<String>) -> Self {
+        self.reviewed_paths = Some(reviewed_paths);
         self
     }
 
@@ -1040,6 +1047,7 @@ impl StatefulWidget for DiffWidget<'_> {
                     state.cursor.side,
                     now,
                     self.search_matches,
+                    self.reviewed_paths,
                     self.theme,
                     state.viewport,
                     self.show_diff_cursor,
@@ -1845,6 +1853,7 @@ fn render_row_ref(
     _selected_side: DiffSide,
     now: Instant,
     search_matches: &[DiffSearchMatch],
+    reviewed_paths: Option<&HashSet<String>>,
     theme: DiffTheme,
     viewport: DiffViewport,
     show_diff_cursor: bool,
@@ -1856,7 +1865,16 @@ fn render_row_ref(
         }
         RowRef::FileHeader { file_index } => {
             let file = &document.files[file_index];
-            render_file_header(area, y, buf, file, file_index, document.files.len(), theme);
+            render_file_header(
+                area,
+                y,
+                buf,
+                file,
+                file_index,
+                document.files.len(),
+                reviewed_paths.is_some_and(|paths| paths.contains(&file.new_path)),
+                theme,
+            );
         }
         RowRef::Collapsed {
             file_index, count, ..
@@ -2073,6 +2091,7 @@ fn render_file_header(
     file: &FileDiff,
     file_index: usize,
     file_count: usize,
+    reviewed: bool,
     theme: DiffTheme,
 ) {
     let style = Style::new().fg(theme.text).bg(theme.panel);
@@ -2083,6 +2102,25 @@ fn render_file_header(
     let name = format!("{}/{} {}", file_index + 1, file_count, file.new_path);
     buf.set_stringn(area.x, y, name, area.width as usize, style);
 
+    let reviewed_label = if reviewed {
+        "☑ Reviewed "
+    } else {
+        "☐ Reviewed "
+    };
+    let reviewed_width = UnicodeWidthStr::width(reviewed_label) as u16;
+    let reviewed_x = area.right().saturating_sub(reviewed_width);
+    if reviewed_width < area.width {
+        buf.set_stringn(
+            reviewed_x,
+            y,
+            reviewed_label,
+            reviewed_width as usize,
+            Style::new()
+                .fg(if reviewed { theme.add_fg } else { theme.muted })
+                .bg(theme.panel),
+        );
+    }
+
     let additions = file.additions();
     let deletions = file.deletions();
     let suffix = match (additions, deletions) {
@@ -2092,8 +2130,9 @@ fn render_file_header(
         (additions, deletions) => format!("+{additions} -{deletions} "),
     };
     let suffix_width = suffix.len() as u16;
-    if suffix_width < area.width {
-        let suffix_x = area.right().saturating_sub(suffix_width);
+    let suffix_right = reviewed_x.saturating_sub(1).max(area.x);
+    if suffix_width < suffix_right.saturating_sub(area.x) {
+        let suffix_x = suffix_right.saturating_sub(suffix_width);
         match (additions, deletions) {
             (0, 0) => {
                 buf.set_stringn(

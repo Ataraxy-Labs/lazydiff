@@ -43,7 +43,6 @@ pub(crate) use design_system::{FinderPalette, HomePalette};
 use forge::detect::detect_forge;
 pub(crate) use github::{GitHubComment, GitHubQueue};
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
-pub(crate) use text::relative_unix_age;
 pub(crate) use ui::{draw_box, fill_rect, truncate};
 
 fn main() -> Result<()> {
@@ -109,13 +108,6 @@ fn main() -> Result<()> {
         return bench_scroll_render(path, patch.len(), document);
     }
     let forge = detect_forge();
-    if forge.auth_status() != forge::ForgeAuthStatus::Authenticated {
-        eprintln!("lazydiff requires signing in to GitHub.");
-        let username = forge
-            .login()
-            .map_err(|error| color_eyre::eyre::eyre!(error))?;
-        eprintln!("Signed in as {username}.");
-    }
     let mut terminal = init_terminal()?;
     let app = match launch {
         LaunchInput::Home => App::new(path, patch.len(), document, forge),

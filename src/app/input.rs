@@ -302,6 +302,9 @@ impl App {
             return false;
         }
         let inline_blocks = self.diff_inline_blocks_for_area(Some(area));
+        if self.toggle_file_reviewed_at_mouse(mouse, area, &inline_blocks) {
+            return true;
+        }
         if self.expand_collapsed_diff_row_at_mouse(mouse, area, &inline_blocks) {
             return true;
         }
@@ -323,6 +326,54 @@ impl App {
             self.diff_buffer.clear_transient();
         }
         started
+    }
+
+    fn toggle_file_reviewed_at_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        area: Rect,
+        inline_blocks: &[DiffInlineBlock],
+    ) -> bool {
+        let mode = self.diff_buffer.viewer().viewport.mode;
+        let Some(row) = self
+            .diff_buffer
+            .viewer()
+            .document_row_for_screen_cell_with_inline_blocks(
+                &self.document,
+                inline_blocks,
+                area,
+                mouse.column,
+                mouse.row,
+            )
+        else {
+            return false;
+        };
+        if !self.document.is_file_header_row(mode, row) {
+            return false;
+        }
+        let reviewed_width = "☐ Reviewed ".chars().count() as u16;
+        let reviewed_x = area.right().saturating_sub(reviewed_width);
+        if mouse.column < reviewed_x || mouse.column >= area.right() {
+            return false;
+        }
+        let Some(file_index) = self.document.row_file_index(mode, row) else {
+            return false;
+        };
+        let Some(path) = self
+            .document
+            .files
+            .get(file_index)
+            .map(|file| file.new_path.clone())
+        else {
+            return false;
+        };
+        self.toggle_file_viewed(&path);
+        self.diff_buffer.viewer_mut().clear_selection();
+        self.selecting_text = false;
+        self.pending_screen_selection = None;
+        self.screen_selection = None;
+        self.screen_selection_bounds = None;
+        true
     }
 
     fn extend_diff_mouse_selection(
