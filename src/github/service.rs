@@ -100,7 +100,6 @@ struct DeviceFlowTokenResponse {
     interval: Option<u64>,
 }
 
-const GITHUB_CLIENT_ID: &str = "Ov23lioE75FJYz4Mn7ZH";
 const QUIVER_CONVEX_URL: &str = match option_env!("LAZYDIFF_CONVEX_URL") {
     Some(url) => url,
     None => "https://polished-kingfisher-268.convex.cloud",
@@ -109,6 +108,65 @@ const QUIVER_CONVEX_HTTP_URL: &str = match option_env!("LAZYDIFF_CONVEX_HTTP_URL
     Some(url) => url,
     None => "https://polished-kingfisher-268.convex.site",
 };
+
+fn github_client_id() -> std::result::Result<String, String> {
+    if let Ok(client_id) = env::var("LAZYDIFF_GITHUB_CLIENT_ID")
+        && !client_id.trim().is_empty()
+    {
+        return Ok(client_id);
+    }
+
+    if let Some(client_id) = configured_github_client_id()? {
+        return Ok(client_id);
+    }
+
+    if let Some(client_id) = option_env!("LAZYDIFF_GITHUB_CLIENT_ID")
+        && !client_id.trim().is_empty()
+    {
+        return Ok(client_id.to_string());
+    }
+
+    Err(format!(
+        "missing GitHub OAuth client id; set github_client_id in {} or set LAZYDIFF_GITHUB_CLIENT_ID",
+        config_file().display()
+    ))
+}
+
+fn configured_github_client_id() -> std::result::Result<Option<String>, String> {
+    let path = config_file();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("failed to read {}: {error}", path.display())),
+    };
+    Ok(parse_config_value(&raw, "github_client_id"))
+}
+
+fn config_file() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lazydiff")
+        .join("config.toml")
+}
+
+fn parse_config_value(raw: &str, key: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        let line = line.split_once('#').map_or(line, |(value, _)| value).trim();
+        let (line_key, value) = line.split_once('=')?;
+        if line_key.trim() != key {
+            return None;
+        }
+        let value = value.trim();
+        let unquoted = value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .unwrap_or(value)
+            .trim();
+        (!unquoted.is_empty()).then(|| unquoted.to_string())
+    })
+}
 
 pub(crate) fn login_github() -> std::result::Result<GitHubUser, String> {
     if let Ok(user) = connect_existing_github_login() {
@@ -161,6 +219,7 @@ pub(crate) fn logout_github() -> std::result::Result<bool, String> {
 }
 
 fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
+    let client_id = github_client_id()?;
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
         .build()
@@ -169,7 +228,7 @@ fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
         .post("https://github.com/login/device/code")
         .header("Accept", "application/json")
         .json(&serde_json::json!({
-            "client_id": GITHUB_CLIENT_ID,
+            "client_id": &client_id,
             "scope": "repo read:user user:email",
         }))
         .send()
@@ -184,6 +243,7 @@ fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
 }
 
 fn poll_device_flow(flow: &DeviceFlowStart) -> std::result::Result<String, String> {
+    let client_id = github_client_id()?;
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
         .build()
@@ -196,7 +256,7 @@ fn poll_device_flow(flow: &DeviceFlowStart) -> std::result::Result<String, Strin
             .post("https://github.com/login/oauth/access_token")
             .header("Accept", "application/json")
             .json(&serde_json::json!({
-                "client_id": GITHUB_CLIENT_ID,
+                "client_id": &client_id,
                 "device_code": flow.device_code,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             }))
@@ -1149,5 +1209,32 @@ impl Forge for GitHubForge {
 
     fn branch_url(&self, repo: &str, branch: &str) -> String {
         format!("https://github.com/{repo}/tree/{branch}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_config_value;
+
+    #[test]
+    fn parses_github_client_id_from_config() {
+        let raw = r#"
+            # LazyDiff config
+            other = "ignored"
+            github_client_id = "Iv1.phosphor"
+        "#;
+
+        assert_eq!(
+            parse_config_value(raw, "github_client_id"),
+            Some("Iv1.phosphor".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_empty_github_client_id() {
+        assert_eq!(
+            parse_config_value("github_client_id = \"\"", "github_client_id"),
+            None
+        );
     }
 }

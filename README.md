@@ -76,6 +76,13 @@ lazydiff login
 lazydiff logout
 ```
 
+The GitHub device login needs an OAuth app client ID. Configure it locally:
+
+```toml
+# ~/.config/lazydiff/config.toml
+github_client_id = "your-github-oauth-client-id"
+```
+
 Update LazyDiff from GitHub Releases:
 
 ```bash
