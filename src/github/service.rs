@@ -163,6 +163,7 @@ pub(crate) fn logout_github() -> std::result::Result<bool, String> {
 fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -186,6 +187,7 @@ fn start_device_flow() -> std::result::Result<DeviceFlowStart, String> {
 fn poll_device_flow(flow: &DeviceFlowStart) -> std::result::Result<String, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let mut interval = flow.interval.max(1);
@@ -268,6 +270,7 @@ fn github_get_json<T: for<'de> Deserialize<'de>>(
 ) -> std::result::Result<T, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -290,6 +293,7 @@ fn github_post_json(
 ) -> std::result::Result<serde_json::Value, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -587,6 +591,7 @@ fn github_get_file_text(
     url.query_pairs_mut().append_pair("ref", sha);
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -874,6 +879,7 @@ fragment QuiverPullRequestFields on PullRequest {
 pub(crate) fn fetch_github_queue(token: &str) -> std::result::Result<GitHubQueue, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let response = client

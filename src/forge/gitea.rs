@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, time::Duration};
 
 use lazydiff_diffs::DiffLineRangeTarget;
 use serde::Deserialize;
@@ -44,6 +44,7 @@ impl GiteaForge {
     fn client(&self) -> Result<reqwest::blocking::Client, String> {
         reqwest::blocking::Client::builder()
             .user_agent("lazydiff")
+            .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| e.to_string())
     }
