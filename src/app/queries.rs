@@ -216,6 +216,7 @@ impl App {
                         ) {
                             self.github.status = GitHubQueueStatus::Ready;
                         }
+                        self.revalidate_queue();
                     }
                     Err(error) if interactive => {
                         self.github.status = GitHubQueueStatus::Error(error);

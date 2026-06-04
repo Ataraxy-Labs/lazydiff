@@ -127,7 +127,8 @@ pub(crate) fn login_github() -> std::result::Result<GitHubUser, String> {
     let token = poll_device_flow(&flow)?;
     let user = fetch_user(&token)?;
     persist_auth(&token, &user)?;
-    sync_user_to_convex_best_effort(&user);
+    let user_clone = user.clone();
+    thread::spawn(move || sync_user_to_convex_best_effort(&user_clone));
     Ok(user)
 }
 
@@ -135,7 +136,9 @@ pub(crate) fn connect_existing_github_login() -> std::result::Result<GitHubUser,
     let token = github_token().ok_or_else(|| "no existing GitHub token".to_string())?;
     let user = fetch_user(&token)?;
     write_json(auth_file(), &user)?;
-    sync_user_to_convex_best_effort(&user);
+    // Fire-and-forget: don't block auth status on Convex sync
+    let user_clone = user.clone();
+    thread::spawn(move || sync_user_to_convex_best_effort(&user_clone));
     Ok(user)
 }
 
