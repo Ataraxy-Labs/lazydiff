@@ -3,6 +3,8 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::{DiffTheme, InlineDiffSpan, RowKind, SyntaxHighlightKind, SyntaxSpan};
 
+const PIERRE_DARK_THEME: &str = include_str!("../themes/pierre-dark.json");
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderCellKind {
     Context,
@@ -236,10 +238,7 @@ pub(crate) struct PierreHighlighter {
 impl PierreHighlighter {
     pub(crate) fn new() -> Option<Self> {
         let mut registry = Registry::builtin().ok()?;
-        let _ = registry.add_theme_from_path(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/themes/pierre-dark.json"
-        ));
+        add_embedded_pierre_theme(&mut registry).ok()?;
         registry.link_grammars();
         Some(Self { registry })
     }
@@ -278,6 +277,17 @@ impl PierreHighlighter {
 
         Some(lines)
     }
+}
+
+fn add_embedded_pierre_theme(registry: &mut Registry) -> std::result::Result<(), String> {
+    let path = std::env::temp_dir().join(format!(
+        "lazydiff-pierre-dark-{}.json",
+        PIERRE_DARK_THEME.len()
+    ));
+    std::fs::write(&path, PIERRE_DARK_THEME).map_err(|error| error.to_string())?;
+    registry
+        .add_theme_from_path(&path)
+        .map_err(|error| error.to_string())
 }
 
 fn push_aligned_token_span(

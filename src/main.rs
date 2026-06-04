@@ -45,12 +45,10 @@ pub(crate) use github::{GitHubComment, GitHubQueue};
 use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use ui::{draw_box, fill_rect, truncate};
 
+const BENCH_SCROLL_FIXTURE: &str = "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -1,4 +1,4 @@\n import { value } from './value';\n-const label = 'old';\n+const label = 'new';\n export function example() {\n   return `${label}: ${value}`;\n }\n";
+
 fn main() -> Result<()> {
     color_eyre::install()?;
-    let fixture = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../fixtures/nodejs-node-63115.diff"
-    );
     let mut args: Vec<String> = env::args().skip(1).collect();
     let bench_scroll = args.first().is_some_and(|arg| arg == "--bench-scroll");
     if bench_scroll {
@@ -85,12 +83,17 @@ fn main() -> Result<()> {
     }
     let launch = LaunchInput::parse(args)?;
     let path = if bench_scroll {
-        launch.label().unwrap_or_else(|| fixture.to_string())
+        launch
+            .label()
+            .unwrap_or_else(|| "bench fixture".to_string())
     } else {
         launch.label().unwrap_or_else(|| "worktree".to_string())
     };
     let patch = if bench_scroll {
-        fs::read_to_string(&path)?
+        match launch.label() {
+            Some(path) => fs::read_to_string(path)?,
+            None => BENCH_SCROLL_FIXTURE.to_string(),
+        }
     } else {
         launch.load_patch()?
     };
