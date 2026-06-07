@@ -133,19 +133,25 @@ impl App {
                         .query_client
                         .finish_error(QueryKey::ThemePreference, error),
                 },
-                QueryEvent::LocalDiff(result) => match result {
+                QueryEvent::LocalDiff { route, result } => match result {
                     Ok(local_diff) => {
+                        if route != self.local_route {
+                            self.query_client
+                                .finish_success(QueryKey::LocalDiff, now_stamp() as i64);
+                            self.revalidate_local_diff();
+                            continue;
+                        }
+
+                        let requested_source = DiffSource::LocalWorktree(route);
+                        let was_showing_requested = self.diff_source == requested_source;
                         self.local_document = local_diff.document.clone();
-                        self.local_route = LocalWorktreeRoute {
-                            repo_path: local_diff.repo_path,
-                            branch: local_diff.branch,
-                            base_ref: local_diff.base_ref,
-                        };
+                        self.local_route.branch = local_diff.branch;
+                        self.local_route.base_ref = local_diff.base_ref;
                         let route = DiffSource::LocalWorktree(self.local_route.clone());
                         self.query_client
                             .finish_success(QueryKey::LocalDiff, now_stamp() as i64);
                         self.revalidate_semantic_diff(route.clone());
-                        if matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
+                        if was_showing_requested || self.diff_source == route {
                             self.session = App::load_session_for_route(
                                 &self.store,
                                 &route,
@@ -155,9 +161,18 @@ impl App {
                             self.diff_source = route.clone();
                             self.replace_document_preserving_view(local_diff.document);
                             self.apply_pending_semantic_focus(&route);
+                            self.schedule_full_diff_highlight(route, self.document.clone());
                         }
                     }
-                    Err(error) => self.query_client.finish_error(QueryKey::LocalDiff, error),
+                    Err(error) => {
+                        if route == self.local_route {
+                            self.query_client.finish_error(QueryKey::LocalDiff, error);
+                        } else {
+                            self.query_client
+                                .finish_success(QueryKey::LocalDiff, now_stamp() as i64);
+                            self.revalidate_local_diff();
+                        }
+                    }
                 },
                 QueryEvent::Worktrees(result) => match result {
                     Ok(worktrees) => {
@@ -175,17 +190,34 @@ impl App {
                     self.revalidate_local_diff();
                     self.revalidate_worktrees();
                 }
-                QueryEvent::BranchCommits(result) => match result {
-                    Ok(commits) => {
-                        self.commits = commits;
-                        self.commit_selection = self
-                            .commit_selection
-                            .min(self.commits.len().saturating_sub(1));
-                        self.commit_status = None;
-                        self.revalidate_selected_semantic_diff();
+                QueryEvent::BranchCommits { context, result } => {
+                    let active = match &context {
+                        CommitListContext::Local(route) => {
+                            self.commit_route.as_ref() == Some(route)
+                                && self.commit_pr_route.is_none()
+                        }
+                        CommitListContext::PullRequest { repository, number } => {
+                            self.commit_pr_route.as_ref() == Some(&(repository.clone(), *number))
+                                && self.commit_route.is_none()
+                        }
+                    };
+                    if !active {
+                        continue;
                     }
-                    Err(error) => self.commit_status = Some(format!("commit log failed: {error}")),
-                },
+                    match result {
+                        Ok(commits) => {
+                            self.commits = commits;
+                            self.commit_selection = self
+                                .commit_selection
+                                .min(self.commits.len().saturating_sub(1));
+                            self.commit_status = None;
+                            self.revalidate_selected_semantic_diff();
+                        }
+                        Err(error) => {
+                            self.commit_status = Some(format!("commit log failed: {error}"))
+                        }
+                    }
+                }
                 QueryEvent::CommitDiff {
                     repo_path,
                     sha,
@@ -193,6 +225,9 @@ impl App {
                 } => match result {
                     Ok(document) => {
                         let route = DiffSource::Commit { repo_path, sha };
+                        if self.surface != AppSurface::Diff || self.diff_source != route {
+                            continue;
+                        }
                         self.replace_route(AppRoute::Diff(route.clone()));
                         self.diff_source = route.clone();
                         self.session = App::load_session_for_route(&self.store, &route, &document);
@@ -200,8 +235,14 @@ impl App {
                         self.replace_document_preserving_view(document);
                         self.apply_pending_semantic_focus(&route);
                         self.surface_scroll_y = 0;
+                        self.schedule_full_diff_highlight(route, self.document.clone());
                     }
-                    Err(error) => self.commit_status = Some(format!("commit diff failed: {error}")),
+                    Err(error) => {
+                        let route = DiffSource::Commit { repo_path, sha };
+                        if self.surface == AppSurface::Diff && self.diff_source == route {
+                            self.commit_status = Some(format!("commit diff failed: {error}"));
+                        }
+                    }
                 },
                 QueryEvent::ExistingForgeLogin {
                     interactive,
@@ -341,6 +382,9 @@ impl App {
                         Err(_error) => {}
                     }
                 }
+                QueryEvent::HighlightedFiles { token, response } => {
+                    self.apply_highlighted_files(token, response);
+                }
                 QueryEvent::SemanticDiff { route, result } => {
                     let query_key = QueryKey::semantic_diff(route.session_id());
                     match result {
@@ -348,7 +392,8 @@ impl App {
                             let route_id = route.session_id();
                             self.persisted_semantic_diff_cache
                                 .insert(route_id, diff.clone());
-                            self.semantic_diff_cache.insert(route, diff);
+                            self.semantic_diff_cache.insert(route.clone(), diff);
+                            self.backfill_viewed_entities_for_route(&route);
                             self.query_client
                                 .finish_success(query_key, now_stamp() as i64);
                             self.persist_github_query_client();
@@ -481,9 +526,10 @@ impl App {
             return;
         }
         let sender = self.query_tx.clone();
+        let route = self.local_route.clone();
         thread::spawn(move || {
-            let result = Self::load_local_worktree_diff();
-            let _ = sender.send(QueryEvent::LocalDiff(result));
+            let result = Self::load_local_worktree_diff(route.clone());
+            let _ = sender.send(QueryEvent::LocalDiff { route, result });
         });
     }
 
@@ -591,6 +637,7 @@ impl App {
             self.sync_viewed_state_for_session();
             self.replace_document_preserving_view(document);
             self.apply_pending_semantic_focus(&route);
+            self.schedule_full_diff_highlight(route, self.document.clone());
         }
     }
 }

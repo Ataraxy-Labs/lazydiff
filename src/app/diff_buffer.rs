@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lazydiff_diffs::{DiffSearchMatch, DiffViewerState};
+use lazydiff_diffs::{
+    DiffDocument, DiffInlineBlock, DiffSearchMatch, DiffViewerState, DiffVisibleDocumentRows,
+};
+use ratatui::layout::Rect;
 
 const PENDING_KEY_TIMEOUT: Duration = Duration::from_millis(800);
 
@@ -59,8 +62,6 @@ pub(super) enum DiffBufferAction {
     LineEnd,
     PreviousFile,
     NextFile,
-    NextCommit,
-    PreviousCommit,
     NextChange,
     PreviousChange,
     NextNote,
@@ -76,11 +77,13 @@ pub(super) enum DiffBufferAction {
     SearchPrevious,
     OpenThread,
     OpenEditor,
+    OpenQuestion,
     ToggleVisual,
     ToggleVisualLine,
     SelectTextObject(TextObjectKind, char),
     YankSelection,
     OpenComment,
+    ToggleReviewed,
     DeleteNote,
     SaveComments,
     Quit { force: bool },
@@ -100,6 +103,17 @@ impl DiffBufferState {
         self.viewer.viewport.width = width;
         self.viewer.viewport.height = height;
         self.viewer.viewport.top_margin = top_margin;
+    }
+
+    pub(super) fn visible_document_rows(
+        &mut self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        area: Rect,
+        overscan: usize,
+    ) -> DiffVisibleDocumentRows {
+        self.viewer
+            .visible_document_rows_for_area(document, inline_blocks, area, overscan)
     }
 
     pub(super) fn mode(&self) -> DiffBufferMode {
@@ -141,10 +155,11 @@ impl DiffBufferState {
 
         if self.help_visible {
             return match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                KeyCode::Esc | KeyCode::Char('?') => {
                     self.help_visible = false;
                     DiffBufferAction::None
                 }
+                KeyCode::Char('q') => DiffBufferAction::Quit { force: false },
                 _ => DiffBufferAction::None,
             };
         }
@@ -217,6 +232,8 @@ impl DiffBufferState {
             KeyCode::Char('N') if key.modifiers.is_empty() => {
                 self.accept(DiffBufferAction::SearchPrevious)
             }
+            KeyCode::Char('f') => self.accept(DiffBufferAction::OpenFileFinder),
+            KeyCode::Char('p') => self.accept(DiffBufferAction::PreviousChange),
             KeyCode::Char('j') | KeyCode::Down => self.accept(DiffBufferAction::MoveRows(1)),
             KeyCode::Char('k') | KeyCode::Up => self.accept(DiffBufferAction::MoveRows(-1)),
             KeyCode::Char('h') | KeyCode::Left => self.accept(DiffBufferAction::MoveCols(-1)),
@@ -243,9 +260,14 @@ impl DiffBufferState {
             KeyCode::Char('G') | KeyCode::End => self.accept(DiffBufferAction::Bottom),
             KeyCode::Char('0') | KeyCode::Home => self.accept(DiffBufferAction::LineStart),
             KeyCode::Char('$') => self.accept(DiffBufferAction::LineEnd),
-            KeyCode::Char('J') => self.accept(DiffBufferAction::NextCommit),
-            KeyCode::Char('K') => self.accept(DiffBufferAction::PreviousCommit),
-            KeyCode::Char('s') => self.accept(DiffBufferAction::ToggleSideBySide),
+            KeyCode::Char('J') => self.accept(DiffBufferAction::NextChange),
+            KeyCode::Char('K') => self.accept(DiffBufferAction::PreviousChange),
+            KeyCode::Char('q') if key.modifiers.is_empty() => {
+                self.accept(DiffBufferAction::Quit { force: false })
+            }
+            KeyCode::Char('m') | KeyCode::Char('s') => {
+                self.accept(DiffBufferAction::ToggleSideBySide)
+            }
             KeyCode::Tab | KeyCode::BackTab => self.accept(DiffBufferAction::SwitchSide),
             KeyCode::Enter => self.accept(DiffBufferAction::OpenThread),
             KeyCode::Char('o') => self.accept(DiffBufferAction::OpenEditor),
@@ -275,7 +297,9 @@ impl DiffBufferState {
                 self.mode = DiffBufferMode::PendingTextObject(TextObjectKind::Around);
                 DiffBufferAction::None
             }
+            KeyCode::Char('a') => self.accept(DiffBufferAction::OpenQuestion),
             KeyCode::Char('i') | KeyCode::Char('I') => self.accept(DiffBufferAction::OpenComment),
+            KeyCode::Char('r') => self.accept(DiffBufferAction::ToggleReviewed),
             KeyCode::Char('x') => self.accept(DiffBufferAction::DeleteNote),
             KeyCode::Char('d') if self.pending.keys == "d" => {
                 self.accept(DiffBufferAction::DeleteNote)
@@ -337,7 +361,7 @@ impl DiffBufferState {
             KeyCode::Esc => {
                 self.command_line.clear();
                 self.mode = DiffBufferMode::Normal;
-                DiffBufferAction::Cancel
+                DiffBufferAction::None
             }
             KeyCode::Backspace => {
                 self.command_line.pop();
@@ -526,6 +550,66 @@ mod tests {
     }
 
     #[test]
+    fn capital_j_k_jump_between_hunks() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('J')), now),
+            DiffBufferAction::NextChange
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('K')), now),
+            DiffBufferAction::PreviousChange
+        );
+    }
+
+    #[test]
+    fn r_marks_current_review_target() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('r')), now),
+            DiffBufferAction::ToggleReviewed
+        );
+    }
+
+    #[test]
+    fn m_and_s_toggle_split_unified_diff() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('m')), now),
+            DiffBufferAction::ToggleSideBySide
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('s')), now),
+            DiffBufferAction::ToggleSideBySide
+        );
+    }
+
+    #[test]
+    fn diff_review_and_navigation_keys_are_reachable() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('f')), now),
+            DiffBufferAction::OpenFileFinder
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('p')), now),
+            DiffBufferAction::PreviousChange
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('a')), now),
+            DiffBufferAction::OpenQuestion
+        );
+    }
+
+    #[test]
     fn pending_chords_expire() {
         let mut state = DiffBufferState::default();
         let now = Instant::now();
@@ -631,6 +715,56 @@ mod tests {
         assert_eq!(
             state.handle_key(key(KeyCode::Enter), now),
             DiffBufferAction::Quit { force: true }
+        );
+    }
+
+    #[test]
+    fn esc_in_command_mode_returns_to_normal_without_app_cancel() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char(':')), now),
+            DiffBufferAction::None
+        );
+        assert_eq!(state.mode(), DiffBufferMode::Command);
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('q')), now),
+            DiffBufferAction::None
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::Esc), now),
+            DiffBufferAction::None
+        );
+        assert_eq!(state.mode(), DiffBufferMode::Normal);
+        assert_eq!(state.command_line(), "");
+    }
+
+    #[test]
+    fn q_quits_even_when_help_overlay_is_open() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('?')), now),
+            DiffBufferAction::ShowHelp
+        );
+        state.toggle_help();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('q')), now),
+            DiffBufferAction::Quit { force: false }
+        );
+    }
+
+    #[test]
+    fn q_quits_from_normal_diff_mode() {
+        let mut state = DiffBufferState::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('q')), now),
+            DiffBufferAction::Quit { force: false }
         );
     }
 

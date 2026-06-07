@@ -106,7 +106,6 @@ pub(crate) fn command_for_layer(layer: Layer, key: KeyEvent) -> Option<Command> 
         },
         Layer::Queue if is_tab_key(key) => Some(Command::OpenCommitList),
         Layer::Queue => match key.code {
-            KeyCode::Esc => Some(Command::Quit),
             KeyCode::Enter => Some(Command::OpenDetail),
             KeyCode::Char('C') => Some(Command::OpenCommitList),
             KeyCode::Char('d') => Some(Command::OpenDiff),

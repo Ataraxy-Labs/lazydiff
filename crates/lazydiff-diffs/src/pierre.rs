@@ -67,6 +67,13 @@ pub fn line_render_spans(
 ) -> Vec<RenderSpan> {
     let mut spans = Vec::new();
     let mut inline_index = 0usize;
+    let fallback_spans;
+    let syntax_spans = if syntax_spans.is_empty() {
+        fallback_spans = lightweight_syntax_spans(text);
+        fallback_spans.as_slice()
+    } else {
+        syntax_spans
+    };
 
     for (byte_index, ch) in text.char_indices() {
         while inline_index < inline_spans.len() && inline_spans[inline_index].end <= byte_index {
@@ -89,6 +96,183 @@ pub fn line_render_spans(
     }
 
     spans
+}
+
+fn lightweight_syntax_spans(text: &str) -> Vec<SyntaxSpan> {
+    let mut spans = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let rest = &text[index..];
+        if rest.starts_with("//") || rest.starts_with('#') {
+            spans.push(SyntaxSpan {
+                start: index,
+                end: text.len(),
+                kind: SyntaxHighlightKind::Comment,
+                style: None,
+            });
+            break;
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '"' || ch == '\'' || ch == '`' {
+            let end = quoted_span_end(text, index, ch);
+            spans.push(SyntaxSpan {
+                start: index,
+                end,
+                kind: SyntaxHighlightKind::String,
+                style: None,
+            });
+            index = end;
+            continue;
+        }
+        if ch.is_ascii_digit() {
+            let end = token_end_while(text, index, |ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.')
+            });
+            spans.push(SyntaxSpan {
+                start: index,
+                end,
+                kind: SyntaxHighlightKind::Number,
+                style: None,
+            });
+            index = end;
+            continue;
+        }
+        if is_ident_start(ch) {
+            let end = token_end_while(text, index, is_ident_continue);
+            let token = &text[index..end];
+            if let Some(kind) = lightweight_token_kind(text, index, end, token) {
+                spans.push(SyntaxSpan {
+                    start: index,
+                    end,
+                    kind,
+                    style: None,
+                });
+            }
+            index = end;
+            continue;
+        }
+        if is_lightweight_punctuation(ch) {
+            spans.push(SyntaxSpan {
+                start: index,
+                end: index + ch.len_utf8(),
+                kind: SyntaxHighlightKind::Punctuation,
+                style: None,
+            });
+        }
+        index += ch.len_utf8();
+    }
+    spans
+}
+
+fn quoted_span_end(text: &str, start: usize, quote: char) -> usize {
+    let mut escaped = false;
+    for (offset, ch) in text[start + quote.len_utf8()..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return start + quote.len_utf8() + offset + ch.len_utf8();
+        }
+    }
+    text.len()
+}
+
+fn token_end_while(text: &str, start: usize, mut predicate: impl FnMut(char) -> bool) -> usize {
+    for (offset, ch) in text[start..].char_indices() {
+        if !predicate(ch) {
+            return start + offset;
+        }
+    }
+    text.len()
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn lightweight_token_kind(
+    text: &str,
+    start: usize,
+    end: usize,
+    token: &str,
+) -> Option<SyntaxHighlightKind> {
+    match token {
+        "true" | "false" | "True" | "False" | "TRUE" | "FALSE" => {
+            Some(SyntaxHighlightKind::Boolean)
+        }
+        "as" | "async" | "await" | "break" | "case" | "catch" | "class" | "const" | "continue"
+        | "def" | "defer" | "do" | "dyn" | "else" | "enum" | "export" | "extends" | "extern"
+        | "final" | "fn" | "for" | "from" | "func" | "function" | "go" | "if" | "impl"
+        | "import" | "in" | "interface" | "let" | "loop" | "match" | "mod" | "move" | "mut"
+        | "namespace" | "package" | "priv" | "pub" | "return" | "self" | "Self" | "static"
+        | "struct" | "super" | "switch" | "throw" | "trait" | "try" | "type" | "typeof" | "use"
+        | "var" | "where" | "while" | "yield" => Some(SyntaxHighlightKind::Keyword),
+        "bool" | "char" | "double" | "float" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+        | "int" | "str" | "string" | "String" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+        | "void" => Some(SyntaxHighlightKind::Type),
+        _ if previous_non_whitespace(text, start) == Some('.') => {
+            Some(SyntaxHighlightKind::Property)
+        }
+        _ if next_non_whitespace(text, end) == Some('(') => Some(SyntaxHighlightKind::Function),
+        _ if token
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase()) =>
+        {
+            Some(SyntaxHighlightKind::Type)
+        }
+        _ if token.chars().all(|ch| ch == '_' || ch.is_ascii_uppercase()) && token.len() > 1 => {
+            Some(SyntaxHighlightKind::Property)
+        }
+        _ => Some(SyntaxHighlightKind::Property),
+    }
+}
+
+fn previous_non_whitespace(text: &str, index: usize) -> Option<char> {
+    text[..index].chars().rev().find(|ch| !ch.is_whitespace())
+}
+
+fn next_non_whitespace(text: &str, index: usize) -> Option<char> {
+    text[index..].chars().find(|ch| !ch.is_whitespace())
+}
+
+fn is_lightweight_punctuation(ch: char) -> bool {
+    matches!(
+        ch,
+        ':' | ';'
+            | ','
+            | '.'
+            | '('
+            | ')'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | '<'
+            | '>'
+            | '='
+            | '&'
+            | '|'
+            | '!'
+            | '?'
+            | '+'
+            | '-'
+            | '*'
+            | '/'
+            | '%'
+    )
 }
 
 fn active_syntax_span(spans: &[SyntaxSpan], byte_index: usize) -> Option<&SyntaxSpan> {
@@ -732,5 +916,85 @@ mod tests {
         assert_eq!(spans[0].text, "Style");
         assert_eq!(spans[0].style.fg, Some(Color::Magenta));
         assert_eq!(spans[0].style.bg, Some(theme.add_content_bg));
+    }
+
+    #[test]
+    fn empty_syntax_spans_get_lightweight_keyword_fallback() {
+        let theme = DiffTheme::default();
+        let spans = line_render_spans(
+            "pub fn render(value: bool) -> String {",
+            &[],
+            &[],
+            RowKind::Context,
+            theme,
+            Style::new().fg(Color::White).bg(theme.bg),
+        );
+
+        let keyword_span = spans
+            .iter()
+            .find(|span| span.text == "pub")
+            .expect("keyword fallback span");
+        assert_eq!(keyword_span.style.fg, Some(theme.syntax.keyword));
+        let type_span = spans
+            .iter()
+            .find(|span| span.text == "bool")
+            .expect("type fallback span");
+        assert_eq!(type_span.style.fg, Some(theme.syntax.r#type));
+        let function_span = spans
+            .iter()
+            .find(|span| span.text == "render")
+            .expect("function fallback span");
+        assert_eq!(function_span.style.fg, Some(theme.syntax.function));
+    }
+
+    #[test]
+    fn empty_syntax_spans_get_lightweight_identifier_fallback() {
+        let theme = DiffTheme::default();
+        let spans = line_render_spans(
+            "DiffVisibleDocumentRows::file_indices.push(value);",
+            &[],
+            &[],
+            RowKind::Context,
+            theme,
+            Style::new().fg(Color::White).bg(theme.bg),
+        );
+
+        let type_span = spans
+            .iter()
+            .find(|span| span.text == "DiffVisibleDocumentRows")
+            .expect("type-like identifier fallback span");
+        assert_eq!(type_span.style.fg, Some(theme.syntax.r#type));
+        let property_span = spans
+            .iter()
+            .find(|span| span.text == "file_indices")
+            .expect("property fallback span");
+        assert_eq!(property_span.style.fg, Some(theme.syntax.property));
+        let function_span = spans
+            .iter()
+            .find(|span| span.text == "push")
+            .expect("method fallback span");
+        assert_eq!(function_span.style.fg, Some(theme.syntax.property));
+    }
+
+    #[test]
+    fn explicit_pierre_spans_override_lightweight_fallback() {
+        let theme = DiffTheme::default();
+        let spans = line_render_spans(
+            "pub fn render()",
+            &[SyntaxSpan {
+                start: 0,
+                end: 3,
+                kind: SyntaxHighlightKind::String,
+                style: Some(Style::new().fg(Color::Magenta)),
+            }],
+            &[],
+            RowKind::Context,
+            theme,
+            Style::new().fg(Color::White).bg(theme.bg),
+        );
+
+        let first = spans.first().expect("first span");
+        assert_eq!(first.text, "pub");
+        assert_eq!(first.style.fg, Some(Color::Magenta));
     }
 }

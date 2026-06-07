@@ -4,9 +4,11 @@ use lazydiff_diffs::DiffDocument;
 
 use crate::{
     GitHubComment, GitHubQueue,
-    app::{DiffSource, SemanticDiff},
+    app::HighlightToken,
+    app::{DiffSource, LocalWorktreeRoute, SemanticDiff},
     design_system::ThemeVariant,
     github::{GitCommit, Worktree},
+    highlight_daemon::HighlightResponse,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -272,9 +274,15 @@ impl QueryResult {
 pub(crate) enum QueryEvent {
     ProjectLabel(std::result::Result<Option<String>, String>),
     _ThemePreference(std::result::Result<Option<ThemeVariant>, String>),
-    LocalDiff(std::result::Result<LocalDiffResult, String>),
+    LocalDiff {
+        route: crate::app::LocalWorktreeRoute,
+        result: std::result::Result<LocalDiffResult, String>,
+    },
     Worktrees(std::result::Result<Vec<Worktree>, String>),
-    BranchCommits(std::result::Result<Vec<GitCommit>, String>),
+    BranchCommits {
+        context: CommitListContext,
+        result: std::result::Result<Vec<GitCommit>, String>,
+    },
     CommitDiff {
         repo_path: String,
         sha: String,
@@ -307,14 +315,23 @@ pub(crate) enum QueryEvent {
         patch: String,
         result: std::result::Result<DiffDocument, String>,
     },
+    HighlightedFiles {
+        token: HighlightToken,
+        response: HighlightResponse,
+    },
     SemanticDiff {
         route: DiffSource,
         result: std::result::Result<SemanticDiff, String>,
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CommitListContext {
+    Local(LocalWorktreeRoute),
+    PullRequest { repository: String, number: u32 },
+}
+
 pub(crate) struct LocalDiffResult {
-    pub(crate) repo_path: String,
     pub(crate) branch: String,
     pub(crate) base_ref: String,
     pub(crate) document: DiffDocument,

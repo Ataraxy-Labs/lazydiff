@@ -2,6 +2,7 @@ use std::{
     env, fs, io,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -13,7 +14,8 @@ use crossterm::{
 };
 use lazydiff_diffs::{
     DiffDocument, DiffMode, DiffSide, DiffViewerState, DiffWidget, add_pierre_highlights,
-    add_pierre_highlights_with_sources, parse_unified_diff, row_count_for_mode,
+    add_pierre_highlights_with_limit, add_pierre_highlights_with_sources, parse_unified_diff,
+    row_count_for_mode,
 };
 use ratatui::{
     Terminal,
@@ -32,6 +34,7 @@ mod components;
 mod design_system;
 mod forge;
 mod github;
+mod highlight_daemon;
 mod persistence;
 mod server_query;
 mod text;
@@ -46,8 +49,11 @@ use persistence::{ReviewItemKind, ReviewItemState, ReviewStore, ReviewThread};
 pub(crate) use ui::{draw_box, fill_rect, truncate};
 
 const BENCH_SCROLL_FIXTURE: &str = "diff --git a/example.ts b/example.ts\n--- a/example.ts\n+++ b/example.ts\n@@ -1,4 +1,4 @@\n import { value } from './value';\n-const label = 'old';\n+const label = 'new';\n export function example() {\n   return `${label}: ${value}`;\n }\n";
+const PIERRE_HIGHLIGHT_FILE_LIMIT: usize = 512;
+pub(crate) static STARTUP_INSTANT: OnceLock<Instant> = OnceLock::new();
 
 fn main() -> Result<()> {
+    let _ = STARTUP_INSTANT.set(Instant::now());
     color_eyre::install()?;
     let mut args: Vec<String> = env::args().skip(1).collect();
     let bench_scroll = args.first().is_some_and(|arg| arg == "--bench-scroll");
@@ -56,6 +62,9 @@ fn main() -> Result<()> {
     }
     if args.first().is_some_and(|arg| arg == "agent") {
         return run_agent_cli(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "highlightd") {
+        return highlight_daemon::run_highlight_daemon();
     }
     if args.first().is_some_and(|arg| arg == "login") {
         let forge = detect_forge();
@@ -82,6 +91,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let launch = LaunchInput::parse(args)?;
+    startup_trace("parsed launch");
     let path = if bench_scroll {
         launch
             .label()
@@ -89,7 +99,11 @@ fn main() -> Result<()> {
     } else {
         launch.label().unwrap_or_else(|| "worktree".to_string())
     };
-    let patch = if bench_scroll {
+    let defer_initial_patch = launch.defer_initial_patch();
+    let defer_initial_highlight = launch.defer_initial_highlight();
+    let patch = if defer_initial_patch {
+        String::new()
+    } else if bench_scroll {
         match launch.label() {
             Some(path) => fs::read_to_string(path)?,
             None => BENCH_SCROLL_FIXTURE.to_string(),
@@ -98,33 +112,50 @@ fn main() -> Result<()> {
         launch.load_patch()?
     };
     let mut document = parse_unified_diff(&patch);
-    let highlight_start = Instant::now();
-    let highlight_stats = add_highlights_for_launch(&mut document, &launch);
-    eprintln!(
-        "[lazydiff] pierre highlighted files={} sides={} spans={} in {:.3}ms",
-        highlight_stats.files_highlighted,
-        highlight_stats.sides_highlighted,
-        highlight_stats.spans,
-        highlight_start.elapsed().as_secs_f64() * 1000.0,
-    );
+    startup_trace("loaded initial document");
+    if !defer_initial_patch && !defer_initial_highlight {
+        let highlight_start = Instant::now();
+        let highlight_stats = if document.files.len() > PIERRE_HIGHLIGHT_FILE_LIMIT {
+            add_pierre_highlights_with_limit(&mut document, PIERRE_HIGHLIGHT_FILE_LIMIT)
+        } else {
+            add_highlights_for_launch(&mut document, &launch)
+        };
+        eprintln!(
+            "[lazydiff] pierre highlighted files={} sides={} spans={} in {:.3}ms",
+            highlight_stats.files_highlighted,
+            highlight_stats.sides_highlighted,
+            highlight_stats.spans,
+            highlight_start.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     if bench_scroll {
         return bench_scroll_render(path, patch.len(), document);
     }
     let forge = detect_forge();
+    startup_trace("detected forge");
     let mut terminal = init_terminal()?;
+    startup_trace("initialized terminal");
     let app = match launch {
         LaunchInput::Home => App::new(path, patch.len(), document, forge),
         LaunchInput::LocalDiff {
-            label, base_ref, ..
+            label,
+            base_ref,
+            defer_initial_load,
+            ..
         } => {
-            let metadata = GitMetadata::detect()?;
-            App::new_local_diff(
+            let metadata = if defer_initial_load {
+                GitMetadata::deferred_placeholder()
+            } else {
+                GitMetadata::detect()?
+            };
+            App::new_local_diff_with_refresh(
                 label,
                 patch.len(),
                 document,
                 metadata.repo_path,
                 metadata.branch,
                 base_ref,
+                defer_initial_load,
                 forge,
             )
         }
@@ -149,9 +180,21 @@ fn main() -> Result<()> {
             forge,
         ),
     };
+    startup_trace("constructed app");
     let result = app.run(&mut terminal);
     restore_terminal(&mut terminal)?;
     result
+}
+
+fn startup_trace(label: &str) {
+    if std::env::var_os("LAZYDIFF_STARTUP_TRACE").is_some()
+        && let Some(startup) = STARTUP_INSTANT.get()
+    {
+        eprintln!(
+            "[lazydiff-startup] {label} {:.3}ms",
+            startup.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
 }
 
 fn run_agent_cli(args: &[String]) -> Result<()> {
@@ -407,6 +450,7 @@ enum LaunchInput {
         label: String,
         base_ref: String,
         args: Vec<String>,
+        defer_initial_load: bool,
     },
     Commit {
         ref_name: String,
@@ -438,7 +482,7 @@ impl LaunchInput {
                 println!("{}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
-            "--branch" => Self::branch_diff(None),
+            "--branch" => Self::uncommitted_diff(),
             "--worktree" => Self::worktree_diff(false, Vec::new()),
             "diff" => Self::parse_diff(args[1..].to_vec()),
             "show" => Ok(Self::Commit {
@@ -545,6 +589,21 @@ impl LaunchInput {
             label: if staged { "staged" } else { "worktree" }.to_string(),
             base_ref,
             args: diff_args,
+            defer_initial_load: false,
+        })
+    }
+
+    fn uncommitted_diff() -> Result<Self> {
+        Ok(Self::LocalDiff {
+            label: "uncommitted".to_string(),
+            base_ref: "HEAD".to_string(),
+            args: vec![
+                "diff".to_string(),
+                "--no-ext-diff".to_string(),
+                "--binary".to_string(),
+                "HEAD".to_string(),
+            ],
+            defer_initial_load: false,
         })
     }
 
@@ -564,7 +623,29 @@ impl LaunchInput {
             label: format!("branch vs {base_ref}"),
             base_ref,
             args: diff_args,
+            defer_initial_load: true,
         })
+    }
+
+    fn defer_initial_patch(&self) -> bool {
+        matches!(
+            self,
+            Self::LocalDiff {
+                defer_initial_load: true,
+                ..
+            }
+        )
+    }
+
+    fn defer_initial_highlight(&self) -> bool {
+        matches!(
+            self,
+            Self::LocalDiff {
+                label,
+                defer_initial_load: false,
+                ..
+            } if label == "uncommitted"
+        )
     }
 
     fn label(&self) -> Option<String> {
@@ -630,6 +711,17 @@ impl GitMetadata {
             .or_else(|_| git_stdout(["rev-parse", "--abbrev-ref", "HEAD"]))
             .unwrap_or_else(|_| "detached-head".to_string());
         Ok(Self { repo_path, branch })
+    }
+
+    fn deferred_placeholder() -> Self {
+        let repo_path = env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| "local".to_string());
+        let branch = env::var("LAZYDIFF_BRANCH")
+            .ok()
+            .filter(|branch| !branch.trim().is_empty())
+            .unwrap_or_else(|| "loading".to_string());
+        Self { repo_path, branch }
     }
 }
 
@@ -999,7 +1091,7 @@ fn parse_lazydiff_version(version: &str) -> Option<(u64, u64, u64, u64)> {
 }
 
 fn help_text() -> &'static str {
-    "Usage: lazydiff [command] [options]\n\nCommands:\n  lazydiff                         open the default review queue/home\n  lazydiff login                   sign in to GitHub with device flow\n  lazydiff logout                  remove the stored GitHub login\n  lazydiff update                  update to the latest GitHub Release\n  lazydiff diff [target] [-- paths] review working tree or branch diff\n  lazydiff diff --staged           review staged changes\n  lazydiff show [ref]              review a commit (default HEAD)\n  lazydiff patch [file|-]          review a patch file or stdin\n  lazydiff pager                   read a patch from stdin\n  lazydiff difftool <left> <right> review two files\n\nShortcuts:\n  lazydiff --branch                review current branch vs upstream/base\n  lazydiff --worktree              review worktree vs HEAD\n"
+    "Usage: lazydiff [command] [options]\n\nCommands:\n  lazydiff                         open the default review queue/home\n  lazydiff login                   sign in to GitHub with device flow\n  lazydiff logout                  remove the stored GitHub login\n  lazydiff update                  update to the latest GitHub Release\n  lazydiff diff [target] [-- paths] review working tree or branch diff\n  lazydiff diff --staged           review staged changes\n  lazydiff show [ref]              review a commit (default HEAD)\n  lazydiff patch [file|-]          review a patch file or stdin\n  lazydiff pager                   read a patch from stdin\n  lazydiff difftool <left> <right> review two files\n\nShortcuts:\n  lazydiff --branch                review uncommitted changes vs HEAD\n  lazydiff --worktree              review worktree vs HEAD\n"
 }
 
 type Tui = Terminal<CrosstermBackend<io::Stdout>>;
@@ -1075,6 +1167,10 @@ fn bench_scroll_render(path: String, bytes: usize, document: DiffDocument) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+
+    static TEMP_REPO_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     // sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
     #[test]
@@ -1110,6 +1206,151 @@ mod tests {
         assert!(
             !message.contains("mismatch"),
             "malformed checksum should not be reported as a hash mismatch: {message}"
+        );
+    }
+
+    #[test]
+    fn branch_shortcut_uses_head_to_worktree_diff_without_startup_highlighting() {
+        let launch = LaunchInput::uncommitted_diff().expect("branch shortcut should parse");
+
+        let LaunchInput::LocalDiff {
+            label,
+            base_ref,
+            args,
+            defer_initial_load,
+        } = &launch
+        else {
+            panic!("expected local diff launch");
+        };
+
+        assert_eq!(label, "uncommitted");
+        assert_eq!(base_ref, "HEAD");
+        assert_eq!(
+            args.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["diff", "--no-ext-diff", "--binary", "HEAD"]
+        );
+        assert!(!defer_initial_load);
+        assert!(launch.defer_initial_highlight());
+    }
+
+    #[test]
+    fn git_diff_head_includes_tracked_uncommitted_changes_but_not_commits_or_untracked_files() {
+        let repo = temp_repo("branch-diff-uncommitted-only");
+        git_in(&repo, ["init", "-q", "-b", "main"]);
+        git_in(&repo, ["config", "user.email", "test@example.com"]);
+        git_in(&repo, ["config", "user.name", "Test User"]);
+        fs::write(repo.join("tracked.txt"), "base\n").expect("write tracked file");
+        git_in(&repo, ["add", "tracked.txt"]);
+        git_in(&repo, ["commit", "-q", "-m", "base"]);
+        git_in(&repo, ["checkout", "-q", "-b", "feature"]);
+        fs::write(repo.join("tracked.txt"), "committed\n").expect("write committed change");
+        git_in(&repo, ["commit", "-q", "-am", "feature commit"]);
+
+        fs::write(repo.join("tracked.txt"), "unstaged\n").expect("write unstaged change");
+        fs::write(repo.join("staged.txt"), "staged\n").expect("write staged file");
+        git_in(&repo, ["add", "staged.txt"]);
+        fs::write(repo.join("untracked.txt"), "untracked\n").expect("write untracked file");
+
+        let patch = run_git_dynamic(
+            &repo,
+            &[
+                "diff".to_string(),
+                "--no-ext-diff".to_string(),
+                "--binary".to_string(),
+                "HEAD".to_string(),
+            ],
+        )
+        .expect("uncommitted diff should run");
+
+        assert!(
+            patch.contains("+unstaged"),
+            "uncommitted diff should include unstaged tracked changes:\n{patch}"
+        );
+        assert!(
+            patch.contains("b/staged.txt"),
+            "uncommitted diff should include staged changes:\n{patch}"
+        );
+        assert!(
+            !patch.contains("+committed"),
+            "uncommitted diff should not include committed branch changes:\n{patch}"
+        );
+        assert!(
+            !patch.contains("untracked.txt"),
+            "uncommitted diff should not include untracked files:\n{patch}"
+        );
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
+    }
+
+    #[test]
+    #[ignore = "perf measurement; run with `cargo test measure_branch_shortcut_startup -- --ignored --nocapture`"]
+    fn measure_branch_shortcut_startup() {
+        let repo = temp_repo("branch-shortcut-startup-measure");
+        git_in(&repo, ["init", "-q", "-b", "main"]);
+        git_in(&repo, ["config", "user.email", "test@example.com"]);
+        git_in(&repo, ["config", "user.name", "Test User"]);
+
+        for index in 0..300 {
+            fs::write(
+                repo.join(format!("file-{index:03}.txt")),
+                format!("base {index}\n"),
+            )
+            .expect("write base file");
+        }
+        git_in(&repo, ["add", "."]);
+        git_in(&repo, ["commit", "-q", "-m", "base"]);
+
+        for index in 0..300 {
+            fs::write(
+                repo.join(format!("file-{index:03}.txt")),
+                format!("changed {index}\n"),
+            )
+            .expect("write changed file");
+        }
+        for index in 0..150 {
+            git_in(&repo, ["add", &format!("file-{index:03}.txt")]);
+        }
+
+        let parse_start = Instant::now();
+        let launch =
+            LaunchInput::parse(vec!["--branch".to_string()]).expect("branch shortcut should parse");
+        let parse_elapsed = parse_start.elapsed();
+
+        let load_start = Instant::now();
+        let startup_patch = launch.load_patch().expect("load initial patch");
+        let load_elapsed = load_start.elapsed();
+        assert!(startup_patch.contains("+changed 0"));
+        assert!(startup_patch.contains("+changed 299"));
+
+        eprintln!(
+            "--branch startup perf: files=300 staged=150 unstaged=150 parse_ms={:.3} patch_load_ms={:.3} patch_bytes={}",
+            parse_elapsed.as_secs_f64() * 1000.0,
+            load_elapsed.as_secs_f64() * 1000.0,
+            startup_patch.len(),
+        );
+
+        fs::remove_dir_all(&repo).expect("cleanup temp repo");
+    }
+
+    fn temp_repo(label: &str) -> PathBuf {
+        let unique = TEMP_REPO_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            env::temp_dir().join(format!("lazydiff-{label}-{}-{unique}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create temp repo");
+        path
+    }
+
+    fn git_in<const N: usize>(repo: &Path, args: [&str; N]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

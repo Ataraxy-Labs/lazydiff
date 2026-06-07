@@ -32,7 +32,7 @@ pub use theme::{DiffTheme, DiffThemeName, SyntaxTheme};
 pub use viewer::{
     DiffCursor, DiffInlineBlock, DiffInlineBlockAccent, DiffInlineBlockKind, DiffRenderModel,
     DiffScreenPosition, DiffSearchState, DiffSideBySideRow, DiffViewerState, DiffViewport,
-    DiffVisualRow, DiffWordMotion,
+    DiffVisibleDocumentRows, DiffVisualRow, DiffWordMotion,
 };
 
 const HIGHLIGHT_NAMES: &[&str] = &[
@@ -209,6 +209,10 @@ pub struct FileDiff {
     new_source_lines: Option<Vec<String>>,
     old_source_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
     new_source_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+    old_source_syntax_complete: bool,
+    new_source_syntax_complete: bool,
+    old_source_syntax_windows: Vec<(u32, u32)>,
+    new_source_syntax_windows: Vec<(u32, u32)>,
     expanded_gaps: HashSet<usize>,
 }
 
@@ -315,6 +319,145 @@ impl DiffDocument {
             DiffMode::Unified => &self.unified_rows,
             DiffMode::Split => &self.split_rows,
         }
+    }
+
+    pub fn file_indices_in_row_window(
+        &self,
+        mode: DiffMode,
+        start: usize,
+        limit: usize,
+    ) -> Vec<usize> {
+        let mut file_indices = Vec::new();
+        let mut seen = HashSet::new();
+        for row in self.rows(mode).iter().skip(start).take(limit) {
+            let file_index = match row {
+                RowRef::FileHeader { file_index }
+                | RowRef::HunkHeader { file_index, .. }
+                | RowRef::Collapsed { file_index, .. }
+                | RowRef::ExpandedContext { file_index, .. } => Some(*file_index),
+                RowRef::Unified { line } => Some(line.file_index),
+                RowRef::Split { left, right, .. } => (*left).or(*right).map(|line| line.file_index),
+                RowRef::FileSeparator => None,
+            };
+            if let Some(file_index) = file_index
+                && seen.insert(file_index)
+            {
+                file_indices.push(file_index);
+            }
+        }
+        file_indices
+    }
+
+    pub fn file_indices_in_document_rows(
+        &self,
+        mode: DiffMode,
+        document_rows: &[usize],
+    ) -> Vec<usize> {
+        let mut file_indices = Vec::new();
+        let mut seen = HashSet::new();
+        for row_index in document_rows {
+            let file_index = match self.rows(mode).get(*row_index) {
+                Some(RowRef::FileHeader { file_index })
+                | Some(RowRef::HunkHeader { file_index, .. })
+                | Some(RowRef::Collapsed { file_index, .. })
+                | Some(RowRef::ExpandedContext { file_index, .. }) => Some(*file_index),
+                Some(RowRef::Unified { line }) => Some(line.file_index),
+                Some(RowRef::Split { left, right, .. }) => {
+                    (*left).or(*right).map(|line| line.file_index)
+                }
+                Some(RowRef::FileSeparator) | None => None,
+            };
+            if let Some(file_index) = file_index
+                && seen.insert(file_index)
+            {
+                file_indices.push(file_index);
+            }
+        }
+        file_indices
+    }
+
+    pub fn file_line_windows_for_document_rows(
+        &self,
+        mode: DiffMode,
+        document_rows: &[usize],
+    ) -> Vec<DiffFileLineWindow> {
+        fn file_window_mut(
+            windows: &mut Vec<DiffFileLineWindow>,
+            file_index: usize,
+        ) -> &mut DiffFileLineWindow {
+            if let Some(index) = windows
+                .iter()
+                .position(|window| window.file_index == file_index)
+            {
+                return &mut windows[index];
+            }
+            windows.push(DiffFileLineWindow {
+                file_index,
+                old_start: None,
+                old_end: None,
+                new_start: None,
+                new_end: None,
+            });
+            windows.last_mut().expect("just pushed window")
+        }
+
+        fn merge_optional_line(start: &mut Option<u32>, end: &mut Option<u32>, line: u32) {
+            *start = Some(start.map_or(line, |current| current.min(line)));
+            *end = Some(end.map_or(line, |current| current.max(line)));
+        }
+
+        fn push_line_window(
+            windows: &mut Vec<DiffFileLineWindow>,
+            file_index: usize,
+            line: &DiffLine,
+        ) {
+            let window = file_window_mut(windows, file_index);
+            match line {
+                DiffLine::Context {
+                    old_line, new_line, ..
+                } => {
+                    merge_optional_line(&mut window.old_start, &mut window.old_end, *old_line);
+                    merge_optional_line(&mut window.new_start, &mut window.new_end, *new_line);
+                }
+                DiffLine::Add { new_line, .. } => {
+                    merge_optional_line(&mut window.new_start, &mut window.new_end, *new_line);
+                }
+                DiffLine::Delete { old_line, .. } => {
+                    merge_optional_line(&mut window.old_start, &mut window.old_end, *old_line);
+                }
+            }
+        }
+
+        let mut windows: Vec<DiffFileLineWindow> = Vec::new();
+        for row_index in document_rows {
+            match self.rows(mode).get(*row_index) {
+                Some(RowRef::Unified { line }) => {
+                    let diff_line = self.line(*line);
+                    push_line_window(&mut windows, line.file_index, diff_line);
+                }
+                Some(RowRef::Split { left, right, .. }) => {
+                    for line in [*left, *right].into_iter().flatten() {
+                        let diff_line = self.line(line);
+                        push_line_window(&mut windows, line.file_index, diff_line);
+                    }
+                }
+                Some(RowRef::ExpandedContext {
+                    file_index,
+                    old_line,
+                    new_line,
+                }) => {
+                    let window = file_window_mut(&mut windows, *file_index);
+                    merge_optional_line(&mut window.old_start, &mut window.old_end, *old_line);
+                    merge_optional_line(&mut window.new_start, &mut window.new_end, *new_line);
+                }
+                Some(RowRef::FileSeparator)
+                | Some(RowRef::FileHeader { .. })
+                | Some(RowRef::HunkHeader { .. })
+                | Some(RowRef::Collapsed { .. })
+                | None => {}
+            }
+        }
+        windows
     }
 
     fn rebuild_row_cache(&mut self) {
@@ -459,6 +602,10 @@ impl FileDiff {
             new_source_lines: None,
             old_source_syntax_spans: None,
             new_source_syntax_spans: None,
+            old_source_syntax_complete: false,
+            new_source_syntax_complete: false,
+            old_source_syntax_windows: Vec::new(),
+            new_source_syntax_windows: Vec::new(),
             expanded_gaps: HashSet::new(),
         }
     }
@@ -487,6 +634,36 @@ impl FileDiff {
 impl DiffDocument {
     pub fn metadata(&self) -> Vec<FileDiffMetadata> {
         self.files.iter().map(FileDiff::metadata).collect()
+    }
+
+    pub fn apply_highlights_from(&mut self, highlighted: &DiffDocument) {
+        for (file, highlighted_file) in self.files.iter_mut().zip(&highlighted.files) {
+            if file.new_path != highlighted_file.new_path {
+                continue;
+            }
+            if file.old_source_lines.is_none() {
+                file.old_source_lines = highlighted_file.old_source_lines.clone();
+            }
+            if file.new_source_lines.is_none() {
+                file.new_source_lines = highlighted_file.new_source_lines.clone();
+            }
+            if highlighted_file.old_source_syntax_spans.is_some() {
+                file.old_source_syntax_spans = highlighted_file.old_source_syntax_spans.clone();
+                file.old_source_syntax_complete = highlighted_file.old_source_syntax_complete;
+                file.old_source_syntax_windows = highlighted_file.old_source_syntax_windows.clone();
+            }
+            if highlighted_file.new_source_syntax_spans.is_some() {
+                file.new_source_syntax_spans = highlighted_file.new_source_syntax_spans.clone();
+                file.new_source_syntax_complete = highlighted_file.new_source_syntax_complete;
+                file.new_source_syntax_windows = highlighted_file.new_source_syntax_windows.clone();
+            }
+            for (hunk, highlighted_hunk) in file.hunks.iter_mut().zip(&highlighted_file.hunks) {
+                for (line, highlighted_line) in hunk.lines.iter_mut().zip(&highlighted_hunk.lines) {
+                    line.syntax_spans_mut()
+                        .clone_from(highlighted_line.syntax_spans());
+                }
+            }
+        }
     }
 
     pub fn file_row(&self, mode: DiffMode, file_index: usize) -> Option<usize> {
@@ -747,6 +924,128 @@ impl DiffDocument {
         )
     }
 
+    pub fn file_has_expansion_sources(&self, file_index: usize) -> bool {
+        self.files
+            .get(file_index)
+            .is_some_and(|file| file.old_source_lines.is_some() || file.new_source_lines.is_some())
+    }
+
+    pub fn file_has_source_syntax(&self, file_index: usize) -> bool {
+        self.files.get(file_index).is_some_and(|file| {
+            let old_done = file.old_source_lines.is_none() || file.old_source_syntax_complete;
+            let new_done = file.new_source_lines.is_none() || file.new_source_syntax_complete;
+            old_done
+                && new_done
+                && (file.old_source_lines.is_some() || file.new_source_lines.is_some())
+        })
+    }
+
+    pub fn file_expansion_sources(
+        &self,
+        file_index: usize,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let file = self.files.get(file_index)?;
+        if file.old_source_lines.is_none() && file.new_source_lines.is_none() {
+            return None;
+        }
+        Some((
+            file.old_source_lines.as_ref().map(|lines| lines.join("\n")),
+            file.new_source_lines.as_ref().map(|lines| lines.join("\n")),
+        ))
+    }
+
+    pub fn apply_file_source_syntax(
+        &mut self,
+        file_index: usize,
+        old_source_lines: Option<Vec<String>>,
+        new_source_lines: Option<Vec<String>>,
+        old_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+        new_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+    ) -> bool {
+        self.apply_file_source_syntax_window(
+            file_index,
+            old_source_lines,
+            new_source_lines,
+            None,
+            None,
+            old_syntax_spans,
+            new_syntax_spans,
+        )
+    }
+
+    pub fn apply_file_source_syntax_window(
+        &mut self,
+        file_index: usize,
+        old_source_lines: Option<Vec<String>>,
+        new_source_lines: Option<Vec<String>>,
+        old_window: Option<(u32, u32)>,
+        new_window: Option<(u32, u32)>,
+        old_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+        new_syntax_spans: Option<Vec<Vec<SyntaxSpan>>>,
+    ) -> bool {
+        let Some(file) = self.files.get_mut(file_index) else {
+            return false;
+        };
+
+        if old_source_lines.is_some() {
+            file.old_source_lines = old_source_lines;
+        }
+        if new_source_lines.is_some() {
+            file.new_source_lines = new_source_lines;
+        }
+        if let Some(spans) = old_syntax_spans {
+            apply_side_source_syntax(
+                &mut file.old_source_syntax_spans,
+                file.old_source_lines.as_ref().map(Vec::len),
+                &mut file.old_source_syntax_complete,
+                &mut file.old_source_syntax_windows,
+                old_window,
+                spans,
+            );
+        }
+        if let Some(spans) = new_syntax_spans {
+            apply_side_source_syntax(
+                &mut file.new_source_syntax_spans,
+                file.new_source_lines.as_ref().map(Vec::len),
+                &mut file.new_source_syntax_complete,
+                &mut file.new_source_syntax_windows,
+                new_window,
+                spans,
+            );
+        }
+
+        for hunk in &mut file.hunks {
+            for line in &mut hunk.lines {
+                let spans = match line {
+                    DiffLine::Context {
+                        new_line, old_line, ..
+                    } => file
+                        .new_source_syntax_spans
+                        .as_ref()
+                        .and_then(|lines| lines.get(new_line.saturating_sub(1) as usize))
+                        .or_else(|| {
+                            file.old_source_syntax_spans
+                                .as_ref()
+                                .and_then(|lines| lines.get(old_line.saturating_sub(1) as usize))
+                        }),
+                    DiffLine::Add { new_line, .. } => file
+                        .new_source_syntax_spans
+                        .as_ref()
+                        .and_then(|lines| lines.get(new_line.saturating_sub(1) as usize)),
+                    DiffLine::Delete { old_line, .. } => file
+                        .old_source_syntax_spans
+                        .as_ref()
+                        .and_then(|lines| lines.get(old_line.saturating_sub(1) as usize)),
+                }
+                .cloned()
+                .unwrap_or_default();
+                *line.syntax_spans_mut() = spans;
+            }
+        }
+
+        true
+    }
+
     pub fn expand_collapsed_row(&mut self, mode: DiffMode, row_index: usize) -> bool {
         let Some(RowRef::Collapsed {
             file_index,
@@ -827,6 +1126,16 @@ impl DiffDocument {
             .as_ref()
             .and_then(|lines| lines.get(line.saturating_sub(1) as usize))
             .map(Vec::as_slice)
+            .or_else(|| {
+                let (fallback_spans, fallback_line) = match side {
+                    DiffSide::Left => (&file.new_source_syntax_spans, new_line),
+                    DiffSide::Right => (&file.old_source_syntax_spans, old_line),
+                };
+                fallback_spans
+                    .as_ref()
+                    .and_then(|lines| lines.get(fallback_line.saturating_sub(1) as usize))
+                    .map(Vec::as_slice)
+            })
             .unwrap_or(&[])
     }
 
@@ -863,6 +1172,62 @@ impl DiffDocument {
     pub fn deletions(&self) -> usize {
         self.files.iter().map(FileDiff::deletions).sum()
     }
+}
+
+fn apply_side_source_syntax(
+    target: &mut Option<Vec<Vec<SyntaxSpan>>>,
+    source_line_count: Option<usize>,
+    complete: &mut bool,
+    windows: &mut Vec<(u32, u32)>,
+    window: Option<(u32, u32)>,
+    spans: Vec<Vec<SyntaxSpan>>,
+) {
+    let Some((start, end)) = window else {
+        *target = Some(spans);
+        *complete = true;
+        windows.clear();
+        return;
+    };
+    if start == 0 || end < start {
+        return;
+    }
+    let line_count = source_line_count.unwrap_or(spans.len());
+    let start_index = start.saturating_sub(1) as usize;
+    if start_index >= line_count {
+        return;
+    }
+    let end_index = (end as usize).min(line_count);
+    let target_spans = target.get_or_insert_with(|| vec![Vec::new(); line_count]);
+    if target_spans.len() < line_count {
+        target_spans.resize_with(line_count, Vec::new);
+    }
+    let compact = if spans.len() == line_count {
+        spans[start_index..end_index].to_vec()
+    } else {
+        spans
+    };
+    for (line_index, line_spans) in (start_index..end_index).zip(compact) {
+        target_spans[line_index] = line_spans;
+    }
+    merge_line_window(windows, (start, end));
+}
+
+fn merge_line_window(windows: &mut Vec<(u32, u32)>, mut next: (u32, u32)) {
+    if next.0 == 0 || next.1 < next.0 {
+        return;
+    }
+    let mut merged = Vec::with_capacity(windows.len() + 1);
+    for window in windows.drain(..) {
+        if window.1.saturating_add(1) < next.0 || next.1.saturating_add(1) < window.0 {
+            merged.push(window);
+        } else {
+            next.0 = next.0.min(window.0);
+            next.1 = next.1.max(window.1);
+        }
+    }
+    merged.push(next);
+    merged.sort_by_key(|window| window.0);
+    *windows = merged;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -913,6 +1278,15 @@ pub struct DiffLineTarget {
     pub new_line: Option<u32>,
     pub line: u32,
     pub kind: DiffLineKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiffFileLineWindow {
+    pub file_index: usize,
+    pub old_start: Option<u32>,
+    pub old_end: Option<u32>,
+    pub new_start: Option<u32>,
+    pub new_end: Option<u32>,
 }
 
 impl DiffLineTarget {
@@ -1097,6 +1471,10 @@ pub fn parse_unified_diff(input: &str) -> DiffDocument {
                 new_source_lines: None,
                 old_source_syntax_spans: None,
                 new_source_syntax_spans: None,
+                old_source_syntax_complete: false,
+                new_source_syntax_complete: false,
+                old_source_syntax_windows: Vec::new(),
+                new_source_syntax_windows: Vec::new(),
                 expanded_gaps: HashSet::new(),
             });
             continue;
@@ -1258,8 +1636,26 @@ pub fn add_pierre_highlights(document: &mut DiffDocument) -> HighlightStats {
     add_pierre_highlights_with_sources(document, |_file, _side| None)
 }
 
+pub fn add_pierre_highlights_with_limit(
+    document: &mut DiffDocument,
+    file_limit: usize,
+) -> HighlightStats {
+    add_pierre_highlights_with_sources_and_limit(document, Some(file_limit), |_file, _side| None)
+}
+
 pub fn add_pierre_highlights_with_sources<F>(
     document: &mut DiffDocument,
+    resolve_source: F,
+) -> HighlightStats
+where
+    F: FnMut(&FileDiff, DiffSide) -> Option<String>,
+{
+    add_pierre_highlights_with_sources_and_limit(document, None, resolve_source)
+}
+
+pub fn add_pierre_highlights_with_sources_and_limit<F>(
+    document: &mut DiffDocument,
+    file_limit: Option<usize>,
     mut resolve_source: F,
 ) -> HighlightStats
 where
@@ -1270,73 +1666,277 @@ where
     };
     let mut stats = HighlightStats::default();
 
-    for file in &mut document.files {
-        let language = pierre::language_for_path(&file.new_path);
+    let file_limit = file_limit.unwrap_or(usize::MAX);
+    for (file_index, file) in document.files.iter_mut().enumerate() {
         let old_full_text = resolve_source(file, DiffSide::Left);
         let new_full_text = resolve_source(file, DiffSide::Right);
+        let highlight = file_index < file_limit;
+        let file_stats = add_pierre_highlights_to_file(
+            file,
+            old_full_text,
+            new_full_text,
+            highlight.then_some(&mut highlighter),
+        );
+        if highlight {
+            stats.files_highlighted += file_stats.files_highlighted;
+            stats.sides_highlighted += file_stats.sides_highlighted;
+            stats.spans += file_stats.spans;
+        }
+    }
+
+    stats
+}
+
+pub fn add_pierre_highlights_for_file_with_sources(
+    document: &mut DiffDocument,
+    file_index: usize,
+    old_full_text: Option<String>,
+    new_full_text: Option<String>,
+) -> HighlightStats {
+    let Some(file) = document.files.get_mut(file_index) else {
+        return HighlightStats::default();
+    };
+    let Some(mut highlighter) = pierre::PierreHighlighter::new() else {
         file.old_source_lines = old_full_text.as_deref().map(source_lines);
         file.new_source_lines = new_full_text.as_deref().map(source_lines);
-        let old_source = old_full_text
-            .map(SideSource::from_full_text)
-            .unwrap_or_else(|| collect_side_source(file, DiffSide::Left));
-        let new_source = new_full_text
-            .map(SideSource::from_full_text)
-            .unwrap_or_else(|| collect_side_source(file, DiffSide::Right));
-        let old_spans = highlighter.highlight_lines(language, &old_source.text);
-        let new_spans = highlighter.highlight_lines(language, &new_source.text);
-        file.old_source_syntax_spans = file.old_source_lines.as_ref().and(old_spans.clone());
-        file.new_source_syntax_spans = file.new_source_lines.as_ref().and(new_spans.clone());
+        return HighlightStats::default();
+    };
+    add_pierre_highlights_to_file(file, old_full_text, new_full_text, Some(&mut highlighter))
+}
 
-        if old_spans.is_some() || new_spans.is_some() {
-            stats.files_highlighted += 1;
-        }
-        stats.sides_highlighted +=
-            usize::from(old_spans.is_some()) + usize::from(new_spans.is_some());
+pub fn highlight_source_lines_for_path(path: &str, source: &str) -> Option<Vec<Vec<SyntaxSpan>>> {
+    let mut highlighter = SourceSyntaxHighlighter::new()?;
+    highlighter.highlight_source_lines_for_path(path, source)
+}
 
-        for hunk in &mut file.hunks {
-            let mut old_markdown_state = pierre::MarkdownOverlayState::default();
-            let mut new_markdown_state = pierre::MarkdownOverlayState::default();
-            for line in &mut hunk.lines {
-                let mut spans = match line {
-                    DiffLine::Context { new_line, .. } => new_spans
-                        .as_ref()
-                        .and_then(|lines| {
-                            new_source
-                                .line_to_index(*new_line)
-                                .and_then(|index| lines.get(index))
-                        })
-                        .cloned()
-                        .unwrap_or_default(),
-                    DiffLine::Add { new_line, .. } => new_spans
-                        .as_ref()
-                        .and_then(|lines| {
-                            new_source
-                                .line_to_index(*new_line)
-                                .and_then(|index| lines.get(index))
-                        })
-                        .cloned()
-                        .unwrap_or_default(),
-                    DiffLine::Delete { old_line, .. } => old_spans
-                        .as_ref()
-                        .and_then(|lines| {
-                            old_source
-                                .line_to_index(*old_line)
-                                .and_then(|index| lines.get(index))
-                        })
-                        .cloned()
-                        .unwrap_or_default(),
-                };
-                if language == "markdown" {
-                    let state = match line {
-                        DiffLine::Delete { .. } => &mut old_markdown_state,
-                        DiffLine::Context { .. } | DiffLine::Add { .. } => &mut new_markdown_state,
-                    };
-                    pierre::apply_markdown_overlays(line.text(), &mut spans, state);
-                    pierre::sort_render_spans(&mut spans);
+pub struct SourceSyntaxHighlighter {
+    highlighter: pierre::PierreHighlighter,
+}
+
+impl SourceSyntaxHighlighter {
+    pub fn new() -> Option<Self> {
+        Some(Self {
+            highlighter: pierre::PierreHighlighter::new()?,
+        })
+    }
+
+    pub fn highlight_source_lines_for_path(
+        &mut self,
+        path: &str,
+        source: &str,
+    ) -> Option<Vec<Vec<SyntaxSpan>>> {
+        let language = pierre::language_for_path(path);
+        self.highlighter.highlight_lines(language, source)
+    }
+}
+
+pub fn add_pierre_highlights_for_all_files(document: &mut DiffDocument) -> HighlightStats {
+    let Some(mut highlighter) = pierre::PierreHighlighter::new() else {
+        return HighlightStats::default();
+    };
+    let mut stats = HighlightStats::default();
+    for file in &mut document.files {
+        let old_full_text = file.old_source_lines.as_ref().map(|lines| lines.join("\n"));
+        let new_full_text = file.new_source_lines.as_ref().map(|lines| lines.join("\n"));
+        let file_stats = add_pierre_highlights_to_file(
+            file,
+            old_full_text,
+            new_full_text,
+            Some(&mut highlighter),
+        );
+        stats.files_highlighted += file_stats.files_highlighted;
+        stats.sides_highlighted += file_stats.sides_highlighted;
+        stats.spans += file_stats.spans;
+    }
+    stats
+}
+
+pub fn add_pierre_highlights_for_file_indices(
+    document: &mut DiffDocument,
+    file_indices: &[usize],
+) -> HighlightStats {
+    let Some(mut highlighter) = pierre::PierreHighlighter::new() else {
+        return HighlightStats::default();
+    };
+    let mut stats = HighlightStats::default();
+    for &file_index in file_indices {
+        let Some(file) = document.files.get_mut(file_index) else {
+            continue;
+        };
+        let old_full_text = file.old_source_lines.as_ref().map(|lines| lines.join("\n"));
+        let new_full_text = file.new_source_lines.as_ref().map(|lines| lines.join("\n"));
+        let file_stats = add_pierre_highlights_to_file(
+            file,
+            old_full_text,
+            new_full_text,
+            Some(&mut highlighter),
+        );
+        stats.files_highlighted += file_stats.files_highlighted;
+        stats.sides_highlighted += file_stats.sides_highlighted;
+        stats.spans += file_stats.spans;
+    }
+    stats
+}
+
+pub fn add_pierre_highlights_for_row_window(
+    document: &mut DiffDocument,
+    mode: DiffMode,
+    start: usize,
+    limit: usize,
+) -> HighlightStats {
+    let rows = (start..start.saturating_add(limit)).collect::<Vec<_>>();
+    add_pierre_highlights_for_document_rows(document, mode, &rows)
+}
+
+pub fn add_pierre_highlights_for_document_rows(
+    document: &mut DiffDocument,
+    mode: DiffMode,
+    document_rows: &[usize],
+) -> HighlightStats {
+    let Some(mut highlighter) = pierre::PierreHighlighter::new() else {
+        return HighlightStats::default();
+    };
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    for row_index in document_rows {
+        let Some(row) = document.rows(mode).get(*row_index) else {
+            continue;
+        };
+        match row {
+            RowRef::Unified { line } => {
+                if seen.insert((line.file_index, line.hunk_index, line.line_index)) {
+                    targets.push(*line);
                 }
-                stats.spans += spans.len();
-                *line.syntax_spans_mut() = spans;
             }
+            RowRef::Split { left, right, .. } => {
+                for line in [*left, *right].into_iter().flatten() {
+                    if seen.insert((line.file_index, line.hunk_index, line.line_index)) {
+                        targets.push(line);
+                    }
+                }
+            }
+            RowRef::FileSeparator
+            | RowRef::FileHeader { .. }
+            | RowRef::HunkHeader { .. }
+            | RowRef::Collapsed { .. }
+            | RowRef::ExpandedContext { .. } => {}
+        }
+    }
+
+    let mut stats = HighlightStats::default();
+    for target in targets {
+        let Some(file) = document.files.get_mut(target.file_index) else {
+            continue;
+        };
+        let Some(language) = language_for_path(&file.new_path) else {
+            continue;
+        };
+        let pierre_language = pierre::language_for_path(&file.new_path);
+        let Some(line) = file
+            .hunks
+            .get_mut(target.hunk_index)
+            .and_then(|hunk| hunk.lines.get_mut(target.line_index))
+        else {
+            continue;
+        };
+        let text = line.text().to_string();
+        let mut spans = highlighter
+            .highlight_lines(pierre_language, &text)
+            .and_then(|mut lines| lines.pop())
+            .unwrap_or_default();
+        if matches!(language, SourceLanguage::Markdown) {
+            spans.extend(pierre::markdown_decoration_spans(&text));
+            normalize_line_spans(&mut spans);
+        }
+        stats.spans += spans.len();
+        stats.files_highlighted += 1;
+        stats.sides_highlighted += 1;
+        *line.syntax_spans_mut() = spans;
+    }
+    stats
+}
+
+fn add_pierre_highlights_to_file(
+    file: &mut FileDiff,
+    old_full_text: Option<String>,
+    new_full_text: Option<String>,
+    highlighter: Option<&mut pierre::PierreHighlighter>,
+) -> HighlightStats {
+    file.old_source_lines = old_full_text.as_deref().map(source_lines);
+    file.new_source_lines = new_full_text.as_deref().map(source_lines);
+    let Some(highlighter) = highlighter else {
+        return HighlightStats::default();
+    };
+
+    let language = pierre::language_for_path(&file.new_path);
+    let old_source = old_full_text
+        .map(SideSource::from_full_text)
+        .unwrap_or_else(|| collect_side_source(file, DiffSide::Left));
+    let new_source = new_full_text
+        .map(SideSource::from_full_text)
+        .unwrap_or_else(|| collect_side_source(file, DiffSide::Right));
+    let old_spans = highlighter.highlight_lines(language, &old_source.text);
+    let new_spans = highlighter.highlight_lines(language, &new_source.text);
+    file.old_source_syntax_spans = file.old_source_lines.as_ref().and(old_spans.clone());
+    file.new_source_syntax_spans = file.new_source_lines.as_ref().and(new_spans.clone());
+    file.old_source_syntax_complete = file.old_source_syntax_spans.is_some();
+    file.new_source_syntax_complete = file.new_source_syntax_spans.is_some();
+    if file.old_source_syntax_complete {
+        file.old_source_syntax_windows.clear();
+    }
+    if file.new_source_syntax_complete {
+        file.new_source_syntax_windows.clear();
+    }
+
+    let mut stats = HighlightStats::default();
+    if old_spans.is_some() || new_spans.is_some() {
+        stats.files_highlighted = 1;
+    }
+    stats.sides_highlighted = usize::from(old_spans.is_some()) + usize::from(new_spans.is_some());
+
+    for hunk in &mut file.hunks {
+        let mut old_markdown_state = pierre::MarkdownOverlayState::default();
+        let mut new_markdown_state = pierre::MarkdownOverlayState::default();
+        for line in &mut hunk.lines {
+            let mut spans = match line {
+                DiffLine::Context { new_line, .. } => new_spans
+                    .as_ref()
+                    .and_then(|lines| {
+                        new_source
+                            .line_to_index(*new_line)
+                            .and_then(|index| lines.get(index))
+                    })
+                    .cloned()
+                    .unwrap_or_default(),
+                DiffLine::Add { new_line, .. } => new_spans
+                    .as_ref()
+                    .and_then(|lines| {
+                        new_source
+                            .line_to_index(*new_line)
+                            .and_then(|index| lines.get(index))
+                    })
+                    .cloned()
+                    .unwrap_or_default(),
+                DiffLine::Delete { old_line, .. } => old_spans
+                    .as_ref()
+                    .and_then(|lines| {
+                        old_source
+                            .line_to_index(*old_line)
+                            .and_then(|index| lines.get(index))
+                    })
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            if language == "markdown" {
+                let state = match line {
+                    DiffLine::Delete { .. } => &mut old_markdown_state,
+                    DiffLine::Context { .. } | DiffLine::Add { .. } => &mut new_markdown_state,
+                };
+                pierre::apply_markdown_overlays(line.text(), &mut spans, state);
+                pierre::sort_render_spans(&mut spans);
+            }
+            stats.spans += spans.len();
+            *line.syntax_spans_mut() = spans;
         }
     }
 
@@ -1344,6 +1944,14 @@ where
 }
 
 impl DiffLine {
+    fn syntax_spans(&self) -> &Vec<SyntaxSpan> {
+        match self {
+            DiffLine::Context { syntax_spans, .. }
+            | DiffLine::Add { syntax_spans, .. }
+            | DiffLine::Delete { syntax_spans, .. } => syntax_spans,
+        }
+    }
+
     fn syntax_spans_mut(&mut self) -> &mut Vec<SyntaxSpan> {
         match self {
             DiffLine::Context { syntax_spans, .. }
@@ -2813,6 +3421,106 @@ mod tests {
     }
 
     #[test]
+    fn limited_source_aware_highlight_attaches_sources_for_later_expansion() {
+        let mut document = parse_unified_diff(
+            "diff --git a/one.ts b/one.ts\n--- a/one.ts\n+++ b/one.ts\n@@ -1 +1 @@\n-const one = 1\n+const one = 2\ndiff --git a/two.ts b/two.ts\n--- a/two.ts\n+++ b/two.ts\n@@ -1 +1 @@\n-const two = 1\n+const two = 2\n",
+        );
+
+        add_pierre_highlights_with_sources_and_limit(&mut document, Some(1), |file, side| {
+            match (file.new_path.as_str(), side) {
+                ("one.ts", DiffSide::Left) => Some("const one = 1".to_string()),
+                ("one.ts", DiffSide::Right) => Some("const one = 2".to_string()),
+                ("two.ts", DiffSide::Left) => Some("const two = 1".to_string()),
+                ("two.ts", DiffSide::Right) => Some("const two = 2".to_string()),
+                _ => None,
+            }
+        });
+
+        assert!(document.file_has_expansion_sources(1));
+        assert!(document.files[0].hunks[0].lines[0].syntax_spans().len() > 0);
+        assert_eq!(document.files[1].hunks[0].lines[0].syntax_spans().len(), 0);
+    }
+
+    #[test]
+    fn background_full_highlight_colors_files_after_foreground_budget() {
+        let mut document = parse_unified_diff(
+            "diff --git a/one.ts b/one.ts\n--- a/one.ts\n+++ b/one.ts\n@@ -1 +1 @@\n-const one = 1\n+const one = 2\ndiff --git a/two.ts b/two.ts\n--- a/two.ts\n+++ b/two.ts\n@@ -1 +1 @@\n-const two = 1\n+const two = 2\n",
+        );
+        add_pierre_highlights_with_sources_and_limit(&mut document, Some(1), |file, side| {
+            match (file.new_path.as_str(), side) {
+                ("one.ts", DiffSide::Left) => Some("const one = 1".to_string()),
+                ("one.ts", DiffSide::Right) => Some("const one = 2".to_string()),
+                ("two.ts", DiffSide::Left) => Some("const two = 1".to_string()),
+                ("two.ts", DiffSide::Right) => Some("const two = 2".to_string()),
+                _ => None,
+            }
+        });
+        let mut highlighted = document.clone();
+
+        add_pierre_highlights_for_all_files(&mut highlighted);
+        document.apply_highlights_from(&highlighted);
+
+        assert!(document.files[1].hunks[0].lines[0].syntax_spans().len() > 0);
+    }
+
+    #[test]
+    fn visible_document_rows_use_visual_viewport_with_overscan_and_inline_blocks() {
+        let document = parse_unified_diff(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,7 +1,7 @@\n one\n two\n three\n-four\n+FOUR\n five\n six\n seven\n",
+        );
+        let after_row = document
+            .line_row(DiffMode::Split, 0, 0, 4)
+            .expect("changed row");
+        let inline_blocks = [DiffInlineBlock {
+            id: "note:1".to_string(),
+            after_row,
+            side: DiffSide::Right,
+            height: 3,
+            kind: DiffInlineBlockKind::Comment,
+            accent: DiffInlineBlockAccent::Note,
+            title: "note".to_string(),
+            body: "body".to_string(),
+        }];
+        let mut state = DiffViewerState::default();
+        state.viewport.mode = DiffMode::Split;
+        state.viewport.scroll_y = after_row + 2;
+
+        let window = state.visible_document_rows_for_area(
+            &document,
+            &inline_blocks,
+            Rect::new(0, 0, 80, 4),
+            1,
+        );
+
+        assert_eq!(window.viewport_start, after_row + 2);
+        assert!(window.document_rows.contains(&after_row));
+        assert!(
+            window
+                .document_rows
+                .windows(2)
+                .all(|pair| pair[0] != pair[1])
+        );
+    }
+
+    #[test]
+    fn document_row_file_indices_follow_non_contiguous_viewport_rows() {
+        let document = parse_unified_diff(
+            "diff --git a/one.ts b/one.ts\n--- a/one.ts\n+++ b/one.ts\n@@ -1 +1 @@\n-const one = 1\n+const one = 2\ndiff --git a/two.ts b/two.ts\n--- a/two.ts\n+++ b/two.ts\n@@ -1 +1 @@\n-const two = 1\n+const two = 2\n",
+        );
+        let one_row = document
+            .line_row(DiffMode::Split, 0, 0, 1)
+            .expect("first file row");
+        let two_row = document
+            .line_row(DiffMode::Split, 1, 0, 1)
+            .expect("second file row");
+
+        assert_eq!(
+            document.file_indices_in_document_rows(DiffMode::Split, &[two_row, one_row, two_row]),
+            vec![1, 0]
+        );
+    }
+
+    #[test]
     fn selection_text_extracts_split_side_columns() {
         let document = parse_unified_diff(
             "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n-old alpha\n-old beta\n+new alpha\n+new beta\n",
@@ -3172,5 +3880,128 @@ mod tests {
             document.line_row(DiffMode::Unified, 0, 1, 1),
             Some(collapsed_row + 2)
         );
+    }
+
+    #[test]
+    fn source_lines_without_spans_do_not_count_as_source_syntax() {
+        let mut document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn one() {}\n+fn ONE() {}\n",
+        );
+
+        document.apply_file_source_syntax(
+            0,
+            Some(vec!["fn one() {}".to_string()]),
+            Some(vec!["fn ONE() {}".to_string()]),
+            None,
+            None,
+        );
+
+        assert!(document.file_has_expansion_sources(0));
+        assert!(!document.file_has_source_syntax(0));
+
+        document.apply_file_source_syntax(
+            0,
+            None,
+            None,
+            Some(vec![vec![SyntaxSpan {
+                start: 0,
+                end: 2,
+                kind: SyntaxHighlightKind::Keyword,
+                style: None,
+            }]]),
+            Some(vec![vec![SyntaxSpan {
+                start: 0,
+                end: 2,
+                kind: SyntaxHighlightKind::Keyword,
+                style: None,
+            }]]),
+        );
+
+        assert!(document.file_has_source_syntax(0));
+    }
+
+    #[test]
+    fn document_rows_report_source_line_windows_per_file() {
+        let document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -10,2 +10,2 @@\n-old ten\n+new ten\n context eleven\n",
+        );
+        let rows = document
+            .rows(DiffMode::Split)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| matches!(row, RowRef::Split { .. }).then_some(index))
+            .collect::<Vec<_>>();
+
+        let windows = document.file_line_windows_for_document_rows(DiffMode::Split, &rows);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].file_index, 0);
+        assert_eq!(windows[0].old_start, Some(10));
+        assert_eq!(windows[0].old_end, Some(11));
+        assert_eq!(windows[0].new_start, Some(10));
+        assert_eq!(windows[0].new_end, Some(11));
+    }
+
+    #[test]
+    fn partial_source_syntax_window_does_not_mark_file_complete() {
+        let mut document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn one() {}\n+fn ONE() {}\n@@ -10 +10 @@\n-fn ten() {}\n+fn TEN() {}\n",
+        );
+        let source_lines = (1..=10)
+            .map(|line| format!("fn line_{line}() {{}}"))
+            .collect::<Vec<_>>();
+
+        document.apply_file_source_syntax_window(
+            0,
+            Some(source_lines.clone()),
+            Some(source_lines),
+            None,
+            Some((10, 10)),
+            None,
+            Some(vec![vec![SyntaxSpan {
+                start: 0,
+                end: 2,
+                kind: SyntaxHighlightKind::Keyword,
+                style: None,
+            }]]),
+        );
+
+        assert!(!document.file_has_source_syntax(0));
+        let row = document
+            .line_row(DiffMode::Unified, 0, 1, 1)
+            .expect("second changed line row");
+        let RowRef::Unified { line } = document.rows(DiffMode::Unified)[row] else {
+            panic!("expected unified line");
+        };
+        assert_eq!(document.line(line).syntax_spans().len(), 1);
+    }
+
+    #[test]
+    fn direct_open_near_late_rows_reports_late_source_window() {
+        let document = parse_unified_diff(
+            "diff --git a/early.rs b/early.rs\n--- a/early.rs\n+++ b/early.rs\n@@ -1 +1 @@\n-old early\n+new early\ndiff --git a/late.rs b/late.rs\n--- a/late.rs\n+++ b/late.rs\n@@ -900,2 +900,2 @@\n-old late\n+new late\n context late\n",
+        );
+        let late_rows = document
+            .rows(DiffMode::Split)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match row {
+                RowRef::Split { left, right, .. } => [*left, *right]
+                    .into_iter()
+                    .flatten()
+                    .any(|line| line.file_index == 1)
+                    .then_some(index),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        let windows = document.file_line_windows_for_document_rows(DiffMode::Split, &late_rows);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].file_index, 1);
+        assert_eq!(windows[0].old_start, Some(900));
+        assert_eq!(windows[0].old_end, Some(901));
+        assert_eq!(windows[0].new_start, Some(900));
+        assert_eq!(windows[0].new_end, Some(901));
     }
 }

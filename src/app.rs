@@ -31,7 +31,9 @@ use lazydiff_diffs::{
     DiffLineKind, DiffLineRangeTarget, DiffLineTarget, DiffMode, DiffSide, DiffTheme,
     DiffVisualRow, DiffWidget, DiffWordMotion, FileDiff, FileDiffKind, InlineDiffSpan, SliderState,
     SyntaxHighlightKind, SyntaxSpan, VerticalScrollbar, add_pierre_highlights,
-    add_pierre_highlights_with_sources, parse_unified_diff, render_scrollbar, row_count_for_mode,
+    add_pierre_highlights_with_limit, add_pierre_highlights_with_sources,
+    add_pierre_highlights_with_sources_and_limit, parse_unified_diff, render_scrollbar,
+    row_count_for_mode,
 };
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
@@ -57,6 +59,10 @@ const SPINNER_REDRAW_INTERVAL: Duration = Duration::from_millis(80);
 const ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INLINE_COMMENT_TEXT_WIDTH: usize = 34;
+const SOURCE_AWARE_HIGHLIGHT_FILE_LIMIT: usize = 512;
+const HIGHLIGHT_VIEWPORT_OVERSCAN_ROWS: usize = 24;
+const HIGHLIGHT_PREFETCH_DOCUMENT_ROWS: usize = 800;
+const HIGHLIGHT_PREFETCH_FILE_LIMIT: usize = 24;
 
 fn inline_block_text_width(pane: Rect) -> usize {
     pane.width
@@ -96,14 +102,18 @@ use crate::github::{
     GitCommit, GitHubAuthStatus, GitHubComment, GitHubPullRequest, GitHubQueue, GitHubQueueStatus,
     PrId, Worktree, WorktreeId, link_worktree_pr, list_branch_commits, list_worktrees,
 };
+use crate::highlight_daemon::{
+    self, HighlightFileRequest, HighlightLineWindow, HighlightRequest, HighlightResponse,
+    WireSyntaxSpan,
+};
 use crate::persistence::{
     CommentEditorMode, CommentModal, GitHubQueryClientState, PersistedGitHubQueryClient,
     PersistedPullRequestComments, PersistedPullRequestDiff, PersistedSemanticDiff,
     PersistedViewedState, ReviewItemKind, ReviewNote, ReviewSession, ReviewStore, ReviewUiState,
 };
 use crate::server_query::{
-    LocalDiffResult, PullRequestDiffResult, QueryClient, QueryEvent, QueryKey, QueryResult,
-    QueryStatus,
+    CommitListContext, LocalDiffResult, PullRequestDiffResult, QueryClient, QueryEvent, QueryKey,
+    QueryResult, QueryStatus,
 };
 use crate::text::{body_preview_lines, markdown_preview_lines, relative_age};
 use crate::ui::{
@@ -115,6 +125,11 @@ use crate::ui::{
 mod finder;
 pub(crate) use finder::CommandResult;
 use finder::*;
+mod highlight_coordinator;
+use highlight_coordinator::{
+    HighlightCoordinator, HighlightFrameWindow, HighlightRequestEnvelope, inline_layout_hash,
+};
+pub(crate) use highlight_coordinator::{HighlightFileJob, HighlightToken};
 mod diff_buffer;
 use diff_buffer::{DiffBufferAction, DiffBufferMode, DiffBufferState, TextObjectKind};
 mod input;
@@ -216,6 +231,7 @@ pub(crate) struct App {
     review_sidebar_focus: bool,
     review_sidebar_selection: usize,
     review_sidebar_scroll_y: usize,
+    review_sidebar_unreviewed_only: bool,
     review_sidebar_expanded: HashSet<ReviewTreeKey>,
     review_sidebar_seeded_routes: HashSet<String>,
     expanded_review_threads: HashSet<u64>,
@@ -231,6 +247,9 @@ pub(crate) struct App {
     inline_focus: Option<InlineFocus>,
     thread_modal: Option<DiffLineTarget>,
     transient_focus: Option<TransientFocus>,
+    pending_highlight_window: Option<HighlightFrameWindow>,
+    highlight_coordinator: HighlightCoordinator,
+    highlight_worker_tx: Sender<HighlightRequestEnvelope>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -362,6 +381,21 @@ impl App {
         base_ref: String,
         forge: Arc<dyn Forge>,
     ) -> Self {
+        Self::new_local_diff_with_refresh(
+            path, bytes, document, repo_path, branch, base_ref, false, forge,
+        )
+    }
+
+    pub(crate) fn new_local_diff_with_refresh(
+        path: String,
+        bytes: usize,
+        document: DiffDocument,
+        repo_path: String,
+        branch: String,
+        base_ref: String,
+        refresh_local_diff: bool,
+        forge: Arc<dyn Forge>,
+    ) -> Self {
         let route = LocalWorktreeRoute {
             repo_path,
             branch,
@@ -372,7 +406,7 @@ impl App {
             bytes,
             document,
             Some(AppRoute::Diff(DiffSource::LocalWorktree(route))),
-            false,
+            refresh_local_diff,
             forge,
         )
     }
@@ -426,6 +460,9 @@ impl App {
         };
         let session = Self::load_session_for_route(&store, &initial_source, &document);
         let (query_tx, query_rx) = mpsc::channel();
+        let (highlight_worker_tx, highlight_worker_rx) = mpsc::channel();
+        spawn_highlight_worker(highlight_worker_rx, query_tx.clone());
+        spawn_highlight_daemon_warmup();
         let persisted_queries = store.restore_github_query_client();
         let (github, persisted_queue_at) = persisted_queries
             .as_ref()
@@ -529,6 +566,7 @@ impl App {
             review_sidebar_focus: false,
             review_sidebar_selection: 0,
             review_sidebar_scroll_y: 0,
+            review_sidebar_unreviewed_only: false,
             review_sidebar_expanded: HashSet::new(),
             review_sidebar_seeded_routes: HashSet::new(),
             expanded_review_threads: HashSet::new(),
@@ -544,6 +582,9 @@ impl App {
             inline_focus: None,
             thread_modal: None,
             transient_focus: None,
+            pending_highlight_window: None,
+            highlight_coordinator: HighlightCoordinator::default(),
+            highlight_worker_tx,
         };
         if let Some(persisted_queries) = persisted_queries {
             app.hydrate_persisted_query_client(persisted_queries);
@@ -551,6 +592,7 @@ impl App {
         app.sync_viewed_state_for_session();
         app.apply_route(initial_route);
         app.restore_view_state_for_current_route();
+        app.schedule_full_diff_highlight(app.diff_source.clone(), app.document.clone());
         app.revalidate_project_label();
         if refresh_local_diff {
             app.revalidate_local_diff();
@@ -564,6 +606,7 @@ impl App {
     pub(crate) fn run(mut self, terminal: &mut Tui) -> Result<()> {
         let mut needs_redraw = true;
         let mut last_spinner_redraw = Instant::now();
+        let mut traced_first_draw = false;
         while !self.should_quit {
             if self.drain_query_events() {
                 needs_redraw = true;
@@ -583,6 +626,18 @@ impl App {
                 self.apply_cursor_style(terminal)?;
                 let elapsed = start.elapsed();
                 self.record_draw(elapsed);
+                if !traced_first_draw
+                    && std::env::var_os("LAZYDIFF_STARTUP_TRACE").is_some()
+                    && let Some(startup) = crate::STARTUP_INSTANT.get()
+                {
+                    eprintln!(
+                        "[lazydiff-startup] first_draw_ms={:.3} draw_ms={:.3}",
+                        startup.elapsed().as_secs_f64() * 1000.0,
+                        elapsed.as_secs_f64() * 1000.0,
+                    );
+                    traced_first_draw = true;
+                }
+                self.dispatch_pending_highlight_window();
                 needs_redraw = false;
             }
 
@@ -840,14 +895,19 @@ impl App {
         }
         let frame_area = frame.area();
         let area = app_content_area(frame_area);
-        let [header, divider, body, footer] = Layout::vertical([
-            Constraint::Length(1),
+        let [header, body, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(1),
         ])
         .areas(area);
-        let (sidebar, sidebar_divider, diff_body) = self.diff_sidebar_layout(body);
+        let (sidebar, sidebar_divider, diff_shell) = self.diff_sidebar_layout(body);
+        let diff_body = Rect::new(
+            diff_shell.x.saturating_add(1),
+            diff_shell.y.saturating_add(1),
+            diff_shell.width.saturating_sub(2),
+            diff_shell.height.saturating_sub(2),
+        );
         let diff_viewport = diff_viewport_area(diff_body);
         self.viewport_height = diff_viewport.height as usize;
         let palette = self.home_palette();
@@ -858,15 +918,13 @@ impl App {
             Style::new().fg(palette.fg).bg(palette.bg),
         );
         self.render_diff_header(frame, header, palette);
-        draw_horizontal_rule(
-            frame.buffer_mut(),
-            divider.y,
-            divider.x,
-            divider.right(),
-            palette.rule,
-            palette.bg,
+        self.render_diff_shell(frame, diff_shell, palette);
+        self.render_diff_pane_slider(
+            frame,
+            Rect::new(diff_body.x, diff_shell.y, diff_body.width, 1),
+            diff_body,
+            palette,
         );
-        self.render_diff_pane_slider(frame, divider, diff_body, palette);
         self.diff_buffer.sync_viewport(
             diff_viewport.width,
             diff_viewport.height,
@@ -875,6 +933,50 @@ impl App {
         let search_matches = self.diff_buffer.search_matches().to_vec();
         let content_area = diff_content_area(diff_viewport);
         let inline_blocks = self.diff_inline_blocks_for_area(Some(content_area));
+        let visible_highlight_window = self.diff_buffer.visible_document_rows(
+            &self.document,
+            &inline_blocks,
+            diff_viewport,
+            HIGHLIGHT_VIEWPORT_OVERSCAN_ROWS,
+        );
+        let visible_file_indices = self.document.file_indices_in_document_rows(
+            self.diff_buffer.viewer().viewport.mode,
+            &visible_highlight_window.document_rows,
+        );
+        let highlight_file_indices = self.highlight_file_indices_for_window(
+            &visible_file_indices,
+            &visible_highlight_window.document_rows,
+        );
+        let highlight_windows = self.document.file_line_windows_for_document_rows(
+            self.diff_buffer.viewer().viewport.mode,
+            &visible_highlight_window.document_rows,
+        );
+        let mut highlight_jobs =
+            self.highlight_file_jobs(&highlight_file_indices, &highlight_windows);
+        if self.hydrate_cached_expansion_highlights_for_jobs(&highlight_jobs) {
+            highlight_jobs = self.highlight_file_jobs(&highlight_file_indices, &highlight_windows);
+        }
+        let visible_job_count = highlight_jobs
+            .iter()
+            .take_while(|job| visible_file_indices.contains(&job.file_index))
+            .count();
+        let inline_hash = inline_layout_hash(
+            inline_blocks
+                .iter()
+                .map(|block| (block.after_row, block.side, block.height)),
+        );
+        self.pending_highlight_window = Some(HighlightFrameWindow {
+            route: self.diff_source.clone(),
+            mode: self.diff_buffer.viewer().viewport.mode,
+            viewport: diff_viewport,
+            visual_start: visible_highlight_window.visual_start,
+            visual_end: visible_highlight_window.visual_end,
+            overscan: HIGHLIGHT_VIEWPORT_OVERSCAN_ROWS,
+            inline_layout_hash: inline_hash,
+            file_indices: highlight_file_indices,
+            jobs: highlight_jobs,
+            visible_job_count,
+        });
         StatefulWidget::render(
             DiffWidget::new(&self.document)
                 .theme(palette.theme.diff_theme())
@@ -887,7 +989,7 @@ impl App {
             self.diff_buffer.viewer_mut(),
         );
         if let Some(sidebar) = sidebar {
-            self.render_review_sidebar(frame, sidebar, palette);
+            self.render_review_map_panel(frame, sidebar, palette);
         }
         if let Some(sidebar_divider) = sidebar_divider {
             draw_vertical_rule(
@@ -951,7 +1053,6 @@ impl App {
     ) -> Option<(u16, u16)> {
         let modal = self.comment_modal.as_ref()?;
         let viewer = self.diff_buffer.viewer();
-        let visual_rows = viewer.visual_rows_with_inline_blocks(&self.document, inline_blocks);
         let editor_block_index = inline_blocks
             .iter()
             .position(|block| block.kind == DiffInlineBlockKind::Editor)?;
@@ -959,13 +1060,12 @@ impl App {
         let pane = viewer.viewport.pane_rect(diff_body, block.side);
         let text_width = inline_block_text_width(pane);
         let editor_line = modal.visual_cursor_row(text_width).saturating_add(1);
-        let visual_index = visual_rows.iter().position(|row| {
-            matches!(
-                row,
-                DiffVisualRow::InlineBlock { index, line, .. }
-                    if *index == editor_block_index && *line == editor_line
-            )
-        })?;
+        let visual_index = viewer.visual_index_for_inline_block_line(
+            &self.document,
+            inline_blocks,
+            editor_block_index,
+            editor_line,
+        )?;
         if visual_index < viewer.viewport.scroll_y {
             return None;
         }
@@ -993,14 +1093,12 @@ impl App {
         let block_index = inline_blocks
             .iter()
             .position(|block| block.id == focus.block_id)?;
-        let visual_rows = viewer.visual_rows_with_inline_blocks(&self.document, inline_blocks);
-        let visual_index = visual_rows.iter().position(|row| {
-            matches!(
-                row,
-                DiffVisualRow::InlineBlock { index, line, .. }
-                    if *index == block_index && *line == focus.line
-            )
-        })?;
+        let visual_index = viewer.visual_index_for_inline_block_line(
+            &self.document,
+            inline_blocks,
+            block_index,
+            focus.line,
+        )?;
         if visual_index < viewer.viewport.scroll_y {
             return None;
         }
@@ -1244,7 +1342,7 @@ impl App {
             "h/l            move horizontally within active side",
             "Tab            switch split side on same row",
             "gg / G         top / bottom",
-            "0 / $          line start / end",
+            "Home / $       line start / end",
             "Ctrl-d/u       half-page",
             "Ctrl-p         command palette",
             "[ / ]          previous / next file",
@@ -1257,7 +1355,7 @@ impl App {
             "i              comment",
             "x / dd         delete note",
             ":w, :q, :q!    save / quit",
-            "? / q / esc    close help",
+            "? / esc        close help",
         ];
         for (index, line) in lines.iter().enumerate() {
             let row = rect.y + 1 + index as u16;
@@ -1306,6 +1404,9 @@ impl App {
         }
         if self.file_picker_open {
             self.handle_file_picker_key(key, rows);
+            return;
+        }
+        if self.handle_panel_jump_key(key.code, rows) {
             return;
         }
         if self.handle_pane_navigation_key(key) {
@@ -1502,6 +1603,56 @@ impl App {
         }
     }
 
+    fn handle_panel_jump_key(&mut self, code: KeyCode, rows: usize) -> bool {
+        if self.surface == AppSurface::Diff
+            && matches!(
+                self.diff_buffer.mode(),
+                DiffBufferMode::Search
+                    | DiffBufferMode::Command
+                    | DiffBufferMode::PendingTextObject(_)
+            )
+        {
+            return false;
+        }
+        match code {
+            KeyCode::Char('1') if self.surface == AppSurface::Diff => {
+                self.set_diff_focus(DiffFocusPane::Sidebar);
+                true
+            }
+            KeyCode::Char('1') => {
+                self.replace_route(AppRoute::Queue);
+                true
+            }
+            KeyCode::Char('2') if self.surface == AppSurface::Diff => {
+                self.set_diff_focus(DiffFocusPane::Sidebar);
+                true
+            }
+            KeyCode::Char('2') => {
+                self.open_selected_diff();
+                self.set_diff_focus(DiffFocusPane::Sidebar);
+                true
+            }
+            KeyCode::Char('3') => {
+                self.open_inbox(rows);
+                true
+            }
+            KeyCode::Char('4') => {
+                self.open_commit_list_for_current_context();
+                true
+            }
+            KeyCode::Char('0') if self.surface == AppSurface::Diff => {
+                self.set_diff_focus(self.current_diff_focus().non_sidebar());
+                true
+            }
+            KeyCode::Char('0') => {
+                self.open_selected_diff();
+                self.set_diff_focus(self.current_diff_focus().non_sidebar());
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_diff_buffer_key(&mut self, key: KeyEvent, rows: usize) -> bool {
         let action = self.diff_buffer.handle_key(key, Instant::now());
         self.apply_diff_buffer_action(action, rows);
@@ -1587,8 +1738,6 @@ impl App {
             }
             DiffBufferAction::PreviousFile => self.jump_relative_file(-1, rows),
             DiffBufferAction::NextFile => self.jump_relative_file(1, rows),
-            DiffBufferAction::NextCommit => self.open_commit_list(),
-            DiffBufferAction::PreviousCommit => self.open_commit_list(),
             DiffBufferAction::NextChange => self.jump_relative_hunk(1, rows),
             DiffBufferAction::PreviousChange => self.jump_relative_hunk(-1, rows),
             DiffBufferAction::NextNote => self.jump_relative_note(1, rows),
@@ -1615,6 +1764,7 @@ impl App {
                 }
             }
             DiffBufferAction::OpenEditor => self.open_current_file_in_editor(),
+            DiffBufferAction::OpenQuestion => self.open_review_composer(ReviewItemKind::Question),
             DiffBufferAction::ToggleVisual => self.toggle_visual_selection(rows, false),
             DiffBufferAction::ToggleVisualLine => self.toggle_visual_selection(rows, true),
             DiffBufferAction::SelectTextObject(kind, object) => {
@@ -1632,6 +1782,7 @@ impl App {
             }
             DiffBufferAction::YankSelection => self.yank_diff_selection(),
             DiffBufferAction::OpenComment => self.open_review_composer(ReviewItemKind::Note),
+            DiffBufferAction::ToggleReviewed => self.toggle_current_file_viewed(),
             DiffBufferAction::DeleteNote => self.delete_note_under_cursor(),
             DiffBufferAction::SaveComments => self.persist_review_session(),
             DiffBufferAction::Quit { force } => {
@@ -1653,10 +1804,222 @@ impl App {
                 .viewer_mut()
                 .focus_row_ensure_visible(&self.document, row);
         } else {
+            self.request_sources_for_collapsed_row(mode, row);
             self.branch_operation_status =
-                Some("unchanged lines not available for this diff".into());
+                Some("loading unchanged lines for this file… press expand again".into());
         }
         true
+    }
+
+    fn request_sources_for_collapsed_row(&mut self, mode: DiffMode, row: usize) {
+        let Some(file_index) = self.document.row_file_index(mode, row) else {
+            return;
+        };
+        if self.document.file_has_expansion_sources(file_index) {
+            return;
+        }
+        let Some(file) = self.document.files.get(file_index) else {
+            return;
+        };
+        let old_path = file.old_path.clone();
+        let new_path = file.new_path.clone();
+        let window = HighlightFrameWindow {
+            route: self.diff_source.clone(),
+            mode,
+            viewport: Rect::default(),
+            visual_start: row,
+            visual_end: row.saturating_add(1),
+            overscan: 0,
+            inline_layout_hash: 0,
+            file_indices: vec![file_index],
+            jobs: vec![HighlightFileJob {
+                file_index,
+                old_path,
+                new_path,
+                old_line_window: None,
+                new_line_window: None,
+            }],
+            visible_job_count: 1,
+        };
+        if let Some(envelope) = self.highlight_coordinator.visible_window_changed(window) {
+            let _ = self.highlight_worker_tx.send(envelope);
+        }
+    }
+
+    fn update_current_route_document_cache(&mut self) {
+        match &self.diff_source {
+            DiffSource::LocalWorktree(_) => {
+                self.local_document = self.document.clone();
+            }
+            DiffSource::PullRequest { repository, number } => {
+                self.pr_diff_cache
+                    .insert((repository.clone(), *number), self.document.clone());
+            }
+            DiffSource::Commit { .. } => {}
+        }
+    }
+
+    fn schedule_full_diff_highlight(&self, route: DiffSource, document: DiffDocument) {
+        let _ = (route, document);
+    }
+
+    fn dispatch_pending_highlight_window(&mut self) {
+        let Some(window) = self.pending_highlight_window.take() else {
+            return;
+        };
+        let Some(envelope) = self.highlight_coordinator.visible_window_changed(window) else {
+            return;
+        };
+        highlight_trace(&format!(
+            "request {} generation {:?} jobs={}",
+            envelope.token.request_id,
+            envelope.token.generation,
+            envelope.jobs.len()
+        ));
+        let _ = self.highlight_worker_tx.send(envelope);
+    }
+
+    fn highlight_file_jobs(
+        &self,
+        file_indices: &[usize],
+        windows: &[lazydiff_diffs::DiffFileLineWindow],
+    ) -> Vec<HighlightFileJob> {
+        file_indices
+            .iter()
+            .copied()
+            .filter_map(|file_index| {
+                if self.document.file_has_source_syntax(file_index) {
+                    return None;
+                }
+                let file = self.document.files.get(file_index)?;
+                Some(HighlightFileJob {
+                    file_index,
+                    old_path: file.old_path.clone(),
+                    new_path: file.new_path.clone(),
+                    old_line_window: windows
+                        .iter()
+                        .find(|window| window.file_index == file_index)
+                        .and_then(|window| line_window(window.old_start, window.old_end)),
+                    new_line_window: windows
+                        .iter()
+                        .find(|window| window.file_index == file_index)
+                        .and_then(|window| line_window(window.new_start, window.new_end)),
+                })
+            })
+            .collect()
+    }
+
+    fn highlight_file_indices_for_window(
+        &self,
+        visible_file_indices: &[usize],
+        document_rows: &[usize],
+    ) -> Vec<usize> {
+        let mut file_indices = Vec::new();
+        let mut seen = HashSet::new();
+        for file_index in visible_file_indices.iter().copied() {
+            if seen.insert(file_index) {
+                file_indices.push(file_index);
+            }
+        }
+        let Some(first_row) = document_rows.iter().min().copied() else {
+            return file_indices;
+        };
+        let Some(last_row) = document_rows.iter().max().copied() else {
+            return file_indices;
+        };
+        let start = first_row.saturating_sub(HIGHLIGHT_PREFETCH_DOCUMENT_ROWS);
+        let end = last_row.saturating_add(HIGHLIGHT_PREFETCH_DOCUMENT_ROWS);
+        let limit = end.saturating_sub(start).saturating_add(1);
+        let nearby_file_indices = self.document.file_indices_in_row_window(
+            self.diff_buffer.viewer().viewport.mode,
+            start,
+            limit,
+        );
+        for file_index in nearby_file_indices {
+            if seen.insert(file_index) {
+                file_indices.push(file_index);
+                if file_indices.len() >= HIGHLIGHT_PREFETCH_FILE_LIMIT {
+                    break;
+                }
+            }
+        }
+        file_indices
+    }
+
+    fn hydrate_cached_expansion_highlights_for_jobs(&mut self, jobs: &[HighlightFileJob]) -> bool {
+        let files = jobs
+            .iter()
+            .filter_map(|job| {
+                if !self.document.file_has_expansion_sources(job.file_index)
+                    || self.document.file_has_source_syntax(job.file_index)
+                {
+                    return None;
+                }
+                let (old_source, new_source) =
+                    self.document.file_expansion_sources(job.file_index)?;
+                Some(HighlightFileRequest {
+                    file_index: job.file_index,
+                    old_path: job.old_path.clone(),
+                    path: job.new_path.clone(),
+                    old_source,
+                    new_source,
+                    old_line_window: None,
+                    new_line_window: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        if files.is_empty() {
+            return false;
+        }
+        let response = highlight_daemon::cached_highlights(&HighlightRequest {
+            request_id: 0,
+            files,
+        });
+        if response.files.is_empty() {
+            return false;
+        }
+        highlight_trace(&format!(
+            "prepaint cache hydrated {} expanded files",
+            response.files.len()
+        ));
+        self.apply_highlight_response_files(response.files);
+        true
+    }
+
+    fn apply_highlighted_files(&mut self, token: HighlightToken, response: HighlightResponse) {
+        if !self
+            .highlight_coordinator
+            .should_apply(&token, &self.diff_source)
+        {
+            return;
+        }
+        self.apply_highlight_response_files(response.files);
+        self.update_current_route_document_cache();
+    }
+
+    fn apply_highlight_response_files(
+        &mut self,
+        files: Vec<highlight_daemon::HighlightFileResponse>,
+    ) {
+        for file in files {
+            let Some(current) = self.document.files.get(file.file_index) else {
+                continue;
+            };
+            if !highlight_response_matches_file(current, &file) {
+                continue;
+            }
+            self.document.apply_file_source_syntax_window(
+                file.file_index,
+                file.old_source_lines,
+                file.new_source_lines,
+                file.old_line_window
+                    .map(|window| (window.start, window.end)),
+                file.new_line_window
+                    .map(|window| (window.start, window.end)),
+                file.old_spans.map(wire_span_lines_to_syntax),
+                file.new_spans.map(wire_span_lines_to_syntax),
+            );
+        }
     }
 
     fn toggle_review_sidebar(&mut self) {
@@ -2353,7 +2716,6 @@ impl App {
             return;
         }
         if !self.history.can_go_back() {
-            self.should_quit = true;
             return;
         }
         let route = self.history.go(-1).clone();
@@ -2361,11 +2723,7 @@ impl App {
     }
 
     fn quit_or_go_back(&mut self, force: bool) {
-        if !force && self.history.can_go_back() {
-            let route = self.history.go(-1).clone();
-            self.apply_route(route);
-            return;
-        }
+        let _ = force;
         self.should_quit = true;
     }
 
@@ -2763,19 +3121,23 @@ impl App {
         }
     }
 
-    fn load_local_worktree_diff() -> std::result::Result<LocalDiffResult, String> {
-        let cwd =
-            std::env::current_dir().map_err(|error| format!("failed to read cwd: {error}"))?;
+    fn load_local_worktree_diff(
+        route: LocalWorktreeRoute,
+    ) -> std::result::Result<LocalDiffResult, String> {
+        let cwd = PathBuf::from(&route.repo_path);
         let repo_path = git_stdout_in(&cwd, ["rev-parse", "--show-toplevel"])
-            .unwrap_or_else(|| cwd.display().to_string());
+            .unwrap_or_else(|| route.repo_path.clone());
         let branch = std::env::var("LAZYDIFF_BRANCH")
             .ok()
             .filter(|branch| !branch.trim().is_empty())
             .or_else(|| git_stdout_in(&cwd, ["branch", "--show-current"]))
             .or_else(|| git_stdout_in(&cwd, ["rev-parse", "--abbrev-ref", "HEAD"]))
             .filter(|branch| branch != "HEAD")
-            .unwrap_or_else(|| "detached-head".to_string());
-        let base_ref = std::env::var("LAZYDIFF_BASE_REF").unwrap_or_else(|_| "HEAD".to_string());
+            .unwrap_or(route.branch);
+        let base_ref = (!route.base_ref.trim().is_empty())
+            .then_some(route.base_ref)
+            .or_else(|| std::env::var("LAZYDIFF_BASE_REF").ok())
+            .unwrap_or_else(|| "HEAD".to_string());
         let patch = git_stdout_result_in(
             &cwd,
             ["diff", "--no-ext-diff", "--binary", base_ref.as_str()],
@@ -2783,7 +3145,6 @@ impl App {
         let document =
             Self::materialize_local_diff_document(&patch, Path::new(&repo_path), &base_ref);
         Ok(LocalDiffResult {
-            repo_path,
             branch,
             base_ref,
             document,
@@ -2853,7 +3214,9 @@ impl App {
         let sources = forge
             .fetch_pull_request_file_sources(repository, number, &paths)
             .unwrap_or_default();
-        add_pierre_highlights_with_sources(&mut document, |file, side| {
+        let file_limit = (document.files.len() > SOURCE_AWARE_HIGHLIGHT_FILE_LIMIT)
+            .then_some(SOURCE_AWARE_HIGHLIGHT_FILE_LIMIT);
+        add_pierre_highlights_with_sources_and_limit(&mut document, file_limit, |file, side| {
             let source = pull_request_file_source(&sources, file, side)?;
             match side {
                 DiffSide::Left => source.old.clone(),
@@ -2875,6 +3238,10 @@ impl App {
         base_ref: &str,
     ) -> DiffDocument {
         let mut document = parse_unified_diff(patch);
+        if document.files.len() > SOURCE_AWARE_HIGHLIGHT_FILE_LIMIT {
+            add_pierre_highlights_with_limit(&mut document, SOURCE_AWARE_HIGHLIGHT_FILE_LIMIT);
+            return document;
+        }
         add_pierre_highlights_with_sources(&mut document, |file, side| match side {
             DiffSide::Left => file
                 .old_path
@@ -2903,6 +3270,7 @@ impl App {
 
     fn replace_document_preserving_view(&mut self, document: DiffDocument) {
         self.document = document;
+        self.highlight_coordinator.document_replaced();
         let mode = self.diff_buffer.viewer().viewport.mode;
         let rows = row_count_for_mode(&self.document, mode);
         let viewer = self.diff_buffer.viewer_mut();
@@ -3216,8 +3584,15 @@ impl App {
     }
 
     fn open_local_diff(&mut self, route: Option<LocalWorktreeRoute>) {
-        let source = DiffSource::LocalWorktree(route.unwrap_or_else(|| self.local_route.clone()));
+        if let Some(route) = route {
+            if route != self.local_route {
+                self.local_route = route;
+                self.local_document = parse_unified_diff("");
+            }
+        }
+        let source = DiffSource::LocalWorktree(self.local_route.clone());
         self.document = self.local_document.clone();
+        self.highlight_coordinator.document_replaced();
         self.push_route(AppRoute::Diff(source));
         *self.diff_buffer.viewer_mut() = Default::default();
         self.surface_scroll_y = 0;
@@ -3237,10 +3612,12 @@ impl App {
         self.push_route(AppRoute::Diff(route.clone()));
         if let Some(document) = self.pr_diff_cache.get(&key).cloned() {
             self.document = document;
+            self.highlight_coordinator.document_replaced();
             *self.diff_buffer.viewer_mut() = Default::default();
             self.session = Self::load_session_for_route(&self.store, &route, &self.document);
         } else {
             self.document = parse_unified_diff("");
+            self.highlight_coordinator.document_replaced();
             *self.diff_buffer.viewer_mut() = Default::default();
             if let Some(patch) = self.pr_patch_cache.get(&key).cloned() {
                 self.materialize_cached_pull_request_diff(
@@ -3404,7 +3781,13 @@ impl App {
             thread::spawn(move || {
                 let result =
                     forge.fetch_pull_request_commits(&pull_request.repository, pull_request.number);
-                let _ = sender.send(QueryEvent::BranchCommits(result));
+                let _ = sender.send(QueryEvent::BranchCommits {
+                    context: CommitListContext::PullRequest {
+                        repository: pull_request.repository,
+                        number: pull_request.number,
+                    },
+                    result,
+                });
             });
         } else if let Some(route) = item.local_route.clone() {
             self.commit_route = Some(route.clone());
@@ -3415,8 +3798,59 @@ impl App {
             let sender = self.query_tx.clone();
             thread::spawn(move || {
                 let result = list_branch_commits(Path::new(&route.repo_path), upstream.as_deref());
-                let _ = sender.send(QueryEvent::BranchCommits(result));
+                let _ = sender.send(QueryEvent::BranchCommits {
+                    context: CommitListContext::Local(route),
+                    result,
+                });
             });
+        }
+    }
+
+    fn open_commit_list_for_current_context(&mut self) {
+        if self.surface == AppSurface::Queue {
+            self.open_commit_list();
+            return;
+        }
+        match self.diff_source.clone() {
+            DiffSource::LocalWorktree(route) => {
+                self.commit_selection = 0;
+                self.commits.clear();
+                self.commit_route = Some(route.clone());
+                self.commit_pr_route = None;
+                self.commit_status = Some("loading commits…".to_string());
+                self.push_route(AppRoute::CommitList);
+                let sender = self.query_tx.clone();
+                thread::spawn(move || {
+                    let result = list_branch_commits(Path::new(&route.repo_path), None);
+                    let _ = sender.send(QueryEvent::BranchCommits {
+                        context: CommitListContext::Local(route),
+                        result,
+                    });
+                });
+            }
+            DiffSource::PullRequest { repository, number } => {
+                if !self.ensure_github_auth() {
+                    return;
+                }
+                self.commit_selection = 0;
+                self.commits.clear();
+                self.commit_route = None;
+                self.commit_pr_route = Some((repository.clone(), number));
+                self.commit_status = Some("loading PR commits…".to_string());
+                self.push_route(AppRoute::CommitList);
+                let sender = self.query_tx.clone();
+                let forge = Arc::clone(&self.forge);
+                thread::spawn(move || {
+                    let result = forge.fetch_pull_request_commits(&repository, number);
+                    let _ = sender.send(QueryEvent::BranchCommits {
+                        context: CommitListContext::PullRequest { repository, number },
+                        result,
+                    });
+                });
+            }
+            DiffSource::Commit { .. } => {
+                self.replace_route(AppRoute::CommitList);
+            }
         }
     }
 
@@ -3440,6 +3874,7 @@ impl App {
             sha: commit.sha.clone(),
         };
         self.document = parse_unified_diff("");
+        self.highlight_coordinator.document_replaced();
         *self.diff_buffer.viewer_mut() = Default::default();
         self.push_route(AppRoute::Diff(source));
         self.revalidate_semantic_diff(self.diff_source.clone());
@@ -3574,14 +4009,24 @@ impl App {
         let content_area = diff_content_area(body);
         let inline_blocks = self.diff_inline_blocks_for_area(Some(content_area));
         let viewer = self.diff_buffer.viewer();
-        let visual_rows = viewer.visual_rows_with_inline_blocks(&self.document, &inline_blocks);
         let side = viewer.cursor.side;
-        let Some(visual_index) = visual_rows.iter().position(|visual_row| {
-            visual_row.row_for_side(side) == Some(focus.row)
-                || visual_row.document_row() == Some(focus.row)
-        }) else {
+        let Some(visual_index) = viewer.visual_index_for_document_row_with_inline_blocks(
+            &self.document,
+            &inline_blocks,
+            focus.row,
+        ) else {
             return;
         };
+        let Some(visual_row) =
+            viewer.visual_row_at_with_inline_blocks(&self.document, &inline_blocks, visual_index)
+        else {
+            return;
+        };
+        if visual_row.row_for_side(side) != Some(focus.row)
+            && visual_row.document_row() != Some(focus.row)
+        {
+            return;
+        }
         let scroll_y = viewer.viewport.scroll_y;
         if visual_index < scroll_y {
             return;
@@ -3661,24 +4106,18 @@ impl App {
 
     fn move_diff_visual_row(&mut self, delta: isize) -> bool {
         let inline_blocks = self.diff_inline_blocks();
-        let visual_rows = self
+        let visual_row_count = self
             .diff_buffer
             .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let Some(current_index) = self.current_diff_visual_index(&visual_rows, &inline_blocks)
-        else {
+            .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+        let Some(current_index) = self.current_diff_visual_index(&inline_blocks) else {
             return false;
         };
         let next_index = current_index.saturating_add_signed(delta);
-        if next_index >= visual_rows.len() {
+        if next_index >= visual_row_count {
             return false;
         };
-        self.focus_diff_visual_index(
-            &visual_rows,
-            &inline_blocks,
-            next_index,
-            DiffScrollPolicy::EnsureVisible,
-        )
+        self.focus_diff_visual_index(&inline_blocks, next_index, DiffScrollPolicy::EnsureVisible)
     }
 
     fn focus_adjacent_inline_block_row(&mut self, block_id: &str, delta: isize) -> bool {
@@ -3686,84 +4125,83 @@ impl App {
         let Some(block_index) = inline_blocks.iter().position(|block| block.id == block_id) else {
             return false;
         };
-        let visual_rows = self
-            .diff_buffer
-            .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let mut block_indices = visual_rows.iter().enumerate().filter_map(|(index, row)| {
-            matches!(row, DiffVisualRow::InlineBlock { index: inline_index, .. } if *inline_index == block_index)
-                .then_some(index)
-        });
+        let viewer = self.diff_buffer.viewer();
+        let visual_row_count =
+            viewer.visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+        let Some(block_height) = inline_blocks.get(block_index).map(|block| block.height) else {
+            return false;
+        };
         let target_index = if delta > 0 {
-            let Some(last_block_index) = block_indices.next_back() else {
+            let Some(index) = viewer.visual_index_for_inline_block_line(
+                &self.document,
+                &inline_blocks,
+                block_index,
+                block_height.saturating_sub(1),
+            ) else {
                 return false;
             };
-            last_block_index.saturating_add(1)
+            index.saturating_add(1)
         } else {
-            let Some(first_block_index) = block_indices.next() else {
+            let Some(index) = viewer.visual_index_for_inline_block_line(
+                &self.document,
+                &inline_blocks,
+                block_index,
+                0,
+            ) else {
                 return false;
             };
-            let Some(target_index) = first_block_index.checked_sub(1) else {
+            let Some(target_index) = index.checked_sub(1) else {
                 return false;
             };
             target_index
         };
-        if target_index >= visual_rows.len() {
+        if target_index >= visual_row_count {
             return false;
         }
         self.focus_diff_visual_index(
-            &visual_rows,
             &inline_blocks,
             target_index,
             DiffScrollPolicy::EnsureVisible,
         )
     }
 
-    fn current_diff_visual_index(
-        &self,
-        visual_rows: &[DiffVisualRow],
-        inline_blocks: &[DiffInlineBlock],
-    ) -> Option<usize> {
+    fn current_diff_visual_index(&self, inline_blocks: &[DiffInlineBlock]) -> Option<usize> {
+        let viewer = self.diff_buffer.viewer();
         if let Some(focus) = &self.inline_focus
             && let Some(block_index) = inline_blocks
                 .iter()
                 .position(|block| block.id == focus.block_id)
         {
-            return visual_rows.iter().position(|visual_row| {
-                matches!(
-                    visual_row,
-                    DiffVisualRow::InlineBlock { index, line, .. }
-                        if *index == block_index && *line == focus.line
-                )
-            });
+            return viewer.visual_index_for_inline_block_line(
+                &self.document,
+                inline_blocks,
+                block_index,
+                focus.line,
+            );
         }
 
-        let cursor = self.diff_buffer.viewer().cursor;
-        visual_rows
-            .iter()
-            .position(|visual_row| visual_row.row_for_side(cursor.side) == Some(cursor.row))
-            .or_else(|| {
-                visual_rows
-                    .iter()
-                    .position(|visual_row| visual_row.document_row() == Some(cursor.row))
-            })
+        viewer.cursor_visual_index(&self.document, inline_blocks)
     }
 
     fn focus_diff_visual_index(
         &mut self,
-        visual_rows: &[DiffVisualRow],
         inline_blocks: &[DiffInlineBlock],
         visual_index: usize,
         scroll_policy: DiffScrollPolicy,
     ) -> bool {
-        let Some(next_visual_row) = visual_rows.get(visual_index).copied() else {
+        let viewer = self.diff_buffer.viewer();
+        let visual_row_count =
+            viewer.visual_row_count_with_inline_blocks(&self.document, inline_blocks);
+        let Some(next_visual_row) =
+            viewer.visual_row_at_with_inline_blocks(&self.document, inline_blocks, visual_index)
+        else {
             return false;
         };
         match next_visual_row {
             DiffVisualRow::Document { row, .. } => {
                 self.inline_focus = None;
                 self.focus_document_row_preserving_view(row);
-                self.apply_diff_scroll_policy(scroll_policy, visual_index, visual_rows.len());
+                self.apply_diff_scroll_policy(scroll_policy, visual_index, visual_row_count);
                 true
             }
             DiffVisualRow::InlineBlock { index, line, .. } => {
@@ -3779,7 +4217,7 @@ impl App {
                     block_id: block.id.clone(),
                     line: line.clamp(first_body_line, last_body_line),
                 });
-                self.apply_diff_scroll_policy(scroll_policy, visual_index, visual_rows.len());
+                self.apply_diff_scroll_policy(scroll_policy, visual_index, visual_row_count);
                 true
             }
         }
@@ -3809,45 +4247,32 @@ impl App {
 
     fn diff_document_row_screen_offset(&self, row: usize) -> Option<usize> {
         let inline_blocks = self.diff_inline_blocks();
-        let visual_rows = self
-            .diff_buffer
-            .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let side = self.diff_buffer.viewer().cursor.side;
-        let visual_index = visual_rows
-            .iter()
-            .position(|visual_row| visual_row.row_for_side(side) == Some(row))
-            .or_else(|| {
-                visual_rows
-                    .iter()
-                    .position(|visual_row| visual_row.document_row() == Some(row))
-            })?;
+        let viewer = self.diff_buffer.viewer();
+        let visual_index = viewer.visual_index_for_document_row_with_inline_blocks(
+            &self.document,
+            &inline_blocks,
+            row,
+        )?;
         visual_index.checked_sub(self.diff_buffer.viewer().viewport.scroll_y)
     }
 
     fn keep_diff_document_row_at_screen_offset(&mut self, row: usize, screen_offset: usize) {
         let inline_blocks = self.diff_inline_blocks();
-        let visual_rows = self
-            .diff_buffer
-            .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let side = self.diff_buffer.viewer().cursor.side;
-        let Some(visual_index) = visual_rows
-            .iter()
-            .position(|visual_row| visual_row.row_for_side(side) == Some(row))
-            .or_else(|| {
-                visual_rows
-                    .iter()
-                    .position(|visual_row| visual_row.document_row() == Some(row))
-            })
-        else {
+        let viewer = self.diff_buffer.viewer();
+        let Some(visual_index) = viewer.visual_index_for_document_row_with_inline_blocks(
+            &self.document,
+            &inline_blocks,
+            row,
+        ) else {
             return;
         };
+        let visual_row_count =
+            viewer.visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
         let height = self.viewport_height.max(1);
-        let max_scroll = visual_rows.len().saturating_sub(height);
+        let max_scroll = visual_row_count.saturating_sub(height);
         self.diff_buffer.viewer_mut().viewport.scroll_y =
             visual_index.saturating_sub(screen_offset).min(max_scroll);
-        self.ensure_diff_visual_index_visible(visual_index, visual_rows.len());
+        self.ensure_diff_visual_index_visible(visual_index, visual_row_count);
     }
 
     fn ensure_diff_visual_index_visible(&mut self, visual_index: usize, visual_row_count: usize) {
@@ -3868,23 +4293,23 @@ impl App {
 
     fn center_focused_diff_visual_row(&mut self) {
         let inline_blocks = self.diff_inline_blocks();
-        let visual_rows = self
+        let visual_row_count = self
             .diff_buffer
             .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        if let Some(index) = self.current_diff_visual_index(&visual_rows, &inline_blocks) {
-            self.center_diff_visual_index(index, visual_rows.len());
+            .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+        if let Some(index) = self.current_diff_visual_index(&inline_blocks) {
+            self.center_diff_visual_index(index, visual_row_count);
         }
     }
 
     fn ensure_focused_diff_visual_row_visible(&mut self) {
         let inline_blocks = self.diff_inline_blocks();
-        let visual_rows = self
+        let visual_row_count = self
             .diff_buffer
             .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        if let Some(index) = self.current_diff_visual_index(&visual_rows, &inline_blocks) {
-            self.ensure_diff_visual_index_visible(index, visual_rows.len());
+            .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+        if let Some(index) = self.current_diff_visual_index(&inline_blocks) {
+            self.ensure_diff_visual_index_visible(index, visual_row_count);
         }
     }
 
@@ -3899,31 +4324,29 @@ impl App {
         else {
             return;
         };
-        let visual_rows = self
-            .diff_buffer
-            .viewer()
-            .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-        let pane = self.diff_buffer.viewer().viewport.pane_rect(
+        let viewer = self.diff_buffer.viewer();
+        let visual_row_count =
+            viewer.visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+        let pane = viewer.viewport.pane_rect(
             Rect::new(
                 0,
                 0,
-                self.diff_buffer.viewer().viewport.width.saturating_sub(1),
-                self.diff_buffer.viewer().viewport.height.max(1),
+                viewer.viewport.width.saturating_sub(1),
+                viewer.viewport.height.max(1),
             ),
             inline_blocks[editor_block_index].side,
         );
         let text_width = inline_block_text_width(pane);
         let editor_line = modal.visual_cursor_row(text_width).saturating_add(1);
-        let Some(visual_index) = visual_rows.iter().position(|visual_row| {
-            matches!(
-                visual_row,
-                DiffVisualRow::InlineBlock { index, line, .. }
-                    if *index == editor_block_index && *line == editor_line
-            )
-        }) else {
+        let Some(visual_index) = viewer.visual_index_for_inline_block_line(
+            &self.document,
+            &inline_blocks,
+            editor_block_index,
+            editor_line,
+        ) else {
             return;
         };
-        self.ensure_diff_visual_index_visible(visual_index, visual_rows.len());
+        self.ensure_diff_visual_index_visible(visual_index, visual_row_count);
     }
 
     fn center_diff_visual_index(&mut self, visual_index: usize, visual_row_count: usize) {
@@ -3978,24 +4401,18 @@ impl App {
         let _ = rows;
         if self.surface == AppSurface::Diff {
             let inline_blocks = self.diff_inline_blocks();
-            let visual_rows = self
+            let visual_row_count = self
                 .diff_buffer
                 .viewer()
-                .visual_rows_with_inline_blocks(&self.document, &inline_blocks);
-            let Some(current_index) = self.current_diff_visual_index(&visual_rows, &inline_blocks)
-            else {
+                .visual_row_count_with_inline_blocks(&self.document, &inline_blocks);
+            let Some(current_index) = self.current_diff_visual_index(&inline_blocks) else {
                 return;
             };
             let half = (self.viewport_height.max(2) / 2).max(1) as isize;
             let target_index = current_index
                 .saturating_add_signed(direction.saturating_mul(half))
-                .min(visual_rows.len().saturating_sub(1));
-            self.focus_diff_visual_index(
-                &visual_rows,
-                &inline_blocks,
-                target_index,
-                DiffScrollPolicy::Center,
-            );
+                .min(visual_row_count.saturating_sub(1));
+            self.focus_diff_visual_index(&inline_blocks, target_index, DiffScrollPolicy::Center);
             return;
         }
         self.diff_buffer
@@ -4178,6 +4595,7 @@ impl App {
         let visible_rows = self.review_tree_rows();
         match code {
             KeyCode::Esc => self.set_diff_focus(DiffFocusPane::Right),
+            KeyCode::Char('q') => self.quit_or_go_back(false),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.review_sidebar_selection = self
                     .review_sidebar_selection
@@ -4197,7 +4615,7 @@ impl App {
                     .min(visible_rows.len().saturating_sub(1));
                 self.keep_review_sidebar_selection_visible();
             }
-            KeyCode::PageUp | KeyCode::Char('u') if visible_rows.len() > 1 => {
+            KeyCode::PageUp if visible_rows.len() > 1 => {
                 let step = self.viewport_height.max(1) / 2;
                 self.review_sidebar_selection =
                     self.review_sidebar_selection.saturating_sub(step.max(1));
@@ -4207,7 +4625,19 @@ impl App {
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
                 self.open_selected_review_tree_row(rows)
             }
-            KeyCode::Char(' ') => self.toggle_selected_review_tree_viewed(),
+            KeyCode::Char(' ') | KeyCode::Char('r') => self.toggle_selected_review_tree_viewed(),
+            KeyCode::Char('u') => {
+                self.review_sidebar_unreviewed_only = true;
+                self.review_sidebar_selection = 0;
+                self.review_sidebar_scroll_y = 0;
+                self.keep_review_sidebar_selection_visible();
+            }
+            KeyCode::Char('U') => {
+                self.review_sidebar_unreviewed_only = false;
+                self.review_sidebar_selection = 0;
+                self.review_sidebar_scroll_y = 0;
+                self.keep_review_sidebar_selection_visible();
+            }
             _ => {}
         }
     }
@@ -4306,7 +4736,24 @@ impl App {
                 }));
             }
         }
-        rows
+        if self.review_sidebar_unreviewed_only {
+            rows.into_iter()
+                .filter(|row| self.review_tree_row_has_unreviewed_target(row))
+                .collect()
+        } else {
+            rows
+        }
+    }
+
+    fn review_tree_row_has_unreviewed_target(&self, row: &ReviewTreeRow) -> bool {
+        match row {
+            ReviewTreeRow::Directory { path, .. } => self.document.files.iter().any(|file| {
+                file.new_path.starts_with(&format!("{path}/"))
+                    && !self.is_file_viewed(&file.new_path)
+            }),
+            ReviewTreeRow::File { path, .. } => !self.is_file_viewed(path),
+            ReviewTreeRow::Entity { key, .. } => !self.is_entity_viewed(key),
+        }
     }
 
     fn seed_review_sidebar_expansion(&mut self) {
@@ -4393,6 +4840,36 @@ impl App {
             .count()
     }
 
+    fn review_sidebar_progress_counts(&self) -> (usize, usize) {
+        let Some(semantic_diff) = self.semantic_diff_for_route(&self.diff_source) else {
+            return (self.viewed_file_count(), self.document.files.len());
+        };
+        let document_paths: HashSet<&str> = self
+            .document
+            .files
+            .iter()
+            .map(|file| file.new_path.as_str())
+            .collect();
+        let entity_keys = semantic_diff
+            .files
+            .iter()
+            .filter(|file| document_paths.contains(file.path.as_str()))
+            .flat_map(|file| {
+                file.changes
+                    .iter()
+                    .map(|change| Self::review_entity_key(&file.path, change))
+            })
+            .collect::<Vec<_>>();
+        if entity_keys.is_empty() {
+            return (self.viewed_file_count(), self.document.files.len());
+        }
+        let viewed = entity_keys
+            .iter()
+            .filter(|key| self.viewed_entities.contains(*key))
+            .count();
+        (viewed, entity_keys.len())
+    }
+
     fn toggle_current_file_viewed(&mut self) {
         let Some(path) = self.current_file_path().map(str::to_string) else {
             return;
@@ -4438,6 +4915,33 @@ impl App {
             } else {
                 self.viewed_entities.remove(&key);
             }
+        }
+    }
+
+    fn backfill_viewed_entities_for_route(&mut self, route: &DiffSource) {
+        if &self.diff_source != route {
+            return;
+        }
+        let keys = self
+            .semantic_diff_for_route(route)
+            .map(|diff| {
+                diff.files
+                    .iter()
+                    .filter(|file| self.viewed_files.contains(&file.path))
+                    .flat_map(|file| {
+                        file.changes
+                            .iter()
+                            .map(|change| Self::review_entity_key(&file.path, change))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for key in keys {
+            changed |= self.viewed_entities.insert(key);
+        }
+        if changed {
+            self.persist_viewed_state();
         }
     }
 
@@ -5448,6 +5952,691 @@ fn local_diff_old_ref(base_ref: &str) -> &str {
     }
 }
 
+fn wire_span_lines_to_syntax(lines: Vec<Vec<WireSyntaxSpan>>) -> Vec<Vec<SyntaxSpan>> {
+    lines
+        .into_iter()
+        .map(|line| line.into_iter().map(Into::into).collect())
+        .collect()
+}
+
+fn line_window(start: Option<u32>, end: Option<u32>) -> Option<HighlightLineWindow> {
+    Some(HighlightLineWindow {
+        start: start?,
+        end: end?,
+    })
+}
+
+fn highlight_response_matches_file(
+    current: &FileDiff,
+    response: &highlight_daemon::HighlightFileResponse,
+) -> bool {
+    current.new_path == response.path && current.old_path == response.old_path
+}
+
+fn highlight_response_matches_request(
+    request: &HighlightFileRequest,
+    response: &highlight_daemon::HighlightFileResponse,
+) -> bool {
+    request.file_index == response.file_index
+        && request.path == response.path
+        && request.old_path == response.old_path
+}
+
+fn spawn_highlight_worker(rx: Receiver<HighlightRequestEnvelope>, query_tx: Sender<QueryEvent>) {
+    thread::spawn(move || {
+        let mut pending: Option<HighlightRequestEnvelope> = None;
+        'outer: loop {
+            let Some(mut envelope) = pending.take().or_else(|| rx.recv().ok()) else {
+                break;
+            };
+            while let Ok(newer) = rx.try_recv() {
+                envelope = newer;
+            }
+            let visible_count = envelope.visible_job_count.min(envelope.jobs.len());
+            let (visible_jobs, prefetch_jobs) = envelope.jobs.split_at(visible_count);
+            request_highlight_jobs(visible_jobs, &envelope, &query_tx, "visible");
+            for job in prefetch_jobs {
+                if let Ok(newer) = rx.try_recv() {
+                    let mut newest = newer;
+                    while let Ok(newer) = rx.try_recv() {
+                        newest = newer;
+                    }
+                    pending = Some(newest);
+                    continue 'outer;
+                }
+                request_highlight_jobs(std::slice::from_ref(job), &envelope, &query_tx, "prefetch");
+            }
+        }
+    });
+}
+
+fn spawn_highlight_daemon_warmup() {
+    thread::spawn(|| {
+        let request = HighlightRequest {
+            request_id: 0,
+            files: Vec::new(),
+        };
+        let started = Instant::now();
+        if highlight_daemon::request_highlights(&request).is_ok() {
+            highlight_trace(&format!(
+                "daemon warmup completed in {:.3}ms",
+                started.elapsed().as_secs_f64() * 1000.0
+            ));
+        }
+    });
+}
+
+fn request_highlight_jobs(
+    jobs: &[HighlightFileJob],
+    envelope: &HighlightRequestEnvelope,
+    query_tx: &Sender<QueryEvent>,
+    label: &str,
+) {
+    let files = jobs
+        .iter()
+        .filter_map(|job| highlight_request_for_job(&envelope.token.route, job))
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return;
+    }
+    let request = HighlightRequest {
+        request_id: envelope.token.request_id,
+        files,
+    };
+    let cached = highlight_daemon::cached_highlights(&request);
+    let is_prefetch = label == "prefetch";
+    if !cached.files.is_empty() {
+        highlight_trace(&format!(
+            "{label} cache returned {} files before daemon request",
+            cached.files.len()
+        ));
+        let cached_files = cached.files.clone();
+        let _ = query_tx.send(QueryEvent::HighlightedFiles {
+            token: envelope.token.clone(),
+            response: cached,
+        });
+        let missing_files = request
+            .files
+            .into_iter()
+            .filter(|request_file| {
+                !cached_files.iter().any(|cached_file| {
+                    highlight_response_matches_request(request_file, cached_file)
+                })
+            })
+            .collect::<Vec<_>>();
+        if missing_files.is_empty() {
+            return;
+        }
+        if is_prefetch {
+            highlight_trace(&format!(
+                "skipping prefetch daemon miss files={}",
+                missing_files.len()
+            ));
+            return;
+        }
+        let request = HighlightRequest {
+            request_id: envelope.token.request_id,
+            files: missing_files,
+        };
+        request_daemon_highlights(&request, envelope, query_tx, label);
+        return;
+    }
+    if is_prefetch {
+        highlight_trace(&format!(
+            "skipping prefetch daemon miss files={}",
+            request.files.len()
+        ));
+        return;
+    }
+    request_daemon_highlights(&request, envelope, query_tx, label);
+}
+
+fn request_daemon_highlights(
+    request: &HighlightRequest,
+    envelope: &HighlightRequestEnvelope,
+    query_tx: &Sender<QueryEvent>,
+    label: &str,
+) {
+    let started = Instant::now();
+    highlight_trace(&format!(
+        "requesting {label} daemon highlights request={} files={}",
+        request.request_id,
+        request.files.len()
+    ));
+    if let Ok(response) = highlight_daemon::request_highlights(request) {
+        highlight_trace(&format!(
+            "{label} daemon returned {} files in {:.3}ms",
+            response.files.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        ));
+        let _ = query_tx.send(QueryEvent::HighlightedFiles {
+            token: envelope.token.clone(),
+            response,
+        });
+    }
+}
+
+fn highlight_request_for_job(
+    route: &DiffSource,
+    job: &HighlightFileJob,
+) -> Option<HighlightFileRequest> {
+    let (old_source, new_source) = match route {
+        DiffSource::LocalWorktree(route) => {
+            let repo_path = Path::new(&route.repo_path);
+            let old_source = job
+                .old_path
+                .as_deref()
+                .and_then(|path| git_blob_at(repo_path, local_diff_old_ref(&route.base_ref), path));
+            let new_source = if route.base_ref == "--cached" {
+                git_index_blob_at(repo_path, &job.new_path)
+            } else {
+                std::fs::read_to_string(repo_path.join(&job.new_path)).ok()
+            };
+            (old_source, new_source)
+        }
+        DiffSource::Commit { repo_path, sha } if !repo_path.starts_with("forge:") => {
+            let repo_path = Path::new(repo_path);
+            let parent = format!("{sha}^");
+            let old_source = job
+                .old_path
+                .as_deref()
+                .and_then(|path| git_blob_at(repo_path, &parent, path));
+            let new_source = git_blob_at(repo_path, sha, &job.new_path);
+            (old_source, new_source)
+        }
+        DiffSource::PullRequest { .. } | DiffSource::Commit { .. } => return None,
+    };
+    if old_source.is_none() && new_source.is_none() {
+        return None;
+    }
+    Some(HighlightFileRequest {
+        file_index: job.file_index,
+        old_path: job.old_path.clone(),
+        path: job.new_path.clone(),
+        old_source,
+        new_source,
+        old_line_window: job.old_line_window,
+        new_line_window: job.new_line_window,
+    })
+}
+
+fn highlight_trace(message: &str) {
+    if std::env::var_os("LAZYDIFF_HIGHLIGHT_TRACE").is_some() {
+        eprintln!("[lazydiff-highlight] {message}");
+    }
+}
+
 fn file_preview_row_count(file: &FileDiff) -> usize {
     file.hunks.iter().map(|hunk| 1 + hunk.lines.len()).sum()
+}
+
+#[cfg(test)]
+mod highlight_identity_tests {
+    use super::*;
+
+    fn response(
+        file_index: usize,
+        old_path: Option<&str>,
+        path: &str,
+    ) -> highlight_daemon::HighlightFileResponse {
+        highlight_daemon::HighlightFileResponse {
+            file_index,
+            old_path: old_path.map(ToString::to_string),
+            path: path.to_string(),
+            old_source_lines: None,
+            new_source_lines: None,
+            old_line_window: None,
+            new_line_window: None,
+            old_spans: None,
+            new_spans: None,
+        }
+    }
+
+    #[test]
+    fn highlight_response_identity_matches_current_file_paths() {
+        let document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+
+        assert!(highlight_response_matches_file(
+            &document.files[0],
+            &response(0, Some("a.rs"), "a.rs")
+        ));
+    }
+
+    #[test]
+    fn highlight_response_identity_rejects_file_index_reuse_with_different_path() {
+        let document = parse_unified_diff(
+            "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+
+        assert!(!highlight_response_matches_file(
+            &document.files[0],
+            &response(0, Some("a.rs"), "a.rs")
+        ));
+    }
+}
+
+#[cfg(test)]
+mod review_sidebar_tests {
+    use std::sync::Arc;
+
+    use lazydiff_diffs::DiffLineRangeTarget;
+
+    use super::*;
+    use crate::app::semantic::SemanticFile;
+    use crate::forge::{Forge, ForgeComment, ForgeQueue, PullRequestFileSources};
+    use crate::github::worktree::GitCommit;
+
+    struct TestForge;
+
+    impl Forge for TestForge {
+        fn name(&self) -> &'static str {
+            "Test"
+        }
+
+        fn auth_status(&self) -> GitHubAuthStatus {
+            GitHubAuthStatus::MissingLogin
+        }
+
+        fn login(&self) -> std::result::Result<String, String> {
+            Err("not implemented".into())
+        }
+
+        fn logout(&self) -> std::result::Result<bool, String> {
+            Ok(false)
+        }
+
+        fn fetch_queue(&self) -> std::result::Result<ForgeQueue, String> {
+            Err("not implemented".into())
+        }
+
+        fn fetch_pull_request_comments(
+            &self,
+            _repo: &str,
+            _number: u32,
+        ) -> std::result::Result<Vec<ForgeComment>, String> {
+            Err("not implemented".into())
+        }
+
+        fn fetch_pull_request_patch(
+            &self,
+            _repo: &str,
+            _number: u32,
+        ) -> std::result::Result<String, String> {
+            Err("not implemented".into())
+        }
+
+        fn fetch_pull_request_file_sources(
+            &self,
+            _repo: &str,
+            _number: u32,
+            _paths: &[String],
+        ) -> std::result::Result<HashMap<String, PullRequestFileSources>, String> {
+            Ok(HashMap::new())
+        }
+
+        fn fetch_pull_request_commits(
+            &self,
+            _repo: &str,
+            _number: u32,
+        ) -> std::result::Result<Vec<GitCommit>, String> {
+            Err("not implemented".into())
+        }
+
+        fn fetch_commit_patch(
+            &self,
+            _repo: &str,
+            _sha: &str,
+        ) -> std::result::Result<String, String> {
+            Err("not implemented".into())
+        }
+
+        fn post_comment(
+            &self,
+            _repo: &str,
+            _number: u32,
+            _target: &DiffLineRangeTarget,
+            _body: &str,
+        ) -> std::result::Result<ForgeComment, String> {
+            Err("not implemented".into())
+        }
+
+        fn pull_request_url(&self, repo: &str, number: u32) -> String {
+            format!("https://example.test/{repo}/pull/{number}")
+        }
+
+        fn branch_url(&self, repo: &str, branch: &str) -> String {
+            format!("https://example.test/{repo}/tree/{branch}")
+        }
+    }
+
+    fn test_app() -> App {
+        let patch = "diff --git a/src/app/queries.rs b/src/app/queries.rs\n--- a/src/app/queries.rs\n+++ b/src/app/queries.rs\n@@ -1,3 +1,3 @@\n fn drain_query_events() {}\n-fn revalidate_local_diff() {}\n+fn revalidate_local_diff_now() {}\n fn apply_pull_request_diff() {}\n";
+        App::new_local_diff(
+            "test.diff".into(),
+            patch.len(),
+            parse_unified_diff(patch),
+            "/repo".into(),
+            "fix/perf".into(),
+            "main".into(),
+            Arc::new(TestForge),
+        )
+    }
+
+    #[test]
+    fn changes_progress_counts_semantic_nodes_when_semantic_diff_exists() {
+        let mut app = test_app();
+        app.viewed_files.clear();
+        app.viewed_entities.clear();
+        let route = app.diff_source.clone();
+        app.semantic_diff_cache.insert(
+            route,
+            SemanticDiff {
+                truncated: false,
+                files: vec![SemanticFile {
+                    path: "src/app/queries.rs".into(),
+                    changes: vec![
+                        SemanticChange {
+                            entity_type: "function".into(),
+                            entity_name: "drain_query_events".into(),
+                            change_type: "modified".into(),
+                            line: Some(1),
+                            end_line: Some(1),
+                        },
+                        SemanticChange {
+                            entity_type: "function".into(),
+                            entity_name: "revalidate_local_diff".into(),
+                            change_type: "modified".into(),
+                            line: Some(2),
+                            end_line: Some(2),
+                        },
+                        SemanticChange {
+                            entity_type: "function".into(),
+                            entity_name: "apply_pull_request_diff".into(),
+                            change_type: "modified".into(),
+                            line: Some(3),
+                            end_line: Some(3),
+                        },
+                    ],
+                }],
+            },
+        );
+
+        assert_eq!(app.review_sidebar_progress_counts(), (0, 3));
+    }
+
+    #[test]
+    fn numeric_panel_jumps_focus_changes_and_diff() {
+        let mut app = test_app();
+        app.surface = AppSurface::Diff;
+        app.review_sidebar_visible = true;
+        app.set_diff_focus(DiffFocusPane::Right);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.surface, AppSurface::Diff);
+        assert_eq!(app.current_diff_focus(), DiffFocusPane::Sidebar);
+        assert!(app.review_sidebar_focus);
+
+        app.set_diff_focus(DiffFocusPane::Right);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert_eq!(app.current_diff_focus(), DiffFocusPane::Sidebar);
+        assert!(app.review_sidebar_focus);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        assert_eq!(app.current_diff_focus(), DiffFocusPane::Right);
+        assert!(!app.review_sidebar_focus);
+    }
+
+    #[test]
+    fn numeric_panel_jumps_do_not_intercept_search_text() {
+        let mut app = test_app();
+        app.surface = AppSurface::Diff;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+
+        assert_eq!(app.diff_buffer.search_query(), "2");
+        assert_eq!(app.surface, AppSurface::Diff);
+        assert!(!app.review_sidebar_focus);
+    }
+
+    #[test]
+    fn numeric_panel_jumps_open_status_review_and_commits() {
+        let mut app = test_app();
+        app.surface = AppSurface::Diff;
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert!(app.file_picker_open);
+        assert_eq!(app.finder_kind, FinderKind::Inbox);
+
+        app.file_picker_open = false;
+        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert_eq!(app.surface, AppSurface::CommitList);
+        assert!(app.commit_route.is_some());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        assert_eq!(app.surface, AppSurface::Queue);
+    }
+
+    #[test]
+    fn r_marks_focused_changes_row_viewed() {
+        let mut app = test_app();
+        app.surface = AppSurface::Diff;
+        app.review_sidebar_visible = true;
+        app.set_diff_focus(DiffFocusPane::Sidebar);
+        app.seed_review_sidebar_expansion();
+        let selected_file_row = app
+            .review_tree_rows()
+            .iter()
+            .position(|row| matches!(row, ReviewTreeRow::File { path, .. } if path == "src/app/queries.rs"))
+            .expect("file row should exist");
+        app.review_sidebar_selection = selected_file_row;
+        assert!(matches!(
+            app.review_tree_rows().get(app.review_sidebar_selection),
+            Some(ReviewTreeRow::File { path, .. }) if path == "src/app/queries.rs"
+        ));
+        app.viewed_files.remove("src/app/queries.rs");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+        assert!(app.is_file_viewed("src/app/queries.rs"));
+    }
+
+    #[test]
+    fn u_filters_changes_to_unreviewed_rows_and_upper_u_clears_filter() {
+        let mut app = test_app();
+        app.surface = AppSurface::Diff;
+        app.review_sidebar_visible = true;
+        app.set_diff_focus(DiffFocusPane::Sidebar);
+        app.seed_review_sidebar_expansion();
+        app.viewed_files.insert("src/app/queries.rs".to_string());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+
+        assert!(app.review_sidebar_unreviewed_only);
+        assert!(app.review_tree_rows().iter().all(|row| {
+            !matches!(row, ReviewTreeRow::File { path, .. } if path == "src/app/queries.rs")
+        }));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('U'), KeyModifiers::NONE));
+
+        assert!(!app.review_sidebar_unreviewed_only);
+        assert!(app.review_tree_rows().iter().any(|row| {
+            matches!(row, ReviewTreeRow::File { path, .. } if path == "src/app/queries.rs")
+        }));
+    }
+
+    #[test]
+    fn opening_another_local_worktree_uses_that_route_not_previous_document() {
+        let mut app = test_app();
+        let route = LocalWorktreeRoute {
+            repo_path: "/repo/other".into(),
+            branch: "agent/other".into(),
+            base_ref: "origin/main".into(),
+        };
+
+        app.open_local_diff(Some(route.clone()));
+
+        assert_eq!(app.local_route, route);
+        assert_eq!(app.diff_source, DiffSource::LocalWorktree(route));
+        assert!(app.document.files.is_empty());
+        assert!(app.local_document.files.is_empty());
+    }
+
+    #[test]
+    fn stale_local_diff_result_does_not_replace_current_worktree_document() {
+        let mut app = test_app();
+        let stale_route = app.local_route.clone();
+        let current_route = LocalWorktreeRoute {
+            repo_path: "/repo/current".into(),
+            branch: "agent/current".into(),
+            base_ref: "main".into(),
+        };
+        app.local_route = current_route.clone();
+        app.diff_source = DiffSource::LocalWorktree(current_route);
+        app.local_document = parse_unified_diff("");
+        app.document = parse_unified_diff("");
+
+        let stale_patch = "diff --git a/stale.txt b/stale.txt\n--- a/stale.txt\n+++ b/stale.txt\n@@ -1 +1 @@\n-old\n+new\n";
+        app.query_tx
+            .send(QueryEvent::LocalDiff {
+                route: stale_route,
+                result: Ok(LocalDiffResult {
+                    branch: "fix/perf".into(),
+                    base_ref: "main".into(),
+                    document: parse_unified_diff(stale_patch),
+                }),
+            })
+            .expect("send local diff event");
+
+        assert!(app.drain_query_events());
+
+        assert!(app.local_document.files.is_empty());
+        assert!(app.document.files.is_empty());
+    }
+
+    #[test]
+    fn local_diff_result_that_normalizes_branch_still_updates_active_document() {
+        let mut app = test_app();
+        let requested_route = LocalWorktreeRoute {
+            repo_path: "/repo".into(),
+            branch: "loading".into(),
+            base_ref: "main".into(),
+        };
+        app.local_route = requested_route.clone();
+        app.diff_source = DiffSource::LocalWorktree(requested_route.clone());
+        app.document = parse_unified_diff("");
+        app.local_document = parse_unified_diff("");
+        let patch = "diff --git a/fresh.txt b/fresh.txt\n--- a/fresh.txt\n+++ b/fresh.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+        app.query_tx
+            .send(QueryEvent::LocalDiff {
+                route: requested_route,
+                result: Ok(LocalDiffResult {
+                    branch: "agent/fresh".into(),
+                    base_ref: "main".into(),
+                    document: parse_unified_diff(patch),
+                }),
+            })
+            .expect("send local diff event");
+
+        assert!(app.drain_query_events());
+
+        assert_eq!(app.local_route.branch, "agent/fresh");
+        assert!(matches!(
+            &app.diff_source,
+            DiffSource::LocalWorktree(route) if route.branch == "agent/fresh"
+        ));
+        assert_eq!(app.document.files[0].new_path, "fresh.txt");
+    }
+
+    #[test]
+    fn stale_branch_commits_do_not_replace_current_commit_list() {
+        let mut app = test_app();
+        let stale_route = app.local_route.clone();
+        app.commit_route = Some(LocalWorktreeRoute {
+            repo_path: "/repo/current".into(),
+            branch: "agent/current".into(),
+            base_ref: "main".into(),
+        });
+        app.commit_pr_route = None;
+        app.commits.clear();
+
+        app.query_tx
+            .send(QueryEvent::BranchCommits {
+                context: CommitListContext::Local(stale_route),
+                result: Ok(vec![GitCommit {
+                    sha: "abcdef".into(),
+                    short_sha: "abcdef".into(),
+                    author: "test".into(),
+                    authored_at: "0".into(),
+                    subject: "stale".into(),
+                    files: Vec::new(),
+                }]),
+            })
+            .expect("send branch commits event");
+
+        assert!(app.drain_query_events());
+
+        assert!(app.commits.is_empty());
+    }
+
+    #[test]
+    fn stale_commit_diff_does_not_replace_current_diff_route() {
+        let mut app = test_app();
+        let current_route = app.diff_source.clone();
+        app.surface = AppSurface::Diff;
+        let stale_patch = "diff --git a/stale.txt b/stale.txt\n--- a/stale.txt\n+++ b/stale.txt\n@@ -1 +1 @@\n-old\n+new\n";
+
+        app.query_tx
+            .send(QueryEvent::CommitDiff {
+                repo_path: "/repo".into(),
+                sha: "abcdef".into(),
+                result: Ok(parse_unified_diff(stale_patch)),
+            })
+            .expect("send commit diff event");
+
+        assert!(app.drain_query_events());
+
+        assert_eq!(app.diff_source, current_route);
+        assert!(
+            app.document
+                .files
+                .iter()
+                .all(|file| file.new_path != "stale.txt")
+        );
+    }
+
+    #[test]
+    fn semantic_diff_arrival_backfills_entities_for_viewed_files() {
+        let mut app = test_app();
+        let route = app.diff_source.clone();
+        app.viewed_files.insert("src/app/queries.rs".into());
+        app.viewed_entities.clear();
+
+        app.query_tx
+            .send(QueryEvent::SemanticDiff {
+                route: route.clone(),
+                result: Ok(SemanticDiff {
+                    truncated: false,
+                    files: vec![SemanticFile {
+                        path: "src/app/queries.rs".into(),
+                        changes: vec![SemanticChange {
+                            entity_type: "function".into(),
+                            entity_name: "drain_query_events".into(),
+                            change_type: "modified".into(),
+                            line: Some(1),
+                            end_line: Some(1),
+                        }],
+                    }],
+                }),
+            })
+            .expect("send semantic diff event");
+
+        assert!(app.drain_query_events());
+
+        assert_eq!(app.review_sidebar_progress_counts(), (1, 1));
+    }
 }

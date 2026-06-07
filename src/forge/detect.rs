@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::sync::Arc;
+use std::{fs, path::PathBuf, process::Command};
 
 use super::Forge;
 use crate::forge::gitea::GiteaForge;
@@ -54,6 +54,10 @@ fn classify_hostname(hostname: &str) -> ForgeKind {
 
 /// Run `git remote get-url origin` and extract the hostname.
 fn remote_origin_hostname() -> Option<String> {
+    if let Some(hostname) = remote_origin_hostname_from_git_config() {
+        return Some(hostname);
+    }
+
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .output()
@@ -63,6 +67,53 @@ fn remote_origin_hostname() -> Option<String> {
     }
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
     parse_hostname_from_url(&url)
+}
+
+fn remote_origin_hostname_from_git_config() -> Option<String> {
+    let config_path = git_config_path_from_cwd()?;
+    let config = fs::read_to_string(config_path).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_origin = line == r#"[remote "origin"]"#;
+            continue;
+        }
+        if in_origin {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.trim() == "url" {
+                return parse_hostname_from_url(value.trim());
+            }
+        }
+    }
+    None
+}
+
+fn git_config_path_from_cwd() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git.join("config"));
+        }
+        if dot_git.is_file()
+            && let Ok(contents) = fs::read_to_string(&dot_git)
+            && let Some(gitdir) = contents.trim().strip_prefix("gitdir:")
+        {
+            let gitdir = gitdir.trim();
+            let path = PathBuf::from(gitdir);
+            return Some(if path.is_absolute() {
+                path.join("config")
+            } else {
+                dir.join(path).join("config")
+            });
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
 /// Extract the hostname from a git remote URL.

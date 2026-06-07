@@ -31,6 +31,15 @@ pub struct DiffRenderModel {
     pub visual_rows: Vec<DiffVisualRow>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffVisibleDocumentRows {
+    pub visual_start: usize,
+    pub visual_end: usize,
+    pub viewport_start: usize,
+    pub viewport_end: usize,
+    pub document_rows: Vec<usize>,
+}
+
 impl Default for DiffCursor {
     fn default() -> Self {
         Self {
@@ -127,6 +136,159 @@ pub struct DiffInlineBlock {
     pub body: String,
 }
 
+#[derive(Debug)]
+struct DiffLayout<'a> {
+    mode: DiffMode,
+    row_count: usize,
+    inline_blocks: Vec<(usize, &'a DiffInlineBlock)>,
+    total_visual_rows: usize,
+}
+
+impl<'a> DiffLayout<'a> {
+    fn new(document: &DiffDocument, mode: DiffMode, inline_blocks: &'a [DiffInlineBlock]) -> Self {
+        let row_count = document.rows(mode).len();
+        let mut inline_blocks = inline_blocks.iter().enumerate().collect::<Vec<_>>();
+        inline_blocks.sort_unstable_by_key(|(_, block)| block.after_row);
+        let inline_height = inline_blocks
+            .iter()
+            .map(|(_, block)| block.height)
+            .sum::<usize>();
+        Self {
+            mode,
+            row_count,
+            inline_blocks,
+            total_visual_rows: row_count.saturating_add(inline_height),
+        }
+    }
+
+    fn total_visual_rows(&self) -> usize {
+        self.total_visual_rows
+    }
+
+    fn visual_index_for_document_row(&self, row: usize) -> Option<usize> {
+        (row < self.row_count).then(|| row.saturating_add(self.inline_height_before_row(row)))
+    }
+
+    fn visual_row_at(&self, document: &DiffDocument, visual_index: usize) -> Option<DiffVisualRow> {
+        if visual_index >= self.total_visual_rows {
+            return None;
+        }
+        let row = self.document_row_at_or_before_visual_index(visual_index)?;
+        let document_visual_index = self.visual_index_for_document_row(row)?;
+        if visual_index == document_visual_index {
+            return Some(document_visual_row(document, self.mode, row));
+        }
+
+        let mut offset = visual_index
+            .saturating_sub(document_visual_index)
+            .saturating_sub(1);
+        for (index, block) in self
+            .inline_blocks
+            .iter()
+            .copied()
+            .filter(|(_, block)| block.after_row == row)
+        {
+            if offset < block.height {
+                return Some(DiffVisualRow::InlineBlock {
+                    after_row: block.after_row,
+                    index,
+                    line: offset,
+                });
+            }
+            offset = offset.saturating_sub(block.height);
+        }
+        None
+    }
+
+    fn document_row_for_visual_index(
+        &self,
+        document: &DiffDocument,
+        visual_index: usize,
+        side: DiffSide,
+    ) -> Option<usize> {
+        self.visual_row_at(document, visual_index)
+            .and_then(|visual_row| {
+                visual_row
+                    .row_for_side(side)
+                    .or_else(|| visual_row.document_row())
+            })
+    }
+
+    fn visible_rows(
+        &self,
+        document: &DiffDocument,
+        start: usize,
+        limit: usize,
+    ) -> Vec<DiffVisualRow> {
+        if limit == 0 || start >= self.total_visual_rows {
+            return Vec::new();
+        }
+        (start..start.saturating_add(limit).min(self.total_visual_rows))
+            .filter_map(|index| self.visual_row_at(document, index))
+            .collect()
+    }
+
+    fn inline_block_visual_index(&self, block_index: usize, line: usize) -> Option<usize> {
+        let block = self
+            .inline_blocks
+            .iter()
+            .find_map(|(index, block)| (*index == block_index).then_some(*block))?;
+        if line >= block.height {
+            return None;
+        }
+        let mut visual_index = self
+            .visual_index_for_document_row(block.after_row)?
+            .saturating_add(1);
+        for (index, previous_block) in self
+            .inline_blocks
+            .iter()
+            .copied()
+            .filter(|(_, previous_block)| previous_block.after_row == block.after_row)
+        {
+            if index == block_index {
+                return Some(visual_index.saturating_add(line));
+            }
+            visual_index = visual_index.saturating_add(previous_block.height);
+        }
+        None
+    }
+
+    fn inline_height_before_row(&self, row: usize) -> usize {
+        self.inline_blocks
+            .iter()
+            .take_while(|(_, block)| block.after_row < row)
+            .map(|(_, block)| block.height)
+            .sum::<usize>()
+    }
+
+    fn document_row_at_or_before_visual_index(&self, visual_index: usize) -> Option<usize> {
+        if self.row_count == 0 {
+            return None;
+        }
+        let mut low = 0usize;
+        let mut high = self.row_count;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.visual_index_for_document_row(mid)? <= visual_index {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        low.checked_sub(1)
+    }
+}
+
+fn document_visual_row(document: &DiffDocument, mode: DiffMode, row: usize) -> DiffVisualRow {
+    DiffVisualRow::Document {
+        row,
+        left: document.line_target(mode, row, DiffSide::Left).map(|_| row),
+        right: document
+            .line_target(mode, row, DiffSide::Right)
+            .map(|_| row),
+    }
+}
+
 impl Default for DiffViewport {
     fn default() -> Self {
         Self {
@@ -204,6 +366,14 @@ pub struct DiffSearchState {
 }
 
 impl DiffViewerState {
+    fn layout<'a>(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &'a [DiffInlineBlock],
+    ) -> DiffLayout<'a> {
+        DiffLayout::new(document, self.viewport.mode, inline_blocks)
+    }
+
     pub fn horizontal_scroll_for_side(&self, side: DiffSide) -> usize {
         self.viewport.scroll_x_for_side(side)
     }
@@ -253,6 +423,49 @@ impl DiffViewerState {
             viewport_height,
             visual_row_count,
             visual_rows,
+        }
+    }
+
+    pub fn visible_document_rows_for_area(
+        &mut self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        area: Rect,
+        overscan: usize,
+    ) -> DiffVisibleDocumentRows {
+        let layout = self.layout(document, inline_blocks);
+        let viewport_height = area.height as usize;
+        let visual_row_count = layout.total_visual_rows();
+        let max_scroll = visual_row_count.saturating_sub(viewport_height);
+        self.viewport.scroll_y = self.viewport.scroll_y.min(max_scroll);
+
+        let viewport_start = self.viewport.scroll_y;
+        let viewport_end = viewport_start
+            .saturating_add(viewport_height)
+            .min(visual_row_count);
+        let visual_start = viewport_start.saturating_sub(overscan);
+        let visual_end = viewport_end.saturating_add(overscan).min(visual_row_count);
+        let mut document_rows = Vec::new();
+        for visual_row in layout.visible_rows(
+            document,
+            visual_start,
+            visual_end.saturating_sub(visual_start),
+        ) {
+            let row = match visual_row {
+                DiffVisualRow::Document { row, .. } => row,
+                DiffVisualRow::InlineBlock { after_row, .. } => after_row,
+            };
+            if document_rows.last().copied() != Some(row) {
+                document_rows.push(row);
+            }
+        }
+
+        DiffVisibleDocumentRows {
+            visual_start,
+            visual_end,
+            viewport_start,
+            viewport_end,
+            document_rows,
         }
     }
 
@@ -345,34 +558,8 @@ impl DiffViewerState {
         document: &DiffDocument,
         inline_blocks: &[DiffInlineBlock],
     ) -> Vec<DiffVisualRow> {
-        let mut inline_blocks = inline_blocks.iter().enumerate().collect::<Vec<_>>();
-        inline_blocks.sort_unstable_by_key(|(_, block)| block.after_row);
-        let document_rows = self.document_visual_rows(document);
-        let mut visual_rows = Vec::with_capacity(
-            document_rows.len()
-                + inline_blocks
-                    .iter()
-                    .map(|(_, block)| block.height)
-                    .sum::<usize>(),
-        );
-        for document_row in document_rows {
-            let row = document_row.document_row().unwrap_or(0);
-            visual_rows.push(document_row);
-            for (index, block) in inline_blocks
-                .iter()
-                .copied()
-                .filter(|(_, block)| block.after_row == row)
-            {
-                for line in 0..block.height {
-                    visual_rows.push(DiffVisualRow::InlineBlock {
-                        after_row: block.after_row,
-                        index,
-                        line,
-                    });
-                }
-            }
-        }
-        visual_rows
+        let layout = self.layout(document, inline_blocks);
+        layout.visible_rows(document, 0, layout.total_visual_rows())
     }
 
     pub fn visual_row_count_with_inline_blocks(
@@ -380,12 +567,7 @@ impl DiffViewerState {
         document: &DiffDocument,
         inline_blocks: &[DiffInlineBlock],
     ) -> usize {
-        document.rows(self.viewport.mode).len().saturating_add(
-            inline_blocks
-                .iter()
-                .map(|block| block.height)
-                .sum::<usize>(),
-        )
+        self.layout(document, inline_blocks).total_visual_rows()
     }
 
     pub fn visible_rows_with_inline_blocks(
@@ -395,112 +577,9 @@ impl DiffViewerState {
         start: usize,
         limit: usize,
     ) -> (usize, Vec<DiffVisualRow>) {
-        let row_count = document.rows(self.viewport.mode).len();
-        let mut inline_blocks = inline_blocks.iter().enumerate().collect::<Vec<_>>();
-        inline_blocks.sort_unstable_by_key(|(_, block)| block.after_row);
-        let total = row_count.saturating_add(
-            inline_blocks
-                .iter()
-                .map(|(_, block)| block.height)
-                .sum::<usize>(),
-        );
-        if limit == 0 || start >= total {
-            return (total, Vec::new());
-        }
-
-        let inline_height_before_row = |row: usize| {
-            inline_blocks
-                .iter()
-                .take_while(|(_, block)| block.after_row < row)
-                .map(|(_, block)| block.height)
-                .sum::<usize>()
-        };
-        let document_visual_index = |row: usize| row.saturating_add(inline_height_before_row(row));
-        let mut low = 0usize;
-        let mut high = row_count;
-        while low < high {
-            let mid = low + (high - low) / 2;
-            if document_visual_index(mid) <= start {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
-        }
-        let mut row = low.saturating_sub(1);
-        let mut visible_rows = Vec::with_capacity(limit.min(total.saturating_sub(start)));
-
-        while row < row_count && visible_rows.len() < limit {
-            let mut visual_index = document_visual_index(row);
-            if visual_index >= start {
-                visible_rows.push(self.document_visual_row(document, row));
-                if visible_rows.len() >= limit {
-                    break;
-                }
-            }
-            visual_index = visual_index.saturating_add(1);
-            for (index, block) in inline_blocks
-                .iter()
-                .copied()
-                .filter(|(_, block)| block.after_row == row)
-            {
-                for line in 0..block.height {
-                    if visual_index >= start {
-                        visible_rows.push(DiffVisualRow::InlineBlock {
-                            after_row: block.after_row,
-                            index,
-                            line,
-                        });
-                        if visible_rows.len() >= limit {
-                            break;
-                        }
-                    }
-                    visual_index = visual_index.saturating_add(1);
-                }
-                if visible_rows.len() >= limit {
-                    break;
-                }
-            }
-            row = row.saturating_add(1);
-        }
-
-        (total, visible_rows)
-    }
-
-    fn document_visual_row(&self, document: &DiffDocument, row: usize) -> DiffVisualRow {
-        DiffVisualRow::Document {
-            row,
-            left: document
-                .line_target(self.viewport.mode, row, DiffSide::Left)
-                .map(|_| row),
-            right: document
-                .line_target(self.viewport.mode, row, DiffSide::Right)
-                .map(|_| row),
-        }
-    }
-
-    fn document_visual_rows(&self, document: &DiffDocument) -> Vec<DiffVisualRow> {
-        match self.viewport.mode {
-            DiffMode::Unified => (0..document.rows(DiffMode::Unified).len())
-                .map(|row| DiffVisualRow::Document {
-                    row,
-                    left: document
-                        .line_target(DiffMode::Unified, row, DiffSide::Left)
-                        .map(|_| row),
-                    right: document
-                        .line_target(DiffMode::Unified, row, DiffSide::Right)
-                        .map(|_| row),
-                })
-                .collect(),
-            DiffMode::Split => self
-                .side_by_side_rows(document)
-                .into_iter()
-                .map(|row| DiffVisualRow::Document {
-                    row: row.row,
-                    left: row.left,
-                    right: row.right,
-                })
-                .collect(),
-        }
+        let layout = self.layout(document, inline_blocks);
+        let total = layout.total_visual_rows();
+        (total, layout.visible_rows(document, start, limit))
     }
 
     pub fn visual_index_for_document_row(
@@ -508,9 +587,17 @@ impl DiffViewerState {
         document: &DiffDocument,
         row: usize,
     ) -> Option<usize> {
-        self.visual_rows(document)
-            .iter()
-            .position(|visual_row| visual_row.document_row() == Some(row))
+        self.visual_index_for_document_row_with_inline_blocks(document, &[], row)
+    }
+
+    pub fn visual_index_for_document_row_with_inline_blocks(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        row: usize,
+    ) -> Option<usize> {
+        self.layout(document, inline_blocks)
+            .visual_index_for_document_row(row)
     }
 
     pub fn document_row_for_visual_index(
@@ -519,14 +606,59 @@ impl DiffViewerState {
         visual_index: usize,
         side: DiffSide,
     ) -> Option<usize> {
-        self.visual_rows(document)
-            .get(visual_index)
-            .copied()
-            .and_then(|visual_row| {
-                visual_row
-                    .row_for_side(side)
-                    .or_else(|| visual_row.document_row())
-            })
+        self.document_row_for_visual_index_with_inline_blocks(document, &[], visual_index, side)
+    }
+
+    pub fn document_row_for_visual_index_with_inline_blocks(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        visual_index: usize,
+        side: DiffSide,
+    ) -> Option<usize> {
+        self.layout(document, inline_blocks)
+            .document_row_for_visual_index(document, visual_index, side)
+    }
+
+    pub fn visual_index_for_inline_block_line(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        block_index: usize,
+        line: usize,
+    ) -> Option<usize> {
+        self.layout(document, inline_blocks)
+            .inline_block_visual_index(block_index, line)
+    }
+
+    pub fn visual_row_at_with_inline_blocks(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+        visual_index: usize,
+    ) -> Option<DiffVisualRow> {
+        self.layout(document, inline_blocks)
+            .visual_row_at(document, visual_index)
+    }
+
+    pub fn cursor_visual_index(
+        &self,
+        document: &DiffDocument,
+        inline_blocks: &[DiffInlineBlock],
+    ) -> Option<usize> {
+        let visual_index = self
+            .layout(document, inline_blocks)
+            .visual_index_for_document_row(self.cursor.row)?;
+        let visual_row = self
+            .layout(document, inline_blocks)
+            .visual_row_at(document, visual_index)?;
+        if visual_row.row_for_side(self.cursor.side) == Some(self.cursor.row)
+            || visual_row.document_row() == Some(self.cursor.row)
+        {
+            Some(visual_index)
+        } else {
+            None
+        }
     }
 
     pub fn cursor_screen_position(
@@ -539,17 +671,7 @@ impl DiffViewerState {
             return None;
         }
         let content_area = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-        let visual_rows = self.visual_rows_with_inline_blocks(document, inline_blocks);
-        let visual_index = visual_rows
-            .iter()
-            .position(|visual_row| {
-                visual_row.row_for_side(self.cursor.side) == Some(self.cursor.row)
-            })
-            .or_else(|| {
-                visual_rows
-                    .iter()
-                    .position(|visual_row| visual_row.document_row() == Some(self.cursor.row))
-            })?;
+        let visual_index = self.cursor_visual_index(document, inline_blocks)?;
         if visual_index < self.viewport.scroll_y {
             return None;
         }
@@ -667,7 +789,7 @@ impl DiffViewerState {
             DiffSide::Right => DiffSide::Left,
         };
         if document
-            .line_target(self.viewport.mode, self.cursor.row, next_side)
+            .row_text_for_selection(self.viewport.mode, self.cursor.row, next_side)
             .is_none()
         {
             return false;
@@ -818,8 +940,10 @@ impl DiffViewerState {
             .viewport
             .scroll_y
             .saturating_add(screen_row.saturating_sub(area.y) as usize);
-        let visual_rows = self.visual_rows_with_inline_blocks(document, inline_blocks);
-        let row = visual_rows.get(visual_index)?.document_row()?;
+        let row = self
+            .layout(document, inline_blocks)
+            .visual_row_at(document, visual_index)?
+            .document_row()?;
 
         let side = match self.viewport.mode {
             DiffMode::Unified => {
@@ -881,8 +1005,8 @@ impl DiffViewerState {
             .viewport
             .scroll_y
             .saturating_add(screen_row.saturating_sub(area.y) as usize);
-        self.visual_rows_with_inline_blocks(document, inline_blocks)
-            .get(visual_index)?
+        self.layout(document, inline_blocks)
+            .visual_row_at(document, visual_index)?
             .document_row()
     }
 
@@ -1123,22 +1247,17 @@ impl DiffViewerState {
         if delta == 0 {
             return Some(self.cursor.row);
         }
-        let visual_rows = self.visual_rows(document);
-        let mut visual_index = self.visual_index_for_document_row(document, self.cursor.row)?;
+        let row_count = self.row_count(document);
+        let mut row = self.cursor.row;
         loop {
-            visual_index = visual_index.saturating_add_signed(delta);
-            if visual_index >= visual_rows.len() {
+            row = row.saturating_add_signed(delta);
+            if row >= row_count {
                 return None;
             }
-            let Some(row) = visual_rows[visual_index].document_row() else {
-                continue;
-            };
             if document.is_focusable_row(self.viewport.mode, row, self.cursor.side) {
                 return Some(row);
             }
-            if (delta < 0 && visual_index == 0)
-                || (delta > 0 && visual_index == visual_rows.len().saturating_sub(1))
-            {
+            if (delta < 0 && row == 0) || (delta > 0 && row == row_count.saturating_sub(1)) {
                 return None;
             }
         }
@@ -1155,14 +1274,14 @@ impl DiffViewerState {
 
     fn normalize_cursor_side(&mut self, document: &DiffDocument) {
         if document
-            .line_target(self.viewport.mode, self.cursor.row, self.cursor.side)
+            .row_text_for_selection(self.viewport.mode, self.cursor.row, self.cursor.side)
             .is_some()
         {
             return;
         }
         for side in [DiffSide::Right, DiffSide::Left] {
             if document
-                .line_target(self.viewport.mode, self.cursor.row, side)
+                .row_text_for_selection(self.viewport.mode, self.cursor.row, side)
                 .is_some()
             {
                 self.cursor.side = side;
@@ -1421,7 +1540,6 @@ impl DiffViewerState {
         row: usize,
         side: DiffSide,
     ) -> Option<(usize, usize)> {
-        document.line_target(self.viewport.mode, row, side)?;
         let text = document.row_text_for_selection(self.viewport.mode, row, side)?;
         let start = document.row_code_start(self.viewport.mode, row, side)?;
         Some((start, start.saturating_add(text_cell_width(text))))
@@ -2732,6 +2850,91 @@ mod tests {
         let selection = viewer.selection.expect("visual selection");
         assert!(selection.contains_row_on_side(first_row, DiffSide::Right));
         assert!(selection.contains_row_on_side(second_row, DiffSide::Right));
+    }
+
+    #[test]
+    fn word_motion_treats_expanded_context_rows_as_text_rows() {
+        let mut document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn one() {}\n+fn ONE() {}\n@@ -4 +4 @@\n-fn four() {}\n+fn FOUR() {}\n",
+        );
+        document.apply_file_source_syntax(
+            0,
+            Some(vec![
+                "fn one() {}".to_string(),
+                "let expanded_alpha = beta;".to_string(),
+                "fn three() {}".to_string(),
+                "fn four() {}".to_string(),
+            ]),
+            Some(vec![
+                "fn ONE() {}".to_string(),
+                "let expanded_alpha = beta;".to_string(),
+                "fn three() {}".to_string(),
+                "fn FOUR() {}".to_string(),
+            ]),
+            None,
+            None,
+        );
+        let collapsed_row = document
+            .rows(DiffMode::Split)
+            .iter()
+            .position(|row| matches!(row, crate::RowRef::Collapsed { .. }))
+            .expect("collapsed gap");
+        assert!(document.expand_collapsed_row(DiffMode::Split, collapsed_row));
+
+        let expanded_row = collapsed_row;
+        let code_start = document
+            .row_code_start(DiffMode::Split, expanded_row, DiffSide::Right)
+            .expect("expanded code start");
+        let mut viewer = DiffViewerState::default();
+        viewer.viewport.mode = DiffMode::Split;
+        viewer.viewport.height = 10;
+        viewer.cursor.row = expanded_row;
+        viewer.cursor.side = DiffSide::Right;
+        viewer.cursor.col = code_start;
+
+        assert!(viewer.move_word(&document, DiffWordMotion::NextStart { big: false }));
+        assert_eq!(viewer.cursor.row, expanded_row);
+        assert_eq!(viewer.cursor.col, code_start + "let ".len());
+    }
+
+    #[test]
+    fn split_side_switch_treats_expanded_context_rows_as_text_rows() {
+        let mut document = parse_unified_diff(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-fn one() {}\n+fn ONE() {}\n@@ -3 +3 @@\n-fn three() {}\n+fn THREE() {}\n",
+        );
+        document.apply_file_source_syntax(
+            0,
+            Some(vec![
+                "fn one() {}".to_string(),
+                "let same = row;".to_string(),
+                "fn three() {}".to_string(),
+            ]),
+            Some(vec![
+                "fn ONE() {}".to_string(),
+                "let same = row;".to_string(),
+                "fn THREE() {}".to_string(),
+            ]),
+            None,
+            None,
+        );
+        let collapsed_row = document
+            .rows(DiffMode::Split)
+            .iter()
+            .position(|row| matches!(row, crate::RowRef::Collapsed { .. }))
+            .expect("collapsed gap");
+        assert!(document.expand_collapsed_row(DiffMode::Split, collapsed_row));
+
+        let mut viewer = DiffViewerState::default();
+        viewer.viewport.mode = DiffMode::Split;
+        viewer.cursor.row = collapsed_row;
+        viewer.cursor.side = DiffSide::Right;
+        viewer.cursor.col = document
+            .row_code_start(DiffMode::Split, collapsed_row, DiffSide::Right)
+            .expect("right code start")
+            + 4;
+
+        assert!(viewer.switch_side(&document));
+        assert_eq!(viewer.cursor.side, DiffSide::Left);
     }
 
     #[test]

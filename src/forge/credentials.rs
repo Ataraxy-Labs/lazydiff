@@ -19,55 +19,49 @@ fn file_path(service: &str) -> PathBuf {
     data_dir().join(format!("{forge_name}-auth.json"))
 }
 
-/// Store a token in the OS keyring, falling back to a JSON file if the
-/// keyring is unavailable.
+/// Store a token to both the local file and (best-effort) the OS keyring.
+/// The file is the primary store so that subsequent reads never trigger a
+/// keychain prompt.
 pub(crate) fn store_token(service: &str, token: &str) -> Result<(), String> {
-    if let Ok(entry) = keyring_entry(service)
-        && entry.set_password(token).is_ok()
-    {
-        return Ok(());
+    // Always persist to file so reads never need the keyring.
+    store_token_to_file(service, token)?;
+
+    // Best-effort write to keyring for other tools (e.g. gh CLI) to find.
+    if let Ok(entry) = keyring_entry(service) {
+        let _ = entry.set_password(token);
     }
 
-    if !plaintext_token_fallback_enabled() {
-        return Err(
-            "failed to store token in the OS keychain. Set LAZYDIFF_ALLOW_PLAINTEXT_TOKEN=1 to use the legacy plaintext token file fallback."
-                .to_string(),
-        );
-    }
-
-    store_token_to_file(service, token)
+    Ok(())
 }
 
-/// Load a token, trying the OS keyring first and then the JSON file.
-/// If the token is found in the file but not in the keyring, it is
-/// migrated into the keyring and stripped from the file.
+/// Load a token. Reads from the local file first so the OS keychain is
+/// never accessed during normal startup. Falls back to the keyring only
+/// when the file is missing (e.g. first run after migrating from an older
+/// version that only stored in keyring). If the keyring has the token,
+/// it is copied to the file so the keyring is not needed on the next launch.
 pub(crate) fn load_token(service: &str) -> Option<String> {
-    // Try keyring first.
-    if let Ok(entry) = keyring_entry(service)
-        && let Ok(token) = entry.get_password()
-    {
+    // Try file first — no keychain prompt.
+    if let Some(token) = load_token_from_file(service) {
         return Some(token);
     }
 
-    // Fall back to file.
-    let path = file_path(service);
-    let raw = fs::read_to_string(&path).ok()?;
-    let mut map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw).ok()?;
-    let token = map.get("token")?.as_str()?.to_string();
-
-    // Attempt to migrate the token into the keyring.
+    // Fall back to keyring (may trigger a macOS Keychain prompt).
     if let Ok(entry) = keyring_entry(service)
-        && entry.set_password(&token).is_ok()
+        && let Ok(token) = entry.get_password()
     {
-        map.remove("token");
-        if map.is_empty() {
-            let _ = fs::remove_file(&path);
-        } else if let Ok(json) = serde_json::to_string_pretty(&map) {
-            let _ = fs::write(&path, json);
-        }
+        // Cache to file so the next launch skips the keyring.
+        let _ = store_token_to_file(service, &token);
+        return Some(token);
     }
 
-    Some(token)
+    None
+}
+
+fn load_token_from_file(service: &str) -> Option<String> {
+    let path = file_path(service);
+    let raw = fs::read_to_string(&path).ok()?;
+    let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw).ok()?;
+    map.get("token")?.as_str().map(|s| s.to_string())
 }
 
 /// Delete a token from both the OS keyring and the JSON file.
@@ -90,15 +84,6 @@ pub(crate) fn delete_token(service: &str) -> Result<bool, String> {
     }
 
     Ok(removed)
-}
-
-fn plaintext_token_fallback_enabled() -> bool {
-    env::var("LAZYDIFF_ALLOW_PLAINTEXT_TOKEN").is_ok_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 fn store_token_to_file(service: &str, token: &str) -> Result<(), String> {
