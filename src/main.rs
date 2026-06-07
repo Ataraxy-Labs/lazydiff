@@ -943,6 +943,7 @@ fn update_from_latest_release() -> Result<()> {
     );
     let client = reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(60))
         .build()?;
     let checksum_body = client
         .get(&checksum_asset.browser_download_url)
@@ -967,6 +968,7 @@ fn update_from_latest_release() -> Result<()> {
 fn latest_release() -> Result<ReleaseResponse> {
     Ok(reqwest::blocking::Client::builder()
         .user_agent("lazydiff")
+        .timeout(Duration::from_secs(15))
         .build()?
         .get("https://api.github.com/repos/Ataraxy-Labs/lazydiff/releases/latest")
         .header("Accept", "application/vnd.github+json")

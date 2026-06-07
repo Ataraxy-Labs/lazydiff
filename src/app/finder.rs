@@ -100,14 +100,14 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.file_picker_open = false;
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 self.file_picker_selection = self
                     .file_picker_selection
                     .saturating_add(1)
                     .min(filtered_len.saturating_sub(1));
                 self.file_picker_preview_scroll = 0;
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 self.file_picker_selection = self.file_picker_selection.saturating_sub(1);
                 self.file_picker_preview_scroll = 0;
             }

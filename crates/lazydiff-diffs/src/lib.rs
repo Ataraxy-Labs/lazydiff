@@ -1482,14 +1482,27 @@ pub fn parse_unified_diff(input: &str) -> DiffDocument {
 
         if let Some(rest) = raw.strip_prefix("--- ") {
             if let Some(file) = current.as_mut() {
-                file.old_path = Some(clean_diff_path(rest));
+                let path = clean_diff_path(rest);
+                file.old_path = if path == "/dev/null" {
+                    None
+                } else {
+                    Some(path)
+                };
             }
             continue;
         }
 
         if let Some(rest) = raw.strip_prefix("+++ ") {
             if let Some(file) = current.as_mut() {
-                file.new_path = clean_diff_path(rest);
+                let path = clean_diff_path(rest);
+                if path == "/dev/null" {
+                    // Deletion: keep identity from old_path
+                    if let Some(old) = &file.old_path {
+                        file.new_path = old.clone();
+                    }
+                } else {
+                    file.new_path = path;
+                }
             }
             continue;
         }
@@ -4003,5 +4016,45 @@ mod tests {
         assert_eq!(windows[0].old_end, Some(901));
         assert_eq!(windows[0].new_start, Some(900));
         assert_eq!(windows[0].new_end, Some(901));
+    }
+
+    #[test]
+    fn deleted_file_uses_real_path_not_dev_null() {
+        let document = parse_unified_diff(
+            "diff --git a/docs/foo.md b/docs/foo.md\n\
+             deleted file mode 100644\n\
+             --- a/docs/foo.md\n\
+             +++ /dev/null\n\
+             @@ -1,2 +0,0 @@\n\
+             -line one\n\
+             -line two\n",
+        );
+        let file = &document.files[0];
+        assert_eq!(file.old_path, Some("docs/foo.md".to_string()));
+        assert_eq!(file.new_path, "docs/foo.md");
+
+        let meta = crate::metadata::build_file_metadata(file);
+        assert_eq!(meta.kind, crate::metadata::FileDiffKind::Deleted);
+        assert_eq!(meta.name, "docs/foo.md");
+    }
+
+    #[test]
+    fn added_file_has_no_old_path() {
+        let document = parse_unified_diff(
+            "diff --git a/new_file.rs b/new_file.rs\n\
+             new file mode 100644\n\
+             --- /dev/null\n\
+             +++ b/new_file.rs\n\
+             @@ -0,0 +1,2 @@\n\
+             +line one\n\
+             +line two\n",
+        );
+        let file = &document.files[0];
+        assert_eq!(file.old_path, None);
+        assert_eq!(file.new_path, "new_file.rs");
+
+        let meta = crate::metadata::build_file_metadata(file);
+        assert_eq!(meta.kind, crate::metadata::FileDiffKind::New);
+        assert_eq!(meta.name, "new_file.rs");
     }
 }
