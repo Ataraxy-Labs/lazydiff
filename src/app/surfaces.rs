@@ -374,19 +374,28 @@ impl App {
             return;
         }
         fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(palette.bg));
-        let [status, status_gap, risk, risk_gap, changes, changes_gap, semantic, semantic_gap, questions] =
-            Layout::vertical([
-                Constraint::Length(5),
-                Constraint::Length(1),
-                Constraint::Length(6),
-                Constraint::Length(1),
-                Constraint::Min(8),
-                Constraint::Length(1),
-                Constraint::Length(8),
-                Constraint::Length(1),
-                Constraint::Length(8),
-            ])
-            .areas(area);
+        let [
+            status,
+            status_gap,
+            risk,
+            risk_gap,
+            changes,
+            changes_gap,
+            semantic,
+            semantic_gap,
+            questions,
+        ] = Layout::vertical([
+            Constraint::Length(5),
+            Constraint::Length(1),
+            Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Min(8),
+            Constraint::Length(1),
+            Constraint::Length(8),
+            Constraint::Length(1),
+            Constraint::Length(8),
+        ])
+        .areas(area);
         for gap in [status_gap, risk_gap, changes_gap, semantic_gap] {
             fill_rect(frame.buffer_mut(), gap, " ", Style::new().bg(palette.bg));
         }
@@ -407,15 +416,27 @@ impl App {
         let key = palette.text(TextRole::Key).bg(palette.bg);
         let (viewed, total) = self.review_sidebar_progress_counts();
         let rows = [
-            format!("{} files  +{} -{}", self.document.files.len(), self.document.additions(), self.document.deletions()),
+            format!(
+                "{} files  +{} -{}",
+                self.document.files.len(),
+                self.document.additions(),
+                self.document.deletions()
+            ),
             format!("{viewed}/{total} viewed"),
-            format!("{} open  {} resolved", self.session.open_count(), self.session.resolved_count()),
+            format!(
+                "{} open  {} resolved",
+                self.session.open_count(),
+                self.session.resolved_count()
+            ),
         ];
         for (index, row) in rows.iter().take(inner.height as usize).enumerate() {
             frame.render_widget(
                 Line::from(vec![
                     Span::styled(" • ", key),
-                    Span::styled(truncate(row, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                    Span::styled(
+                        truncate(row, inner.width.saturating_sub(3) as usize).to_string(),
+                        muted,
+                    ),
                 ]),
                 Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
             );
@@ -426,7 +447,10 @@ impl App {
         self.render_review_map_box(frame, area, "Risk", false, palette);
         let inner = inner_box(area);
         let muted = palette.text(TextRole::Muted).bg(palette.bg);
-        let hot = Style::new().fg(palette.orange).bg(palette.bg).add_modifier(Modifier::BOLD);
+        let hot = Style::new()
+            .fg(palette.orange)
+            .bg(palette.bg)
+            .add_modifier(Modifier::BOLD);
         let current = self.current_file_path().unwrap_or("current file");
         let source = match self.diff_source {
             DiffSource::LocalWorktree(_) => "local worktree",
@@ -443,7 +467,10 @@ impl App {
             frame.render_widget(
                 Line::from(vec![
                     Span::styled(if index == 0 { " ● " } else { " ○ " }, hot),
-                    Span::styled(truncate(row, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                    Span::styled(
+                        truncate(row, inner.width.saturating_sub(3) as usize).to_string(),
+                        muted,
+                    ),
                 ]),
                 Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
             );
@@ -459,12 +486,17 @@ impl App {
         let mut labels = rows
             .iter()
             .filter_map(|row| match row {
-                SemanticTreeRow::File { name, change_count, .. } => {
-                    Some(format!("{name}  {change_count}"))
-                }
-                SemanticTreeRow::Entity { entity_name, entity_type, .. } => {
-                    Some(format!("{} {entity_name}", compact_entity_type(entity_type)))
-                }
+                SemanticTreeRow::File {
+                    name, change_count, ..
+                } => Some(format!("{name}  {change_count}")),
+                SemanticTreeRow::Entity {
+                    entity_name,
+                    entity_type,
+                    ..
+                } => Some(format!(
+                    "{} {entity_name}",
+                    compact_entity_type(entity_type)
+                )),
                 SemanticTreeRow::Status(status) => Some(status.clone()),
                 SemanticTreeRow::Directory { .. } => None,
             })
@@ -476,7 +508,10 @@ impl App {
             frame.render_widget(
                 Line::from(vec![
                     Span::styled(if index == 0 { " ▸ " } else { "   " }, accent),
-                    Span::styled(truncate(label, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                    Span::styled(
+                        truncate(label, inner.width.saturating_sub(3) as usize).to_string(),
+                        muted,
+                    ),
                 ]),
                 Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
             );
@@ -504,7 +539,10 @@ impl App {
             frame.render_widget(
                 Line::from(vec![
                     Span::styled(" • ", key),
-                    Span::styled(truncate(row, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                    Span::styled(
+                        truncate(row, inner.width.saturating_sub(3) as usize).to_string(),
+                        muted,
+                    ),
                 ]),
                 Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
             );
@@ -533,9 +571,17 @@ impl App {
         frame.render_widget(
             Line::from(Span::styled(
                 format!(" {title} "),
-                palette.text(TextRole::Heading).bg(bg).add_modifier(Modifier::BOLD),
+                palette
+                    .text(TextRole::Heading)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
             )),
-            Rect::new(area.x.saturating_add(1), area.y, area.width.saturating_sub(2), 1),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
         );
     }
 
