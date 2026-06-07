@@ -2,12 +2,14 @@ use std::{
     env, fs,
     fs::OpenOptions,
     io::{self, BufRead, BufReader, Write},
-    os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime},
 };
+
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use lazydiff_diffs::{SourceSyntaxHighlighter, SyntaxHighlightKind, SyntaxSpan};
 use ratatui::style::{Color, Modifier, Style};
@@ -274,6 +276,7 @@ impl From<WireSyntaxKind> for SyntaxHighlightKind {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn run_highlight_daemon() -> color_eyre::Result<()> {
     let socket = socket_path();
     if let Some(parent) = socket.parent() {
@@ -300,6 +303,14 @@ pub(crate) fn run_highlight_daemon() -> color_eyre::Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+pub(crate) fn run_highlight_daemon() -> color_eyre::Result<()> {
+    Err(color_eyre::eyre::eyre!(
+        "highlight daemon requires Unix sockets and is not available on this platform"
+    ))
+}
+
+#[cfg(unix)]
 pub(crate) fn request_highlights(request: &HighlightRequest) -> io::Result<HighlightResponse> {
     let mut stream = connect_or_spawn()?;
     serde_json::to_writer(&mut stream, request)?;
@@ -309,6 +320,14 @@ pub(crate) fn request_highlights(request: &HighlightRequest) -> io::Result<Highl
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
     serde_json::from_str(&line).map_err(io::Error::other)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn request_highlights(_request: &HighlightRequest) -> io::Result<HighlightResponse> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "highlight daemon requires Unix sockets",
+    ))
 }
 
 pub(crate) fn cached_highlights(request: &HighlightRequest) -> HighlightResponse {
@@ -322,6 +341,7 @@ pub(crate) fn cached_highlights(request: &HighlightRequest) -> HighlightResponse
     }
 }
 
+#[cfg(unix)]
 fn connect_or_spawn() -> io::Result<UnixStream> {
     let socket = socket_path();
     if let Ok(stream) = UnixStream::connect(&socket) {
@@ -364,6 +384,7 @@ fn connect_or_spawn() -> io::Result<UnixStream> {
     }
 }
 
+#[cfg(unix)]
 fn acquire_spawn_lock() -> io::Result<fs::File> {
     let lock = lock_path();
     if let Some(parent) = lock.parent() {
@@ -387,10 +408,12 @@ fn acquire_spawn_lock() -> io::Result<fs::File> {
     }
 }
 
+#[cfg(unix)]
 fn release_spawn_lock() {
     let _ = fs::remove_file(lock_path());
 }
 
+#[cfg(unix)]
 fn handle_stream(
     mut stream: UnixStream,
     highlighter: &mut SourceSyntaxHighlighter,
@@ -711,6 +734,7 @@ fn source_lines(source: &str) -> Vec<String> {
     source.split('\n').map(ToString::to_string).collect()
 }
 
+#[cfg(unix)]
 fn socket_path() -> PathBuf {
     let mut dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -721,6 +745,7 @@ fn socket_path() -> PathBuf {
     dir
 }
 
+#[cfg(unix)]
 fn lock_path() -> PathBuf {
     let mut path = socket_path();
     path.set_extension("lock");
@@ -730,8 +755,11 @@ fn lock_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
     use std::sync::mpsc;
 
+    #[cfg(unix)]
     #[test]
     fn spawn_lock_allows_only_one_owner_at_a_time() {
         release_spawn_lock();
@@ -750,6 +778,7 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(2)), Ok(true));
     }
 
+    #[cfg(unix)]
     #[test]
     fn active_socket_is_not_removed_as_stale() {
         let socket = socket_path();
