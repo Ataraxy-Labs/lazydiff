@@ -767,6 +767,7 @@ impl App {
 
     fn run_terminal_flow(&mut self, terminal: &mut Tui, flow: TerminalFlow) -> Result<()> {
         disable_raw_mode()?;
+        Self::reset_terminal_cursor_color(terminal.backend_mut())?;
         execute!(
             terminal.backend_mut(),
             DisableMouseCapture,
@@ -806,6 +807,7 @@ impl App {
             TerminalClear(ClearType::All),
             MoveTo(0, 0)
         )?;
+        Self::set_terminal_cursor_color(terminal.backend_mut(), "#ffffff")?;
         enable_raw_mode()?;
         terminal.clear()?;
         while event::poll(Duration::ZERO)? {
@@ -1565,6 +1567,16 @@ impl App {
         };
         execute!(terminal.backend_mut(), style)?;
         Ok(())
+    }
+
+    fn set_terminal_cursor_color(writer: &mut impl Write, color: &str) -> io::Result<()> {
+        write!(writer, "\x1b]12;{color}\x07")?;
+        writer.flush()
+    }
+
+    fn reset_terminal_cursor_color(writer: &mut impl Write) -> io::Result<()> {
+        write!(writer, "\x1b]112\x07")?;
+        writer.flush()
     }
 
     fn debug_key_event(key: KeyEvent) {

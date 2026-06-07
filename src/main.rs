@@ -1,5 +1,6 @@
 use std::{
-    env, fs, io,
+    env, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
@@ -1101,6 +1102,7 @@ type Tui = Terminal<CrosstermBackend<io::Stdout>>;
 fn init_terminal() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    set_terminal_cursor_color(&mut stdout, "#ffffff")?;
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
 }
@@ -1112,8 +1114,19 @@ fn restore_terminal(terminal: &mut Tui) -> Result<()> {
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
+    reset_terminal_cursor_color(terminal.backend_mut())?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+fn set_terminal_cursor_color(writer: &mut impl Write, color: &str) -> io::Result<()> {
+    write!(writer, "\x1b]12;{color}\x07")?;
+    writer.flush()
+}
+
+fn reset_terminal_cursor_color(writer: &mut impl Write) -> io::Result<()> {
+    write!(writer, "\x1b]112\x07")?;
+    writer.flush()
 }
 
 fn bench_scroll_render(path: String, bytes: usize, document: DiffDocument) -> Result<()> {
