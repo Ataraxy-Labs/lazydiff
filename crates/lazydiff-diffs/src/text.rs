@@ -1,6 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::pierre::{selection_style, split_line_cell};
@@ -93,7 +93,10 @@ fn render_styled_text(
     overlays: &[DiffVisualOverlay],
 ) -> u16 {
     let selection_style = selection_style();
-    let cursor_style = selection_style.add_modifier(ratatui::style::Modifier::BOLD);
+    let cursor_style = Style::new()
+        .fg(Color::White)
+        .bg(Color::Rgb(31, 75, 153))
+        .add_modifier(ratatui::style::Modifier::BOLD);
     let search_style = Style::new().fg(theme.bg).bg(theme.add_fg);
     let mut display_column = 0usize;
     let cell = split_line_cell(
@@ -192,4 +195,33 @@ fn fit(text: &str, width: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Modifier;
+
+    #[test]
+    fn cursor_overlay_uses_stable_white_selection_style() {
+        let base = Style::new().fg(Color::Red).bg(Color::Black);
+        let selection = selection_style();
+        let search = Style::new().fg(Color::Black).bg(Color::Yellow);
+        let cursor = Style::new()
+            .fg(Color::White)
+            .bg(Color::Rgb(31, 75, 153))
+            .add_modifier(Modifier::BOLD);
+        let overlays = [DiffVisualOverlay {
+            row: 0,
+            side: crate::DiffSide::Right,
+            range: crate::selection::TextSelectionRange { start: 0, end: 1 },
+            kind: DiffOverlayKind::Cursor,
+        }];
+
+        let style = overlay_style_for(&overlays, 0, 1, base, selection, search, cursor);
+
+        assert_eq!(style.fg, Some(Color::White));
+        assert_eq!(style.bg, Some(Color::Rgb(31, 75, 153)));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
 }

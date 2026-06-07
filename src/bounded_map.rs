@@ -47,6 +47,10 @@ where
         self.map.get(key)
     }
 
+    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.map.get_mut(key)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn contains_key(&self, key: &K) -> bool {
         self.map.contains_key(key)

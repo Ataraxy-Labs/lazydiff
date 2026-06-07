@@ -338,6 +338,15 @@ fn centered_line_rect(area: Rect, y: u16, width: usize) -> Rect {
     Rect::new(x, y, width, 1)
 }
 
+fn inner_box(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
+}
+
 impl App {
     pub(super) fn diff_sidebar_layout(&self, body: Rect) -> (Option<Rect>, Option<Rect>, Rect) {
         if !self.review_sidebar_visible || body.width < 96 {
@@ -352,6 +361,182 @@ impl App {
             body.height,
         );
         (Some(sidebar), None, diff_body)
+    }
+
+    pub(super) fn render_review_map_panel(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        palette: HomePalette,
+    ) {
+        if area.width < 8 || area.height < 18 {
+            self.render_review_sidebar(frame, area, palette);
+            return;
+        }
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(palette.bg));
+        let [status, status_gap, risk, risk_gap, changes, changes_gap, semantic, semantic_gap, questions] =
+            Layout::vertical([
+                Constraint::Length(5),
+                Constraint::Length(1),
+                Constraint::Length(6),
+                Constraint::Length(1),
+                Constraint::Min(8),
+                Constraint::Length(1),
+                Constraint::Length(8),
+                Constraint::Length(1),
+                Constraint::Length(8),
+            ])
+            .areas(area);
+        for gap in [status_gap, risk_gap, changes_gap, semantic_gap] {
+            fill_rect(frame.buffer_mut(), gap, " ", Style::new().bg(palette.bg));
+        }
+        self.render_review_status_box(frame, status, palette);
+        self.render_review_risk_box(frame, risk, palette);
+        self.render_review_sidebar(frame, changes, palette);
+        self.render_semantic_clusters_box(frame, semantic, palette);
+        self.render_review_questions_box(frame, questions, palette);
+    }
+
+    fn render_review_status_box(&self, frame: &mut Frame, area: Rect, palette: HomePalette) {
+        self.render_review_map_box(frame, area, "1 Scope", false, palette);
+        let inner = inner_box(area);
+        if inner.height == 0 {
+            return;
+        }
+        let muted = palette.text(TextRole::Muted).bg(palette.bg);
+        let key = palette.text(TextRole::Key).bg(palette.bg);
+        let (viewed, total) = self.review_sidebar_progress_counts();
+        let rows = [
+            format!("{} files  +{} -{}", self.document.files.len(), self.document.additions(), self.document.deletions()),
+            format!("{viewed}/{total} viewed"),
+            format!("{} open  {} resolved", self.session.open_count(), self.session.resolved_count()),
+        ];
+        for (index, row) in rows.iter().take(inner.height as usize).enumerate() {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(" • ", key),
+                    Span::styled(truncate(row, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                ]),
+                Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+            );
+        }
+    }
+
+    fn render_review_risk_box(&self, frame: &mut Frame, area: Rect, palette: HomePalette) {
+        self.render_review_map_box(frame, area, "Risk", false, palette);
+        let inner = inner_box(area);
+        let muted = palette.text(TextRole::Muted).bg(palette.bg);
+        let hot = Style::new().fg(palette.orange).bg(palette.bg).add_modifier(Modifier::BOLD);
+        let current = self.current_file_path().unwrap_or("current file");
+        let source = match self.diff_source {
+            DiffSource::LocalWorktree(_) => "local worktree",
+            DiffSource::PullRequest { .. } => "pull request",
+            DiffSource::Commit { .. } => "commit snapshot",
+        };
+        let rows = [
+            format!("cursor: {}", truncate_middle(current, 24)),
+            format!("source: {source}"),
+            format!("{} review notes", self.session.notes.len()),
+            "semantic map is local".to_string(),
+        ];
+        for (index, row) in rows.iter().take(inner.height as usize).enumerate() {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(if index == 0 { " ● " } else { " ○ " }, hot),
+                    Span::styled(truncate(row, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                ]),
+                Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+            );
+        }
+    }
+
+    fn render_semantic_clusters_box(&self, frame: &mut Frame, area: Rect, palette: HomePalette) {
+        self.render_review_map_box(frame, area, "Semantic clusters", false, palette);
+        let inner = inner_box(area);
+        let rows = self.semantic_tree_rows(&self.diff_source);
+        let muted = palette.text(TextRole::Muted).bg(palette.bg);
+        let accent = palette.text(TextRole::Key).bg(palette.bg);
+        let mut labels = rows
+            .iter()
+            .filter_map(|row| match row {
+                SemanticTreeRow::File { name, change_count, .. } => {
+                    Some(format!("{name}  {change_count}"))
+                }
+                SemanticTreeRow::Entity { entity_name, entity_type, .. } => {
+                    Some(format!("{} {entity_name}", compact_entity_type(entity_type)))
+                }
+                SemanticTreeRow::Status(status) => Some(status.clone()),
+                SemanticTreeRow::Directory { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        if labels.is_empty() {
+            labels.push("no semantic clusters yet".to_string());
+        }
+        for (index, label) in labels.iter().take(inner.height as usize).enumerate() {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(if index == 0 { " ▸ " } else { "   " }, accent),
+                    Span::styled(truncate(label, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                ]),
+                Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+            );
+        }
+    }
+
+    fn render_review_questions_box(&self, frame: &mut Frame, area: Rect, palette: HomePalette) {
+        self.render_review_map_box(frame, area, "3 Inbox / Actions", false, palette);
+        let inner = inner_box(area);
+        let muted = palette.text(TextRole::Muted).bg(palette.bg);
+        let key = palette.text(TextRole::Key).bg(palette.bg);
+        let mut rows = self
+            .session
+            .notes
+            .iter()
+            .filter(|note| note.state.is_open())
+            .map(|note| format!("? {}", note.summary()))
+            .collect::<Vec<_>>();
+        rows.extend([
+            "3 review inbox".to_string(),
+            "4 commits".to_string(),
+            ": git commands".to_string(),
+        ]);
+        for (index, row) in rows.iter().take(inner.height as usize).enumerate() {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(" • ", key),
+                    Span::styled(truncate(row, inner.width.saturating_sub(3) as usize).to_string(), muted),
+                ]),
+                Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+            );
+        }
+    }
+
+    fn render_review_map_box(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        active: bool,
+        palette: HomePalette,
+    ) {
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+        let bg = palette.bg;
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        let border = if active {
+            palette.theme.colors.border_focused
+        } else {
+            palette.rule
+        };
+        draw_box(frame.buffer_mut(), area, Style::new().fg(border).bg(bg));
+        frame.render_widget(
+            Line::from(Span::styled(
+                format!(" {title} "),
+                palette.text(TextRole::Heading).bg(bg).add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(area.x.saturating_add(1), area.y, area.width.saturating_sub(2), 1),
+        );
     }
 
     pub(super) fn render_review_sidebar(
@@ -381,9 +566,12 @@ impl App {
         };
         let muted = palette.text(TextRole::Muted);
         let key = palette.text(TextRole::Key);
-        let viewed = self.viewed_file_count();
-        let total = self.document.files.len();
-        let title = format!(" Changes {viewed}/{total} ");
+        let (viewed, total) = self.review_sidebar_progress_counts();
+        let title = if self.review_sidebar_unreviewed_only {
+            format!(" Changes {viewed}/{total} · unreviewed ")
+        } else {
+            format!(" Changes {viewed}/{total} ")
+        };
         frame.render_widget(
             Line::from(vec![Span::styled(title, heading)]).style(Style::new().bg(bg)),
             Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1),
@@ -425,14 +613,232 @@ impl App {
                 Span::raw(" "),
                 Span::styled("tab", key),
                 Span::styled(" focus  ", muted),
-                Span::styled("space", key),
+                Span::styled("r", key),
                 Span::styled(" viewed  ", muted),
+                Span::styled("u", key),
+                Span::styled(" unreviewed  ", muted),
                 Span::styled("enter", key),
                 Span::styled(" open", muted),
             ])
             .style(Style::new().bg(bg)),
             Rect::new(inner.x, footer_y, inner.width, 1),
         );
+    }
+
+    pub(super) fn render_diff_nav_strip(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        palette: HomePalette,
+    ) {
+        if area.height < 3 || area.width < 24 {
+            return;
+        }
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(palette.bg));
+        let [status, changes, review, commits] = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(24),
+            Constraint::Percentage(28),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        let (viewed, total) = self.review_sidebar_progress_counts();
+        let mode = match self.diff_buffer.viewer().viewport.mode {
+            DiffMode::Split => "split",
+            DiffMode::Unified => "unified",
+        };
+        self.render_diff_nav_cell(
+            frame,
+            status,
+            "1 Status",
+            &format!(
+                "{} files · +{} -{}",
+                self.document.files.len(),
+                self.document.additions(),
+                self.document.deletions()
+            ),
+            false,
+            palette,
+        );
+        self.render_diff_nav_cell(
+            frame,
+            changes,
+            "2 Changes",
+            &format!("{viewed}/{total} viewed"),
+            self.current_diff_focus() == DiffFocusPane::Sidebar,
+            palette,
+        );
+        self.render_diff_nav_cell(
+            frame,
+            review,
+            "3 Review",
+            &format!(
+                "{} open · {} resolved",
+                self.session.open_count(),
+                self.session.resolved_count()
+            ),
+            false,
+            palette,
+        );
+        self.render_diff_nav_cell(
+            frame,
+            commits,
+            "4 Commits  0 Diff",
+            &format!("J/K hunks · m {mode}"),
+            self.current_diff_focus() != DiffFocusPane::Sidebar,
+            palette,
+        );
+    }
+
+    fn render_diff_nav_cell(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        body: &str,
+        active: bool,
+        palette: HomePalette,
+    ) {
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+        let bg = palette.bg;
+        let border = if active {
+            palette.theme.colors.border_focused
+        } else {
+            palette.rule
+        };
+        draw_box(frame.buffer_mut(), area, Style::new().fg(border).bg(bg));
+        let title_style = if active {
+            palette.text(TextRole::Heading)
+        } else {
+            palette.text(TextRole::Muted)
+        }
+        .bg(bg)
+        .add_modifier(Modifier::BOLD);
+        let body_style = palette.text(TextRole::Muted).bg(bg);
+        let inner_width = area.width.saturating_sub(2) as usize;
+        frame.render_widget(
+            Line::from(Span::styled(
+                truncate(title, inner_width).to_string(),
+                title_style,
+            )),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        frame.render_widget(
+            Line::from(Span::styled(
+                truncate(body, inner_width).to_string(),
+                body_style,
+            )),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+    }
+
+    pub(super) fn render_diff_shell(&self, frame: &mut Frame, area: Rect, palette: HomePalette) {
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+        let bg = palette.bg;
+        let border = if self.current_diff_focus() == DiffFocusPane::Sidebar {
+            palette.rule
+        } else {
+            palette.theme.colors.border_focused
+        };
+        draw_box(frame.buffer_mut(), area, Style::new().fg(border).bg(bg));
+        let path = self
+            .current_file_path()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.diff_source.patch_label());
+        let title = format!(
+            " Diff · {} ",
+            truncate_middle(&path, area.width.saturating_sub(18) as usize)
+        );
+        frame.render_widget(
+            Line::from(Span::styled(
+                title,
+                palette
+                    .text(TextRole::Heading)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+    }
+
+    pub(super) fn render_review_actions_panel(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        palette: HomePalette,
+    ) {
+        if area.width < 8 || area.height < 3 {
+            return;
+        }
+        let bg = palette.bg;
+        fill_rect(frame.buffer_mut(), area, " ", Style::new().bg(bg));
+        draw_box(
+            frame.buffer_mut(),
+            area,
+            Style::new().fg(palette.rule).bg(bg),
+        );
+        let heading = palette
+            .text(TextRole::Heading)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD);
+        let muted = palette.text(TextRole::Muted).bg(bg);
+        let key = palette.text(TextRole::Key).bg(bg);
+        frame.render_widget(
+            Line::from(Span::styled(" Review ", heading)),
+            Rect::new(
+                area.x.saturating_add(1),
+                area.y,
+                area.width.saturating_sub(2),
+                1,
+            ),
+        );
+        let rows = [
+            ("3", "review inbox"),
+            ("4", "commits"),
+            ("r", "mark viewed"),
+            ("u", "unreviewed only"),
+            (":", "git commands"),
+        ];
+        for (index, (shortcut, label)) in rows
+            .iter()
+            .take(area.height.saturating_sub(2) as usize)
+            .enumerate()
+        {
+            frame.render_widget(
+                Line::from(vec![
+                    Span::styled(format!(" {shortcut:<3}"), key),
+                    Span::styled(
+                        truncate(label, area.width.saturating_sub(7) as usize).to_string(),
+                        muted,
+                    ),
+                ]),
+                Rect::new(
+                    area.x.saturating_add(1),
+                    area.y.saturating_add(1 + index as u16),
+                    area.width.saturating_sub(2),
+                    1,
+                ),
+            );
+        }
     }
 
     fn render_review_tree_row(
@@ -1643,8 +2049,7 @@ impl App {
     pub(super) fn should_render_diff_placeholder(&self) -> bool {
         self.document.files.is_empty()
             && (matches!(self.diff_source, DiffSource::PullRequest { .. })
-                || matches!(self.diff_source, DiffSource::Commit { .. })
-                || self.query_client.get(&QueryKey::LocalDiff).is_fetching())
+                || matches!(self.diff_source, DiffSource::Commit { .. }))
     }
 
     pub(super) fn github_summary(&self) -> String {
@@ -2898,12 +3303,20 @@ impl App {
             ])
         } else {
             let mut spans = vec![
-                Span::styled(" esc", key),
-                Span::styled(" clear  ", label),
-                Span::styled("↑↓", key),
-                Span::styled(" line  ", label),
+                Span::styled("1", key),
+                Span::styled(" status  ", label),
+                Span::styled("2", key),
+                Span::styled(" changes  ", label),
+                Span::styled("3", key),
+                Span::styled(" review  ", label),
+                Span::styled("4", key),
+                Span::styled(" commits  ", label),
+                Span::styled("0", key),
+                Span::styled(" diff  ", label),
+                Span::styled("J/K", key),
+                Span::styled(" hunk  ", label),
                 Span::styled("i", key),
-                Span::styled(" comment  ", label),
+                Span::styled(" note  ", label),
             ];
             if matches!(self.diff_source, DiffSource::LocalWorktree(_)) {
                 spans.push(Span::styled("<space>e", key));
@@ -2916,9 +3329,9 @@ impl App {
                 Span::styled(" command  ", label),
                 Span::styled("/", key),
                 Span::styled(" search  ", label),
-                Span::styled("s", key),
+                Span::styled("m", key),
                 Span::styled(format!(" {mode}  "), label),
-                Span::styled("space", key),
+                Span::styled("r", key),
                 Span::styled(" viewed  ", label),
                 Span::styled("v", key),
                 Span::styled(" select  ", label),

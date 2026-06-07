@@ -431,8 +431,9 @@ impl App {
                 .viewer_mut()
                 .focus_row_ensure_visible(&self.document, row);
         } else {
+            self.request_sources_for_collapsed_row(mode, row);
             self.branch_operation_status =
-                Some("unchanged lines not available for this diff".into());
+                Some("loading unchanged lines for this file… press expand again".into());
         }
         self.diff_buffer.viewer_mut().clear_selection();
         self.selecting_text = false;
