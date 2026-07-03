@@ -844,7 +844,7 @@ pub(crate) struct ReviewStore {
 
 impl ReviewStore {
     pub(crate) fn open_default() -> Result<Self> {
-        let mut dir = xdg_data_home();
+        let mut dir = default_data_dir();
         dir.push("lazydiff");
         fs::create_dir_all(&dir)?;
         let path = dir.join("lazydiff.db");
@@ -1400,18 +1400,33 @@ fn parse_diff_side(value: &str) -> DiffSide {
     }
 }
 
-fn xdg_data_home() -> PathBuf {
+fn default_data_dir() -> PathBuf {
     if let Ok(value) = env::var("XDG_DATA_HOME")
         && !value.trim().is_empty()
     {
         return PathBuf::from(value);
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(value) = env::var("LOCALAPPDATA")
+            && !value.trim().is_empty()
+        {
+            return PathBuf::from(value);
+        }
+        if let Ok(value) = env::var("USERPROFILE")
+            && !value.trim().is_empty()
+        {
+            return PathBuf::from(value).join("AppData").join("Local");
+        }
     }
     if let Ok(value) = env::var("HOME")
         && !value.trim().is_empty()
     {
         return PathBuf::from(value).join(".local").join("share");
     }
-    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // Never fall back to the working directory: a stray database inside a
+    // user's repo is worse than one in the temp dir.
+    env::temp_dir()
 }
 
 fn diff_line_kind_name(kind: DiffLineKind) -> &'static str {
